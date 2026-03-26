@@ -22,21 +22,59 @@ const chunkRemoteDir = "pdrive-chunks"
 
 // Engine orchestrates file write and read operations.
 type Engine struct {
-	db     *metadata.DB
-	dbPath string
-	rc     *rclonerc.Client
-	broker *broker.Broker
-	encKey []byte // AES-256 key (32 bytes)
+	db            *metadata.DB
+	dbPath        string
+	rc            *rclonerc.Client
+	broker        *broker.Broker
+	encKey        []byte        // AES-256 key (32 bytes)
+	uploadTokens  chan struct{}  // token bucket: limits upload API calls per second
 }
+
+const (
+	// uploadRatePerSec is the maximum number of chunk-upload API calls per second
+	// across all providers. Google Drive's per-user quota is ~10 req/100s; 8/s
+	// gives comfortable headroom without stalling uploads.
+	uploadRatePerSec  = 8
+	uploadRateBurst   = 4 // initial burst before the ticker kicks in
+)
 
 // NewEngine creates a new engine.
 func NewEngine(db *metadata.DB, dbPath string, rc *rclonerc.Client, b *broker.Broker, encKey []byte) *Engine {
-	return &Engine{
-		db:     db,
-		dbPath: dbPath,
-		rc:     rc,
-		broker: b,
-		encKey: encKey,
+	e := &Engine{
+		db:           db,
+		dbPath:       dbPath,
+		rc:           rc,
+		broker:       b,
+		encKey:       encKey,
+		uploadTokens: make(chan struct{}, uploadRateBurst),
+	}
+	// Pre-fill the burst quota.
+	for i := 0; i < uploadRateBurst; i++ {
+		e.uploadTokens <- struct{}{}
+	}
+	// Refill one token every 1/uploadRatePerSec seconds.
+	go func() {
+		ticker := time.NewTicker(time.Second / uploadRatePerSec)
+		for range ticker.C {
+			select {
+			case e.uploadTokens <- struct{}{}:
+			default: // bucket full, discard
+			}
+		}
+	}()
+	return e
+}
+
+// workersForChunkSize returns an appropriate concurrency level for the given
+// chunk size so that peak in-flight memory is bounded to roughly 256 MB.
+func workersForChunkSize(chunkSize int) int {
+	switch {
+	case chunkSize >= 32*1024*1024: // ≥ 32 MB → 1 worker (≤64 MB in-flight)
+		return 1
+	case chunkSize >= 8*1024*1024: // ≥ 8 MB → 2 workers (≤32 MB in-flight)
+		return 2
+	default: // < 8 MB → 3 workers (≤24 MB in-flight)
+		return maxUploadWorkers
 	}
 }
 
@@ -47,7 +85,8 @@ func (e *Engine) WriteFile(virtualPath string, data []byte) error {
 }
 
 const (
-	// maxUploadWorkers controls how many chunk uploads run concurrently.
+	// maxUploadWorkers is the default (small-chunk) concurrency limit; see
+	// workersForChunkSize for how this scales down for larger chunks.
 	maxUploadWorkers = 3
 	// maxUploadRetries is the number of retry attempts for a failed chunk upload.
 	maxUploadRetries = 5
@@ -75,7 +114,7 @@ func (e *Engine) WriteFileStream(virtualPath string, r io.ReadSeeker, size int64
 	}
 	_ = fullHashStr
 
-	metas, err := e.uploadChunks(r, fileID)
+	metas, err := e.uploadChunks(r, fileID, size)
 	if err != nil {
 		return err
 	}
@@ -104,7 +143,7 @@ func (e *Engine) WriteFileAsync(virtualPath string, tmpFile *os.File, tmpPath st
 		defer tmpFile.Close()
 		defer os.Remove(tmpPath)
 
-		metas, err := e.uploadChunks(tmpFile, fileID)
+		metas, err := e.uploadChunks(tmpFile, fileID, size)
 		if err != nil {
 			// Keep the file record so the user can still see and delete the file.
 			slog.Error("background upload failed",
@@ -170,16 +209,21 @@ func (e *Engine) prepareFileWrite(virtualPath string, r io.ReadSeeker, size int6
 }
 
 // uploadChunks reads, encrypts, and uploads chunks concurrently with retry.
+// Chunk size is chosen dynamically based on fileSize to keep the total chunk
+// count near ~100, reducing cloud API calls for large files.
 // Returns the ordered slice of chunk metadata on success.
-func (e *Engine) uploadChunks(r io.ReadSeeker, fileID string) ([]chunkMeta, error) {
-	cr := chunker.NewChunkReader(r, chunker.DefaultChunkSize)
+func (e *Engine) uploadChunks(r io.ReadSeeker, fileID string, fileSize int64) ([]chunkMeta, error) {
+	chunkSize := chunker.ChunkSizeForFile(fileSize)
+	workers := workersForChunkSize(chunkSize)
+	slog.Debug("upload plan", "fileSize", fileSize, "chunkSize", chunkSize, "workers", workers)
+	cr := chunker.NewChunkReader(r, chunkSize)
 
 	var (
 		metas    []chunkMeta
 		mu       sync.Mutex
 		firstErr error
 		wg       sync.WaitGroup
-		sem      = make(chan struct{}, maxUploadWorkers)
+		sem      = make(chan struct{}, workers)
 	)
 
 	for chunkCount := 0; ; chunkCount++ {
@@ -244,6 +288,9 @@ func (e *Engine) uploadChunks(r io.ReadSeeker, fileID string) ([]chunkMeta, erro
 						"seq", seq, "attempt", attempt+1, "backoff", backoff)
 					time.Sleep(backoff)
 				}
+				// Acquire a rate-limit token before each API call (blocks briefly
+				// when the bucket is empty) to avoid bursting past provider quotas.
+				<-e.uploadTokens
 				if err := e.rc.PutFile(prov.RcloneRemote, remote, bytes.NewReader(enc)); err != nil {
 					lastErr = err
 					continue

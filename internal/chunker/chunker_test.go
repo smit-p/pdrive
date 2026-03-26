@@ -189,3 +189,37 @@ func TestFullPipeline(t *testing.T) {
 		t.Error("full pipeline: reassembled data does not match original")
 	}
 }
+
+func TestChunkSizeForFile(t *testing.T) {
+	cases := []struct {
+		name     string
+		fileSize int64
+		wantMin  int
+		wantMax  int
+	}{
+		{"zero", 0, DefaultChunkSize, DefaultChunkSize},
+		{"1 MB", 1 * 1024 * 1024, DefaultChunkSize, DefaultChunkSize},
+		{"100 MB", 100 * 1024 * 1024, DefaultChunkSize, DefaultChunkSize},
+		{"500 MB", 500 * 1024 * 1024, DefaultChunkSize, MaxChunkSize},
+		{"1 GB", 1024 * 1024 * 1024, 8 * 1024 * 1024, MaxChunkSize},
+		{"2 GB", 2 * 1024 * 1024 * 1024, 16 * 1024 * 1024, MaxChunkSize},
+		{"10 GB", 10 * 1024 * 1024 * 1024, MaxChunkSize, MaxChunkSize},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ChunkSizeForFile(tc.fileSize)
+			if got < tc.wantMin || got > tc.wantMax {
+				t.Errorf("ChunkSizeForFile(%d) = %d, want [%d, %d]",
+					tc.fileSize, got, tc.wantMin, tc.wantMax)
+			}
+			// chunk count sanity: should never exceed targetChunkCount*2
+			if tc.fileSize > 0 {
+				chunkCount := int(tc.fileSize)/got + 1
+				if chunkCount > targetChunkCount*2 {
+					t.Errorf("too many chunks: fileSize=%d chunkSize=%d count=%d",
+						tc.fileSize, got, chunkCount)
+				}
+			}
+		})
+	}
+}
