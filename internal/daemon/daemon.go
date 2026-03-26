@@ -3,10 +3,14 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"html"
 	"log/slog"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/smit-p/pdrive/internal/broker"
 	"github.com/smit-p/pdrive/internal/engine"
@@ -89,7 +93,7 @@ func (d *Daemon) Start(ctx context.Context) error {
 
 	d.webdavServer = &http.Server{
 		Addr:    d.config.WebDAVAddr,
-		Handler: handler,
+		Handler: &browserHandler{davHandler: handler, engine: d.engine},
 	}
 
 	go func() {
@@ -127,4 +131,116 @@ func (d *Daemon) Stop() {
 // Engine returns the daemon's engine (useful for testing).
 func (d *Daemon) Engine() *engine.Engine {
 	return d.engine
+}
+
+// browserHandler wraps the WebDAV handler to serve HTML directory listings
+// for browser GET requests, while passing WebDAV methods through normally.
+type browserHandler struct {
+	davHandler http.Handler
+	engine     *engine.Engine
+}
+
+func (h *browserHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Only intercept GET/HEAD with a browser-like Accept header.
+	if (r.Method == "GET" || r.Method == "HEAD") && strings.Contains(r.Header.Get("Accept"), "text/html") {
+		h.serveBrowser(w, r)
+		return
+	}
+	h.davHandler.ServeHTTP(w, r)
+}
+
+func (h *browserHandler) serveBrowser(w http.ResponseWriter, r *http.Request) {
+	p := path.Clean(r.URL.Path)
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+
+	// Check if it's a file — serve the raw content.
+	file, err := h.engine.Stat(p)
+	if err == nil && file != nil {
+		data, err := h.engine.ReadFile(p)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		http.ServeContent(w, r, path.Base(p), time.Unix(file.ModifiedAt, 0), strings.NewReader(string(data)))
+		return
+	}
+
+	// Otherwise treat as directory listing.
+	dirPath := p
+	if dirPath != "/" && !strings.HasSuffix(dirPath, "/") {
+		dirPath += "/"
+	}
+
+	files, dirs, err := h.engine.ListDir(dirPath)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if p != "/" {
+		isDir, _ := h.engine.IsDir(dirPath)
+		if !isDir && len(files) == 0 && len(dirs) == 0 {
+			http.NotFound(w, r)
+			return
+		}
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	fmt.Fprintf(w, `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>pdrive — %s</title>
+<style>
+body { font-family: -apple-system, system-ui, sans-serif; max-width: 700px; margin: 40px auto; padding: 0 20px; color: #333; }
+h1 { font-size: 1.4em; border-bottom: 1px solid #ddd; padding-bottom: 8px; }
+a { color: #0366d6; text-decoration: none; }
+a:hover { text-decoration: underline; }
+table { width: 100%%; border-collapse: collapse; }
+td { padding: 6px 12px 6px 0; border-bottom: 1px solid #eee; }
+td.size { text-align: right; color: #666; font-variant-numeric: tabular-nums; }
+.dir { font-weight: 500; }
+.empty { color: #999; font-style: italic; padding: 20px 0; }
+</style></head><body>
+<h1>📁 %s</h1>`, html.EscapeString(p), html.EscapeString(p))
+
+	if p != "/" {
+		parent := path.Dir(strings.TrimSuffix(p, "/"))
+		if parent == "" {
+			parent = "/"
+		}
+		fmt.Fprintf(w, `<table><tr><td class="dir"><a href="%s">⬆ ..</a></td><td></td></tr>`, html.EscapeString(parent))
+	} else {
+		fmt.Fprint(w, `<table>`)
+	}
+
+	for _, d := range dirs {
+		link := path.Join(p, d) + "/"
+		fmt.Fprintf(w, `<tr><td class="dir"><a href="%s">📁 %s/</a></td><td class="size">—</td></tr>`,
+			html.EscapeString(link), html.EscapeString(d))
+	}
+	for _, f := range files {
+		name := path.Base(f.VirtualPath)
+		link := path.Join(p, name)
+		fmt.Fprintf(w, `<tr><td><a href="%s">📄 %s</a></td><td class="size">%s</td></tr>`,
+			html.EscapeString(link), html.EscapeString(name), formatSize(f.SizeBytes))
+	}
+
+	if len(dirs) == 0 && len(files) == 0 {
+		fmt.Fprint(w, `<tr><td colspan="2" class="empty">This directory is empty</td></tr>`)
+	}
+
+	fmt.Fprint(w, `</table></body></html>`)
+}
+
+func formatSize(b int64) string {
+	switch {
+	case b >= 1<<30:
+		return fmt.Sprintf("%.1f GB", float64(b)/float64(1<<30))
+	case b >= 1<<20:
+		return fmt.Sprintf("%.1f MB", float64(b)/float64(1<<20))
+	case b >= 1<<10:
+		return fmt.Sprintf("%.1f KB", float64(b)/float64(1<<10))
+	default:
+		return fmt.Sprintf("%d B", b)
+	}
 }
