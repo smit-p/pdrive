@@ -35,6 +35,11 @@ CREATE TABLE IF NOT EXISTS chunk_locations (
     PRIMARY KEY (chunk_id, provider_id)
 );
 
+CREATE TABLE IF NOT EXISTS directories (
+    path TEXT PRIMARY KEY,
+    created_at INTEGER NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_files_virtual_path ON files(virtual_path);
 CREATE INDEX IF NOT EXISTS idx_chunks_file_id ON chunks(file_id);
 CREATE INDEX IF NOT EXISTS idx_chunk_locations_chunk_id ON chunk_locations(chunk_id);

@@ -75,9 +75,26 @@ func (d *Daemon) Start(ctx context.Context) error {
 		return fmt.Errorf("starting rclone: %w", err)
 	}
 
+	// If local DB is empty, try to restore from a cloud backup.
+	var fileCount int
+	d.db.Conn().QueryRow("SELECT COUNT(*) FROM files").Scan(&fileCount)
+	var provCount int
+	d.db.Conn().QueryRow("SELECT COUNT(*) FROM providers").Scan(&provCount)
+	if fileCount == 0 && provCount == 0 {
+		if restored := d.tryRestoreDB(dbPath); restored {
+			// Reopen the DB after restore.
+			d.db.Close()
+			db, err = metadata.Open(dbPath)
+			if err != nil {
+				return fmt.Errorf("reopening restored DB: %w", err)
+			}
+			d.db = db
+		}
+	}
+
 	// Create engine.
 	b := broker.NewBroker(d.db)
-	d.engine = engine.NewEngine(d.db, d.rclone.Client(), b, d.config.EncKey)
+	d.engine = engine.NewEngine(d.db, dbPath, d.rclone.Client(), b, d.config.EncKey)
 
 	// Start WebDAV server.
 	davFS := vfs.NewWebDAVFS(d.engine)
@@ -118,6 +135,9 @@ func (d *Daemon) Stop() {
 	if d.webdavServer != nil {
 		d.webdavServer.Close()
 	}
+	if d.engine != nil {
+		d.engine.FlushBackup()
+	}
 	if d.rclone != nil {
 		d.rclone.Stop()
 	}
@@ -131,6 +151,29 @@ func (d *Daemon) Stop() {
 // Engine returns the daemon's engine (useful for testing).
 func (d *Daemon) Engine() *engine.Engine {
 	return d.engine
+}
+
+// tryRestoreDB attempts to download a metadata DB backup from any configured rclone remote.
+// Returns true if a backup was found and restored.
+func (d *Daemon) tryRestoreDB(dbPath string) bool {
+	remotes, err := d.rclone.Client().ListRemotes()
+	if err != nil {
+		slog.Debug("could not list rclone remotes for DB restore", "error", err)
+		return false
+	}
+	for _, remote := range remotes {
+		data, err := d.rclone.Client().GetFile(remote, "pdrive-meta/metadata.db")
+		if err != nil || len(data) == 0 {
+			continue
+		}
+		if err := os.WriteFile(dbPath, data, 0600); err != nil {
+			slog.Warn("failed to write restored DB", "error", err)
+			continue
+		}
+		slog.Info("metadata DB restored from cloud", "remote", remote, "size", len(data))
+		return true
+	}
+	return false
 }
 
 // browserHandler wraps the WebDAV handler to serve HTML directory listings

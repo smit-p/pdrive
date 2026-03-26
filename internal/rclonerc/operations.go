@@ -133,3 +133,18 @@ func (c *Client) ListDir(remote, remotePath string) ([]ListItem, error) {
 	}
 	return resp.List, nil
 }
+
+// ListRemotes returns all configured rclone remote names.
+func (c *Client) ListRemotes() ([]string, error) {
+	result, err := c.call("config/listremotes", map[string]interface{}{})
+	if err != nil {
+		return nil, fmt.Errorf("listing remotes: %w", err)
+	}
+	var resp struct {
+		Remotes []string `json:"remotes"`
+	}
+	if err := json.Unmarshal(result, &resp); err != nil {
+		return nil, fmt.Errorf("parsing listremotes response: %w", err)
+	}
+	return resp.Remotes, nil
+}

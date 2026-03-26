@@ -21,15 +21,17 @@ const chunkRemoteDir = "pdrive-chunks"
 // Engine orchestrates file write and read operations.
 type Engine struct {
 	db     *metadata.DB
+	dbPath string
 	rc     *rclonerc.Client
 	broker *broker.Broker
 	encKey []byte // AES-256 key (32 bytes)
 }
 
 // NewEngine creates a new engine.
-func NewEngine(db *metadata.DB, rc *rclonerc.Client, b *broker.Broker, encKey []byte) *Engine {
+func NewEngine(db *metadata.DB, dbPath string, rc *rclonerc.Client, b *broker.Broker, encKey []byte) *Engine {
 	return &Engine{
 		db:     db,
+		dbPath: dbPath,
 		rc:     rc,
 		broker: b,
 		encKey: encKey,
@@ -125,6 +127,7 @@ func (e *Engine) WriteFile(virtualPath string, data []byte) error {
 	}
 
 	slog.Info("file written", "path", virtualPath, "size", len(data), "chunks", len(chunks))
+	e.scheduleBackup()
 	return nil
 }
 
@@ -216,6 +219,47 @@ func (e *Engine) DeleteFile(virtualPath string) error {
 	}
 
 	slog.Info("file deleted", "path", virtualPath)
+	e.scheduleBackup()
+	return nil
+}
+
+// MkDir creates an explicit directory record.
+func (e *Engine) MkDir(dirPath string) error {
+	return e.db.CreateDirectory(dirPath)
+}
+
+// DeleteDir recursively deletes a directory: all files, cloud chunks, and directory records.
+func (e *Engine) DeleteDir(dirPath string) error {
+	files, err := e.db.GetFilesUnderDir(dirPath)
+	if err != nil {
+		return fmt.Errorf("listing files under %s: %w", dirPath, err)
+	}
+	for _, f := range files {
+		if err := e.deleteFileChunks(f.ID); err != nil {
+			slog.Warn("failed to delete chunks", "file", f.VirtualPath, "error", err)
+		}
+		if err := e.db.DeleteFile(f.ID); err != nil {
+			slog.Warn("failed to delete file record", "file", f.VirtualPath, "error", err)
+		}
+	}
+	if err := e.db.DeleteDirectoriesUnder(dirPath); err != nil {
+		return fmt.Errorf("deleting directory records: %w", err)
+	}
+	slog.Info("directory deleted", "path", dirPath)
+	e.scheduleBackup()
+	return nil
+}
+
+// RenameDir renames a directory and all its contents in the metadata DB.
+func (e *Engine) RenameDir(oldPath, newPath string) error {
+	if err := e.db.RenameFilesUnderDir(oldPath, newPath); err != nil {
+		return fmt.Errorf("renaming files: %w", err)
+	}
+	if err := e.db.RenameDirectoriesUnder(oldPath, newPath); err != nil {
+		return fmt.Errorf("renaming directories: %w", err)
+	}
+	slog.Info("directory renamed", "old", oldPath, "new", newPath)
+	e.scheduleBackup()
 	return nil
 }
 

@@ -32,11 +32,11 @@ func cleanPath(name string) string {
 	return p
 }
 
-// Mkdir creates a virtual directory. Since directories are implicit (derived from file paths),
-// this is a no-op that succeeds.
+// Mkdir creates a virtual directory.
 func (fs *WebDAVFS) Mkdir(ctx context.Context, name string, perm os.FileMode) error {
+	name = cleanPath(name)
 	slog.Debug("webdav mkdir", "name", name)
-	return nil
+	return fs.engine.MkDir(name)
 }
 
 // OpenFile opens a file for reading or writing.
@@ -79,18 +79,28 @@ func (fs *WebDAVFS) OpenFile(ctx context.Context, name string, flag int, perm os
 	}, nil
 }
 
-// RemoveAll removes a file or directory.
+// RemoveAll removes a file or directory (recursively).
 func (fs *WebDAVFS) RemoveAll(ctx context.Context, name string) error {
 	name = cleanPath(name)
 	slog.Debug("webdav remove", "name", name)
+
+	isDir, _ := fs.engine.IsDir(name)
+	if isDir {
+		return fs.engine.DeleteDir(name)
+	}
 	return fs.engine.DeleteFile(name)
 }
 
-// Rename renames/moves a file.
+// Rename renames/moves a file or directory.
 func (fs *WebDAVFS) Rename(ctx context.Context, oldName, newName string) error {
 	oldName = cleanPath(oldName)
 	newName = cleanPath(newName)
 	slog.Debug("webdav rename", "old", oldName, "new", newName)
+
+	isDir, _ := fs.engine.IsDir(oldName)
+	if isDir {
+		return fs.engine.RenameDir(oldName, newName)
+	}
 
 	// Read old file, write to new path, delete old — simple but works for v0.
 	data, err := fs.engine.ReadFile(oldName)

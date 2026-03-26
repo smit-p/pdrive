@@ -201,33 +201,67 @@ func (db *DB) ListSubdirectories(dirPath string) ([]string, error) {
 	if !strings.HasSuffix(dirPath, "/") {
 		dirPath += "/"
 	}
+	cleanDirPath := strings.TrimSuffix(dirPath, "/")
 
-	rows, err := db.conn.Query(
-		`SELECT DISTINCT virtual_path FROM files WHERE virtual_path LIKE ? || '%'`, dirPath,
+	seen := make(map[string]bool)
+
+	// 1. Explicit directories that are immediate children.
+	dirRows, err := db.conn.Query(`SELECT path FROM directories WHERE path LIKE ?`, dirPath+"%")
+	if err != nil {
+		return nil, err
+	}
+	for dirRows.Next() {
+		var p string
+		if err := dirRows.Scan(&p); err != nil {
+			dirRows.Close()
+			return nil, err
+		}
+		var rel string
+		if cleanDirPath == "" {
+			rel = strings.TrimPrefix(p, "/")
+		} else {
+			rel = strings.TrimPrefix(p, cleanDirPath+"/")
+		}
+		if idx := strings.Index(rel, "/"); idx >= 0 {
+			rel = rel[:idx]
+		}
+		if rel != "" {
+			seen[rel] = true
+		}
+	}
+	dirRows.Close()
+	if err := dirRows.Err(); err != nil {
+		return nil, err
+	}
+
+	// 2. Implicit directories from file paths.
+	fileRows, err := db.conn.Query(
+		`SELECT DISTINCT virtual_path FROM files WHERE virtual_path LIKE ?`, dirPath+"%",
 	)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	seen := make(map[string]bool)
-	for rows.Next() {
+	for fileRows.Next() {
 		var vpath string
-		if err := rows.Scan(&vpath); err != nil {
+		if err := fileRows.Scan(&vpath); err != nil {
+			fileRows.Close()
 			return nil, err
 		}
 		rel := strings.TrimPrefix(vpath, dirPath)
 		if idx := strings.Index(rel, "/"); idx >= 0 {
-			subdir := rel[:idx]
-			seen[subdir] = true
+			seen[rel[:idx]] = true
 		}
+	}
+	fileRows.Close()
+	if err := fileRows.Err(); err != nil {
+		return nil, err
 	}
 
 	var dirs []string
 	for d := range seen {
 		dirs = append(dirs, d)
 	}
-	return dirs, rows.Err()
+	return dirs, nil
 }
 
 // UpsertProvider inserts or updates a provider record.
@@ -315,14 +349,27 @@ func (db *DB) FileExists(virtualPath string) (bool, error) {
 	return count > 0, err
 }
 
-// PathIsDir checks if any files exist under the given directory path.
+// PathIsDir checks if a path is a directory (explicit or implicit from file paths).
 func (db *DB) PathIsDir(dirPath string) (bool, error) {
-	if !strings.HasSuffix(dirPath, "/") {
-		dirPath += "/"
+	cleanDir := strings.TrimSuffix(dirPath, "/")
+	if cleanDir == "" {
+		return true, nil
 	}
-	var count int
-	err := db.conn.QueryRow(`SELECT COUNT(*) FROM files WHERE virtual_path LIKE ? || '%'`, dirPath).Scan(&count)
-	return count > 0, err
+
+	// Check explicit directories.
+	var dirCount int
+	if err := db.conn.QueryRow(`SELECT COUNT(*) FROM directories WHERE path = ?`, cleanDir).Scan(&dirCount); err != nil {
+		return false, err
+	}
+	if dirCount > 0 {
+		return true, nil
+	}
+
+	// Check implicit directories (files under this path).
+	prefix := cleanDir + "/"
+	var fileCount int
+	err := db.conn.QueryRow(`SELECT COUNT(*) FROM files WHERE virtual_path LIKE ?`, prefix+"%").Scan(&fileCount)
+	return fileCount > 0, err
 }
 
 // VirtualDir returns the parent directory of a path.
@@ -332,4 +379,96 @@ func VirtualDir(virtualPath string) string {
 		return "/"
 	}
 	return dir
+}
+
+// CreateDirectory records an explicit directory.
+func (db *DB) CreateDirectory(dirPath string) error {
+	dirPath = strings.TrimSuffix(dirPath, "/")
+	if dirPath == "" {
+		return nil // root always exists
+	}
+	now := time.Now().Unix()
+	_, err := db.conn.Exec(
+		`INSERT OR IGNORE INTO directories (path, created_at) VALUES (?, ?)`,
+		dirPath, now,
+	)
+	return err
+}
+
+// DirectoryExists checks if an explicit directory record exists.
+func (db *DB) DirectoryExists(dirPath string) (bool, error) {
+	dirPath = strings.TrimSuffix(dirPath, "/")
+	if dirPath == "" {
+		return true, nil
+	}
+	var count int
+	err := db.conn.QueryRow(`SELECT COUNT(*) FROM directories WHERE path = ?`, dirPath).Scan(&count)
+	return count > 0, err
+}
+
+// DeleteDirectory deletes an explicit directory record.
+func (db *DB) DeleteDirectory(dirPath string) error {
+	dirPath = strings.TrimSuffix(dirPath, "/")
+	_, err := db.conn.Exec(`DELETE FROM directories WHERE path = ?`, dirPath)
+	return err
+}
+
+// DeleteDirectoriesUnder deletes all explicit directory records under (and including) a prefix.
+func (db *DB) DeleteDirectoriesUnder(dirPath string) error {
+	dirPath = strings.TrimSuffix(dirPath, "/")
+	_, err := db.conn.Exec(`DELETE FROM directories WHERE path = ? OR path LIKE ?`,
+		dirPath, dirPath+"/%")
+	return err
+}
+
+// GetFilesUnderDir returns all files with virtual_path starting with dirPath/.
+func (db *DB) GetFilesUnderDir(dirPath string) ([]File, error) {
+	prefix := strings.TrimSuffix(dirPath, "/") + "/"
+	rows, err := db.conn.Query(
+		`SELECT id, virtual_path, size_bytes, created_at, modified_at, sha256_full
+		 FROM files WHERE virtual_path LIKE ?`, prefix+"%",
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var files []File
+	for rows.Next() {
+		var f File
+		if err := rows.Scan(&f.ID, &f.VirtualPath, &f.SizeBytes, &f.CreatedAt, &f.ModifiedAt, &f.SHA256Full); err != nil {
+			return nil, err
+		}
+		files = append(files, f)
+	}
+	return files, rows.Err()
+}
+
+// RenameFilesUnderDir renames all files under oldDir to be under newDir.
+func (db *DB) RenameFilesUnderDir(oldDir, newDir string) error {
+	oldPrefix := strings.TrimSuffix(oldDir, "/") + "/"
+	newPrefix := strings.TrimSuffix(newDir, "/") + "/"
+	_, err := db.conn.Exec(
+		`UPDATE files SET virtual_path = ? || SUBSTR(virtual_path, ?)
+		 WHERE virtual_path LIKE ?`,
+		newPrefix, len(oldPrefix)+1, oldPrefix+"%",
+	)
+	return err
+}
+
+// RenameDirectoriesUnder renames directory records from oldDir to newDir.
+func (db *DB) RenameDirectoriesUnder(oldDir, newDir string) error {
+	oldDir = strings.TrimSuffix(oldDir, "/")
+	newDir = strings.TrimSuffix(newDir, "/")
+	// Rename the directory itself.
+	_, err := db.conn.Exec(`UPDATE directories SET path = ? WHERE path = ?`, newDir, oldDir)
+	if err != nil {
+		return err
+	}
+	// Rename subdirectories.
+	_, err = db.conn.Exec(
+		`UPDATE directories SET path = ? || SUBSTR(path, ?)
+		 WHERE path LIKE ?`,
+		newDir, len(oldDir)+1, oldDir+"/%",
+	)
+	return err
 }
