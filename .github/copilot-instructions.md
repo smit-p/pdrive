@@ -36,6 +36,7 @@ python3 scripts/test_browser.py        # browser HTML listing
 ```
 
 Start the daemon:
+
 ```bash
 ./pdrive daemon --enc-key <64-char-hex> --debug
 ```

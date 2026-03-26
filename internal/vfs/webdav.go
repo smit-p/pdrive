@@ -153,8 +153,10 @@ type webDAVFile struct {
 	size     int64
 	modTime  time.Time
 
-	// Buffered write data.
-	writeData []byte
+	// Write state — uses a temp file instead of in-memory buffer.
+	tmpFile   *os.File
+	tmpPath   string
+	writeSize int64
 
 	// Read state.
 	readData   []byte
@@ -162,12 +164,29 @@ type webDAVFile struct {
 }
 
 func (f *webDAVFile) Close() error {
-	if f.writable && f.writeData != nil {
-		if err := f.fs.engine.WriteFile(f.name, f.writeData); err != nil {
+	if f.writable && f.tmpFile != nil {
+		// Flush and rewind the temp file, then pass it to the engine for streaming processing.
+		if err := f.tmpFile.Sync(); err != nil {
+			f.cleanup()
 			return err
 		}
+		if _, err := f.tmpFile.Seek(0, io.SeekStart); err != nil {
+			f.cleanup()
+			return err
+		}
+		err := f.fs.engine.WriteFileStream(f.name, f.tmpFile, f.writeSize)
+		f.cleanup()
+		return err
 	}
 	return nil
+}
+
+func (f *webDAVFile) cleanup() {
+	if f.tmpFile != nil {
+		f.tmpFile.Close()
+		os.Remove(f.tmpPath)
+		f.tmpFile = nil
+	}
 }
 
 func (f *webDAVFile) Read(p []byte) (int, error) {
@@ -198,8 +217,18 @@ func (f *webDAVFile) Write(p []byte) (int, error) {
 	if !f.writable {
 		return 0, fmt.Errorf("file not opened for writing")
 	}
-	f.writeData = append(f.writeData, p...)
-	return len(p), nil
+	// Lazily create temp file on first write.
+	if f.tmpFile == nil {
+		tmp, err := os.CreateTemp("", "pdrive-upload-*")
+		if err != nil {
+			return 0, fmt.Errorf("creating temp file: %w", err)
+		}
+		f.tmpFile = tmp
+		f.tmpPath = tmp.Name()
+	}
+	n, err := f.tmpFile.Write(p)
+	f.writeSize += int64(n)
+	return n, err
 }
 
 func (f *webDAVFile) Seek(offset int64, whence int) (int64, error) {

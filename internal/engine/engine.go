@@ -39,10 +39,25 @@ func NewEngine(db *metadata.DB, dbPath string, rc *rclonerc.Client, b *broker.Br
 }
 
 // WriteFile writes a file to the virtual filesystem, chunking and encrypting it.
+// For small files or when data is already in memory.
 func (e *Engine) WriteFile(virtualPath string, data []byte) error {
-	// Compute full file hash.
-	fullHash := sha256.Sum256(data)
-	fullHashStr := hex.EncodeToString(fullHash[:])
+	return e.WriteFileStream(virtualPath, bytes.NewReader(data), int64(len(data)))
+}
+
+// WriteFileStream writes a file from a stream, processing one chunk at a time.
+// This keeps memory usage constant (~8 MB) regardless of file size.
+func (e *Engine) WriteFileStream(virtualPath string, r io.ReadSeeker, size int64) error {
+	// Pass 1: compute full file hash by streaming through the reader.
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, r); err != nil {
+		return fmt.Errorf("hashing file: %w", err)
+	}
+	fullHashStr := hex.EncodeToString(hasher.Sum(nil))
+
+	// Rewind for pass 2.
+	if _, err := r.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("rewinding reader: %w", err)
+	}
 
 	// Delete existing file if it exists (overwrite).
 	existing, err := e.db.GetFileByPath(virtualPath)
@@ -58,12 +73,6 @@ func (e *Engine) WriteFile(virtualPath string, data []byte) error {
 		}
 	}
 
-	// Split into chunks.
-	chunks, err := chunker.Split(bytes.NewReader(data), chunker.DefaultChunkSize)
-	if err != nil {
-		return fmt.Errorf("splitting file: %w", err)
-	}
-
 	fileID := uuid.New().String()
 	now := time.Now().Unix()
 
@@ -71,7 +80,7 @@ func (e *Engine) WriteFile(virtualPath string, data []byte) error {
 	if err := e.db.InsertFile(&metadata.File{
 		ID:          fileID,
 		VirtualPath: virtualPath,
-		SizeBytes:   int64(len(data)),
+		SizeBytes:   size,
 		CreatedAt:   now,
 		ModifiedAt:  now,
 		SHA256Full:  fullHashStr,
@@ -79,12 +88,24 @@ func (e *Engine) WriteFile(virtualPath string, data []byte) error {
 		return fmt.Errorf("inserting file record: %w", err)
 	}
 
-	// Upload each chunk: encrypt → assign provider → upload → write metadata.
-	for _, chunk := range chunks {
+	// Pass 2: stream through chunks — encrypt → assign → upload → metadata.
+	cr := chunker.NewChunkReader(r, chunker.DefaultChunkSize)
+	chunkCount := 0
+
+	for {
+		chunk, err := cr.Next()
+		if err != nil {
+			return fmt.Errorf("reading chunk %d: %w", chunkCount, err)
+		}
+		if chunk == nil {
+			break // EOF
+		}
+
 		encrypted, err := chunker.Encrypt(e.encKey, chunk.Data)
 		if err != nil {
 			return fmt.Errorf("encrypting chunk %d: %w", chunk.Sequence, err)
 		}
+		chunk.Data = nil // free unencrypted data immediately
 
 		providerID, err := e.broker.AssignChunk(int64(len(encrypted)))
 		if err != nil {
@@ -97,11 +118,12 @@ func (e *Engine) WriteFile(virtualPath string, data []byte) error {
 		}
 
 		remotePath := chunkRemoteDir + "/" + chunk.ID
+		encryptedSize := len(encrypted)
 		if err := e.rc.PutFile(provider.RcloneRemote, remotePath, bytes.NewReader(encrypted)); err != nil {
 			return fmt.Errorf("uploading chunk %d to %s: %w", chunk.Sequence, provider.DisplayName, err)
 		}
+		encrypted = nil // free after upload
 
-		// Upload confirmed — now write metadata.
 		confirmTime := time.Now().Unix()
 		if err := e.db.InsertChunk(&metadata.ChunkRecord{
 			ID:            chunk.ID,
@@ -109,7 +131,7 @@ func (e *Engine) WriteFile(virtualPath string, data []byte) error {
 			Sequence:      chunk.Sequence,
 			SizeBytes:     chunk.Size,
 			SHA256:        chunk.SHA256,
-			EncryptedSize: len(encrypted),
+			EncryptedSize: encryptedSize,
 		}); err != nil {
 			return fmt.Errorf("inserting chunk record: %w", err)
 		}
@@ -123,10 +145,11 @@ func (e *Engine) WriteFile(virtualPath string, data []byte) error {
 			return fmt.Errorf("inserting chunk location: %w", err)
 		}
 
-		slog.Debug("chunk uploaded", "seq", chunk.Sequence, "provider", provider.DisplayName, "size", len(encrypted))
+		slog.Debug("chunk uploaded", "seq", chunk.Sequence, "provider", provider.DisplayName, "size", chunk.Size)
+		chunkCount++
 	}
 
-	slog.Info("file written", "path", virtualPath, "size", len(data), "chunks", len(chunks))
+	slog.Info("file written", "path", virtualPath, "size", size, "chunks", chunkCount)
 	e.scheduleBackup()
 	return nil
 }
