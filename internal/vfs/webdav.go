@@ -165,7 +165,6 @@ type webDAVFile struct {
 
 func (f *webDAVFile) Close() error {
 	if f.writable && f.tmpFile != nil {
-		// Flush and rewind the temp file, then pass it to the engine for streaming processing.
 		if err := f.tmpFile.Sync(); err != nil {
 			f.cleanup()
 			return err
@@ -174,6 +173,17 @@ func (f *webDAVFile) Close() error {
 			f.cleanup()
 			return err
 		}
+
+		// Large files: upload in background so the WebDAV PUT returns quickly.
+		// This prevents Finder from timing out on multi-minute cloud uploads.
+		if f.writeSize > engine.AsyncWriteThreshold {
+			slog.Info("async upload started", "path", f.name, "size", f.writeSize)
+			err := f.fs.engine.WriteFileAsync(f.name, f.tmpFile, f.tmpPath, f.writeSize)
+			f.tmpFile = nil // engine owns the file now
+			return err
+		}
+
+		// Small files: synchronous — fast enough for Finder.
 		err := f.fs.engine.WriteFileStream(f.name, f.tmpFile, f.writeSize)
 		f.cleanup()
 		return err

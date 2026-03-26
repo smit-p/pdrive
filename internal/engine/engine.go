@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -44,39 +46,115 @@ func (e *Engine) WriteFile(virtualPath string, data []byte) error {
 	return e.WriteFileStream(virtualPath, bytes.NewReader(data), int64(len(data)))
 }
 
-// WriteFileStream writes a file from a stream, processing one chunk at a time.
-// This keeps memory usage constant (~8 MB) regardless of file size.
+const (
+	// maxUploadWorkers controls how many chunk uploads run concurrently.
+	maxUploadWorkers = 3
+	// maxUploadRetries is the number of retry attempts for a failed chunk upload.
+	maxUploadRetries = 5
+	// AsyncWriteThreshold: files larger than this are uploaded in the background
+	// so the WebDAV PUT returns quickly and Finder doesn't time out.
+	AsyncWriteThreshold = 4 * 1024 * 1024 // 4 MB
+)
+
+// chunkMeta holds metadata for a single uploaded chunk.
+type chunkMeta struct {
+	chunkID       string
+	sequence      int
+	size          int
+	sha256        string
+	encryptedSize int
+	providerID    string
+	remotePath    string
+}
+
+// WriteFileStream writes a file from a stream synchronously (hash + upload + metadata).
 func (e *Engine) WriteFileStream(virtualPath string, r io.ReadSeeker, size int64) error {
-	// Pass 1: compute full file hash by streaming through the reader.
+	fileID, fullHashStr, err := e.prepareFileWrite(virtualPath, r, size)
+	if err != nil {
+		return err
+	}
+	_ = fullHashStr
+
+	metas, err := e.uploadChunks(r, fileID)
+	if err != nil {
+		return err
+	}
+
+	if err := e.insertChunkMetadata(fileID, metas); err != nil {
+		return err
+	}
+
+	slog.Info("file written", "path", virtualPath, "size", size, "chunks", len(metas))
+	e.scheduleBackup()
+	return nil
+}
+
+// WriteFileAsync hashes and creates the file record synchronously, then uploads
+// chunks in a background goroutine. The caller must NOT close or remove tmpFile;
+// the engine takes ownership and cleans up when done.
+func (e *Engine) WriteFileAsync(virtualPath string, tmpFile *os.File, tmpPath string, size int64) error {
+	fileID, _, err := e.prepareFileWrite(virtualPath, tmpFile, size)
+	if err != nil {
+		tmpFile.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+
+	go func() {
+		defer tmpFile.Close()
+		defer os.Remove(tmpPath)
+
+		metas, err := e.uploadChunks(tmpFile, fileID)
+		if err != nil {
+			// Keep the file record so the user can still see and delete the file.
+			slog.Error("background upload failed",
+				"path", virtualPath, "error", err)
+			return
+		}
+
+		if err := e.insertChunkMetadata(fileID, metas); err != nil {
+			slog.Error("failed to insert chunk metadata", "path", virtualPath, "error", err)
+			return
+		}
+
+		slog.Info("file written", "path", virtualPath, "size", size, "chunks", len(metas))
+		e.scheduleBackup()
+	}()
+
+	return nil
+}
+
+// prepareFileWrite hashes the data, deletes any existing file, and inserts the
+// new file record. It returns the fileID and hash. The reader is rewound to the
+// start, ready for chunk reading.
+func (e *Engine) prepareFileWrite(virtualPath string, r io.ReadSeeker, size int64) (string, string, error) {
 	hasher := sha256.New()
 	if _, err := io.Copy(hasher, r); err != nil {
-		return fmt.Errorf("hashing file: %w", err)
+		return "", "", fmt.Errorf("hashing file: %w", err)
 	}
 	fullHashStr := hex.EncodeToString(hasher.Sum(nil))
 
-	// Rewind for pass 2.
 	if _, err := r.Seek(0, io.SeekStart); err != nil {
-		return fmt.Errorf("rewinding reader: %w", err)
+		return "", "", fmt.Errorf("rewinding reader: %w", err)
 	}
 
-	// Delete existing file if it exists (overwrite).
 	existing, err := e.db.GetFileByPath(virtualPath)
 	if err != nil {
-		return fmt.Errorf("checking existing file: %w", err)
+		return "", "", fmt.Errorf("checking existing file: %w", err)
 	}
 	if existing != nil {
-		if err := e.deleteFileChunks(existing.ID); err != nil {
-			slog.Warn("failed to clean up old file chunks", "path", virtualPath, "error", err)
-		}
+		// Collect cloud locations before deleting DB record, clean up in background.
+		locs, _ := e.db.GetChunkLocationsForFile(existing.ID)
 		if err := e.db.DeleteFile(existing.ID); err != nil {
-			return fmt.Errorf("deleting old file: %w", err)
+			return "", "", fmt.Errorf("deleting old file: %w", err)
+		}
+		if len(locs) > 0 {
+			go e.deleteCloudChunks(locs)
 		}
 	}
 
 	fileID := uuid.New().String()
 	now := time.Now().Unix()
-
-	// Insert the file record first so chunk FK references are valid.
 	if err := e.db.InsertFile(&metadata.File{
 		ID:          fileID,
 		VirtualPath: virtualPath,
@@ -85,72 +163,136 @@ func (e *Engine) WriteFileStream(virtualPath string, r io.ReadSeeker, size int64
 		ModifiedAt:  now,
 		SHA256Full:  fullHashStr,
 	}); err != nil {
-		return fmt.Errorf("inserting file record: %w", err)
+		return "", "", fmt.Errorf("inserting file record: %w", err)
 	}
 
-	// Pass 2: stream through chunks — encrypt → assign → upload → metadata.
-	cr := chunker.NewChunkReader(r, chunker.DefaultChunkSize)
-	chunkCount := 0
+	return fileID, fullHashStr, nil
+}
 
-	for {
+// uploadChunks reads, encrypts, and uploads chunks concurrently with retry.
+// Returns the ordered slice of chunk metadata on success.
+func (e *Engine) uploadChunks(r io.ReadSeeker, fileID string) ([]chunkMeta, error) {
+	cr := chunker.NewChunkReader(r, chunker.DefaultChunkSize)
+
+	var (
+		metas    []chunkMeta
+		mu       sync.Mutex
+		firstErr error
+		wg       sync.WaitGroup
+		sem      = make(chan struct{}, maxUploadWorkers)
+	)
+
+	for chunkCount := 0; ; chunkCount++ {
+		mu.Lock()
+		uploadErr := firstErr
+		mu.Unlock()
+		if uploadErr != nil {
+			break
+		}
+
 		chunk, err := cr.Next()
 		if err != nil {
-			return fmt.Errorf("reading chunk %d: %w", chunkCount, err)
+			wg.Wait()
+			return nil, fmt.Errorf("reading chunk %d: %w", chunkCount, err)
 		}
 		if chunk == nil {
-			break // EOF
+			break
 		}
 
 		encrypted, err := chunker.Encrypt(e.encKey, chunk.Data)
 		if err != nil {
-			return fmt.Errorf("encrypting chunk %d: %w", chunk.Sequence, err)
+			wg.Wait()
+			return nil, fmt.Errorf("encrypting chunk %d: %w", chunk.Sequence, err)
 		}
-		chunk.Data = nil // free unencrypted data immediately
+		chunk.Data = nil
 
 		providerID, err := e.broker.AssignChunk(int64(len(encrypted)))
 		if err != nil {
-			return fmt.Errorf("assigning chunk %d: %w", chunk.Sequence, err)
+			wg.Wait()
+			return nil, fmt.Errorf("assigning chunk %d: %w", chunk.Sequence, err)
 		}
 
 		provider, err := e.db.GetProvider(providerID)
 		if err != nil || provider == nil {
-			return fmt.Errorf("getting provider %s: %w", providerID, err)
+			wg.Wait()
+			return nil, fmt.Errorf("getting provider %s: %w", providerID, err)
 		}
 
 		remotePath := chunkRemoteDir + "/" + chunk.ID
-		encryptedSize := len(encrypted)
-		if err := e.rc.PutFile(provider.RcloneRemote, remotePath, bytes.NewReader(encrypted)); err != nil {
-			return fmt.Errorf("uploading chunk %d to %s: %w", chunk.Sequence, provider.DisplayName, err)
-		}
-		encrypted = nil // free after upload
+		metas = append(metas, chunkMeta{
+			chunkID:       chunk.ID,
+			sequence:      chunk.Sequence,
+			size:          chunk.Size,
+			sha256:        chunk.SHA256,
+			encryptedSize: len(encrypted),
+			providerID:    providerID,
+			remotePath:    remotePath,
+		})
 
+		sem <- struct{}{}
+		wg.Add(1)
+		go func(enc []byte, remote string, prov *metadata.Provider, seq int) {
+			defer func() { <-sem; wg.Done() }()
+			var lastErr error
+			for attempt := 0; attempt < maxUploadRetries; attempt++ {
+				if attempt > 0 {
+					backoff := time.Duration(1<<uint(attempt)) * time.Second
+					if backoff > 30*time.Second {
+						backoff = 30 * time.Second
+					}
+					slog.Warn("retrying chunk upload",
+						"seq", seq, "attempt", attempt+1, "backoff", backoff)
+					time.Sleep(backoff)
+				}
+				if err := e.rc.PutFile(prov.RcloneRemote, remote, bytes.NewReader(enc)); err != nil {
+					lastErr = err
+					continue
+				}
+				slog.Debug("chunk uploaded", "seq", seq, "provider", prov.DisplayName)
+				return // success
+			}
+			mu.Lock()
+			if firstErr == nil {
+				firstErr = fmt.Errorf("uploading chunk %d to %s after %d retries: %w",
+					seq, prov.DisplayName, maxUploadRetries, lastErr)
+			}
+			mu.Unlock()
+		}(encrypted, remotePath, provider, chunk.Sequence)
+	}
+
+	wg.Wait()
+
+	if firstErr != nil {
+		return nil, firstErr
+	}
+
+	return metas, nil
+}
+
+// insertChunkMetadata writes chunk and chunk_location records to the DB.
+func (e *Engine) insertChunkMetadata(fileID string, metas []chunkMeta) error {
+	for _, m := range metas {
 		confirmTime := time.Now().Unix()
 		if err := e.db.InsertChunk(&metadata.ChunkRecord{
-			ID:            chunk.ID,
+			ID:            m.chunkID,
 			FileID:        fileID,
-			Sequence:      chunk.Sequence,
-			SizeBytes:     chunk.Size,
-			SHA256:        chunk.SHA256,
-			EncryptedSize: encryptedSize,
+			Sequence:      m.sequence,
+			SizeBytes:     m.size,
+			SHA256:        m.sha256,
+			EncryptedSize: m.encryptedSize,
 		}); err != nil {
 			return fmt.Errorf("inserting chunk record: %w", err)
 		}
 
 		if err := e.db.InsertChunkLocation(&metadata.ChunkLocation{
-			ChunkID:           chunk.ID,
-			ProviderID:        providerID,
-			RemotePath:        remotePath,
+			ChunkID:           m.chunkID,
+			ProviderID:        m.providerID,
+			RemotePath:        m.remotePath,
 			UploadConfirmedAt: &confirmTime,
 		}); err != nil {
 			return fmt.Errorf("inserting chunk location: %w", err)
 		}
-
-		slog.Debug("chunk uploaded", "seq", chunk.Sequence, "provider", provider.DisplayName, "size", chunk.Size)
-		chunkCount++
 	}
-
-	slog.Info("file written", "path", virtualPath, "size", size, "chunks", chunkCount)
-	e.scheduleBackup()
 	return nil
 }
 
@@ -224,21 +366,28 @@ func (e *Engine) ReadFile(virtualPath string) ([]byte, error) {
 }
 
 // DeleteFile removes a file, its chunks from the cloud, and all metadata.
+// Cloud chunk cleanup happens in the background so the caller returns quickly.
+// Idempotent: returns nil if the file doesn't exist.
 func (e *Engine) DeleteFile(virtualPath string) error {
 	file, err := e.db.GetFileByPath(virtualPath)
 	if err != nil {
 		return fmt.Errorf("looking up file: %w", err)
 	}
 	if file == nil {
-		return fmt.Errorf("file not found: %s", virtualPath)
+		return nil // idempotent
 	}
 
-	if err := e.deleteFileChunks(file.ID); err != nil {
-		return err
-	}
+	// Collect chunk locations BEFORE deleting the DB record.
+	locs, _ := e.db.GetChunkLocationsForFile(file.ID)
 
+	// Delete DB record immediately (CASCADE removes chunks + locations).
 	if err := e.db.DeleteFile(file.ID); err != nil {
 		return fmt.Errorf("deleting file metadata: %w", err)
+	}
+
+	// Clean up cloud chunks in the background.
+	if len(locs) > 0 {
+		go e.deleteCloudChunks(locs)
 	}
 
 	slog.Info("file deleted", "path", virtualPath)
@@ -252,15 +401,18 @@ func (e *Engine) MkDir(dirPath string) error {
 }
 
 // DeleteDir recursively deletes a directory: all files, cloud chunks, and directory records.
+// DB records are deleted immediately; cloud chunk cleanup runs in the background.
 func (e *Engine) DeleteDir(dirPath string) error {
 	files, err := e.db.GetFilesUnderDir(dirPath)
 	if err != nil {
 		return fmt.Errorf("listing files under %s: %w", dirPath, err)
 	}
+
+	// Collect all cloud chunk locations before deleting DB records.
+	var allLocs []metadata.ChunkLocation
 	for _, f := range files {
-		if err := e.deleteFileChunks(f.ID); err != nil {
-			slog.Warn("failed to delete chunks", "file", f.VirtualPath, "error", err)
-		}
+		locs, _ := e.db.GetChunkLocationsForFile(f.ID)
+		allLocs = append(allLocs, locs...)
 		if err := e.db.DeleteFile(f.ID); err != nil {
 			slog.Warn("failed to delete file record", "file", f.VirtualPath, "error", err)
 		}
@@ -268,6 +420,12 @@ func (e *Engine) DeleteDir(dirPath string) error {
 	if err := e.db.DeleteDirectoriesUnder(dirPath); err != nil {
 		return fmt.Errorf("deleting directory records: %w", err)
 	}
+
+	// Clean up cloud chunks in the background.
+	if len(allLocs) > 0 {
+		go e.deleteCloudChunks(allLocs)
+	}
+
 	slog.Info("directory deleted", "path", dirPath)
 	e.scheduleBackup()
 	return nil
@@ -286,12 +444,9 @@ func (e *Engine) RenameDir(oldPath, newPath string) error {
 	return nil
 }
 
-func (e *Engine) deleteFileChunks(fileID string) error {
-	locs, err := e.db.GetChunkLocationsForFile(fileID)
-	if err != nil {
-		return fmt.Errorf("getting chunk locations: %w", err)
-	}
-
+// deleteCloudChunks removes chunks from cloud providers in the background.
+// Best-effort: errors are logged but never propagated.
+func (e *Engine) deleteCloudChunks(locs []metadata.ChunkLocation) {
 	for _, loc := range locs {
 		provider, err := e.db.GetProvider(loc.ProviderID)
 		if err != nil || provider == nil {
@@ -302,7 +457,7 @@ func (e *Engine) deleteFileChunks(fileID string) error {
 			slog.Warn("failed to delete chunk from provider", "chunk", loc.ChunkID, "provider", provider.DisplayName, "error", err)
 		}
 	}
-	return nil
+	slog.Debug("cloud chunk cleanup done", "count", len(locs))
 }
 
 // Stat returns file metadata or nil if the file doesn't exist.
