@@ -21,11 +21,13 @@ import (
 
 // Config holds daemon configuration.
 type Config struct {
-	ConfigDir  string // ~/.pdrive/
-	RcloneBin  string // path to rclone binary
-	RcloneAddr string // e.g., "localhost:5572"
-	WebDAVAddr string // e.g., "localhost:8765"
-	EncKey     []byte // 32-byte AES-256 key
+	ConfigDir    string // ~/.pdrive/
+	RcloneBin    string // path to rclone binary
+	RcloneAddr   string // e.g., "localhost:5572"
+	WebDAVAddr   string // e.g., "localhost:8765"
+	EncKey       []byte // 32-byte AES-256 key
+	BrokerPolicy string // "pfrd" or "mfs"
+	MinFreeSpace int64  // bytes to keep free on each provider
 }
 
 // Daemon is the main pdrive daemon that ties everything together.
@@ -93,7 +95,7 @@ func (d *Daemon) Start(ctx context.Context) error {
 	}
 
 	// Create engine.
-	b := broker.NewBroker(d.db)
+	b := broker.NewBroker(d.db, broker.Policy(d.config.BrokerPolicy), d.config.MinFreeSpace)
 	d.engine = engine.NewEngine(d.db, dbPath, d.rclone.Client(), b, d.config.EncKey)
 
 	// Start WebDAV server.
