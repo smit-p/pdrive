@@ -1,0 +1,23 @@
+# Binaries
+pdrive
+*.exe
+
+# Go build cache
+/vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# pdrive runtime artifacts
+.pdrive/
+
+# rclone binary (downloaded by script)
+bin/rclone

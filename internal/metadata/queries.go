@@ -1,0 +1,335 @@
+package metadata
+
+import (
+	"database/sql"
+	"fmt"
+	"path"
+	"strings"
+	"time"
+)
+
+// File represents a virtual file in the pdrive filesystem.
+type File struct {
+	ID          string
+	VirtualPath string
+	SizeBytes   int64
+	CreatedAt   int64
+	ModifiedAt  int64
+	SHA256Full  string
+}
+
+// ChunkRecord represents a chunk row in the database.
+type ChunkRecord struct {
+	ID            string
+	FileID        string
+	Sequence      int
+	SizeBytes     int
+	SHA256        string
+	EncryptedSize int
+}
+
+// ChunkLocation represents a chunk_locations row.
+type ChunkLocation struct {
+	ChunkID           string
+	ProviderID        string
+	RemotePath        string
+	UploadConfirmedAt *int64
+}
+
+// Provider represents a cloud storage provider account.
+type Provider struct {
+	ID               string
+	Type             string
+	DisplayName      string
+	RcloneRemote     string
+	QuotaTotalBytes  *int64
+	QuotaFreeBytes   *int64
+	QuotaPolledAt    *int64
+	RateLimitedUntil *int64
+}
+
+// InsertFile inserts a new file record.
+func (db *DB) InsertFile(f *File) error {
+	_, err := db.conn.Exec(
+		`INSERT INTO files (id, virtual_path, size_bytes, created_at, modified_at, sha256_full)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		f.ID, f.VirtualPath, f.SizeBytes, f.CreatedAt, f.ModifiedAt, f.SHA256Full,
+	)
+	return err
+}
+
+// InsertChunk inserts a new chunk record.
+func (db *DB) InsertChunk(c *ChunkRecord) error {
+	_, err := db.conn.Exec(
+		`INSERT INTO chunks (id, file_id, sequence, size_bytes, sha256, encrypted_size)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		c.ID, c.FileID, c.Sequence, c.SizeBytes, c.SHA256, c.EncryptedSize,
+	)
+	return err
+}
+
+// InsertChunkLocation inserts a new chunk location record.
+func (db *DB) InsertChunkLocation(cl *ChunkLocation) error {
+	_, err := db.conn.Exec(
+		`INSERT INTO chunk_locations (chunk_id, provider_id, remote_path, upload_confirmed_at)
+		 VALUES (?, ?, ?, ?)`,
+		cl.ChunkID, cl.ProviderID, cl.RemotePath, cl.UploadConfirmedAt,
+	)
+	return err
+}
+
+// ConfirmUpload sets the upload_confirmed_at timestamp for a chunk location.
+func (db *DB) ConfirmUpload(chunkID, providerID string) error {
+	now := time.Now().Unix()
+	res, err := db.conn.Exec(
+		`UPDATE chunk_locations SET upload_confirmed_at = ? WHERE chunk_id = ? AND provider_id = ?`,
+		now, chunkID, providerID,
+	)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("chunk location not found: chunk=%s provider=%s", chunkID, providerID)
+	}
+	return nil
+}
+
+// GetFileByPath retrieves a file by its virtual path.
+func (db *DB) GetFileByPath(virtualPath string) (*File, error) {
+	f := &File{}
+	err := db.conn.QueryRow(
+		`SELECT id, virtual_path, size_bytes, created_at, modified_at, sha256_full
+		 FROM files WHERE virtual_path = ?`, virtualPath,
+	).Scan(&f.ID, &f.VirtualPath, &f.SizeBytes, &f.CreatedAt, &f.ModifiedAt, &f.SHA256Full)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return f, err
+}
+
+// GetChunksForFile returns all chunks for a file, ordered by sequence.
+func (db *DB) GetChunksForFile(fileID string) ([]ChunkRecord, error) {
+	rows, err := db.conn.Query(
+		`SELECT id, file_id, sequence, size_bytes, sha256, encrypted_size
+		 FROM chunks WHERE file_id = ? ORDER BY sequence`, fileID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var chunks []ChunkRecord
+	for rows.Next() {
+		var c ChunkRecord
+		if err := rows.Scan(&c.ID, &c.FileID, &c.Sequence, &c.SizeBytes, &c.SHA256, &c.EncryptedSize); err != nil {
+			return nil, err
+		}
+		chunks = append(chunks, c)
+	}
+	return chunks, rows.Err()
+}
+
+// GetChunkLocations returns all locations for a given chunk.
+func (db *DB) GetChunkLocations(chunkID string) ([]ChunkLocation, error) {
+	rows, err := db.conn.Query(
+		`SELECT chunk_id, provider_id, remote_path, upload_confirmed_at
+		 FROM chunk_locations WHERE chunk_id = ?`, chunkID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var locs []ChunkLocation
+	for rows.Next() {
+		var cl ChunkLocation
+		if err := rows.Scan(&cl.ChunkID, &cl.ProviderID, &cl.RemotePath, &cl.UploadConfirmedAt); err != nil {
+			return nil, err
+		}
+		locs = append(locs, cl)
+	}
+	return locs, rows.Err()
+}
+
+// DeleteFile deletes a file and all its associated chunks/locations (cascading).
+func (db *DB) DeleteFile(fileID string) error {
+	_, err := db.conn.Exec(`DELETE FROM files WHERE id = ?`, fileID)
+	return err
+}
+
+// DeleteFileByPath deletes a file by virtual path.
+func (db *DB) DeleteFileByPath(virtualPath string) error {
+	_, err := db.conn.Exec(`DELETE FROM files WHERE virtual_path = ?`, virtualPath)
+	return err
+}
+
+// ListFiles returns files whose virtual_path is directly inside dirPath.
+// dirPath should be like "/" or "/subdir/".
+func (db *DB) ListFiles(dirPath string) ([]File, error) {
+	// Normalize: ensure dirPath ends with /
+	if !strings.HasSuffix(dirPath, "/") {
+		dirPath += "/"
+	}
+
+	rows, err := db.conn.Query(
+		`SELECT id, virtual_path, size_bytes, created_at, modified_at, sha256_full
+		 FROM files WHERE virtual_path LIKE ? || '%'`, dirPath,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var files []File
+	for rows.Next() {
+		var f File
+		if err := rows.Scan(&f.ID, &f.VirtualPath, &f.SizeBytes, &f.CreatedAt, &f.ModifiedAt, &f.SHA256Full); err != nil {
+			return nil, err
+		}
+		// Only include direct children (no deeper nesting)
+		rel := strings.TrimPrefix(f.VirtualPath, dirPath)
+		if !strings.Contains(rel, "/") {
+			files = append(files, f)
+		}
+	}
+	return files, rows.Err()
+}
+
+// ListSubdirectories returns unique immediate subdirectory names under dirPath.
+func (db *DB) ListSubdirectories(dirPath string) ([]string, error) {
+	if !strings.HasSuffix(dirPath, "/") {
+		dirPath += "/"
+	}
+
+	rows, err := db.conn.Query(
+		`SELECT DISTINCT virtual_path FROM files WHERE virtual_path LIKE ? || '%'`, dirPath,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	seen := make(map[string]bool)
+	for rows.Next() {
+		var vpath string
+		if err := rows.Scan(&vpath); err != nil {
+			return nil, err
+		}
+		rel := strings.TrimPrefix(vpath, dirPath)
+		if idx := strings.Index(rel, "/"); idx >= 0 {
+			subdir := rel[:idx]
+			seen[subdir] = true
+		}
+	}
+
+	var dirs []string
+	for d := range seen {
+		dirs = append(dirs, d)
+	}
+	return dirs, rows.Err()
+}
+
+// UpsertProvider inserts or updates a provider record.
+func (db *DB) UpsertProvider(p *Provider) error {
+	_, err := db.conn.Exec(
+		`INSERT INTO providers (id, type, display_name, rclone_remote, quota_total_bytes, quota_free_bytes, quota_polled_at, rate_limited_until)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET
+		   type = excluded.type,
+		   display_name = excluded.display_name,
+		   rclone_remote = excluded.rclone_remote,
+		   quota_total_bytes = excluded.quota_total_bytes,
+		   quota_free_bytes = excluded.quota_free_bytes,
+		   quota_polled_at = excluded.quota_polled_at,
+		   rate_limited_until = excluded.rate_limited_until`,
+		p.ID, p.Type, p.DisplayName, p.RcloneRemote, p.QuotaTotalBytes, p.QuotaFreeBytes, p.QuotaPolledAt, p.RateLimitedUntil,
+	)
+	return err
+}
+
+// GetProvider retrieves a provider by ID.
+func (db *DB) GetProvider(id string) (*Provider, error) {
+	p := &Provider{}
+	err := db.conn.QueryRow(
+		`SELECT id, type, display_name, rclone_remote, quota_total_bytes, quota_free_bytes, quota_polled_at, rate_limited_until
+		 FROM providers WHERE id = ?`, id,
+	).Scan(&p.ID, &p.Type, &p.DisplayName, &p.RcloneRemote, &p.QuotaTotalBytes, &p.QuotaFreeBytes, &p.QuotaPolledAt, &p.RateLimitedUntil)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return p, err
+}
+
+// GetAllProviders returns all registered providers.
+func (db *DB) GetAllProviders() ([]Provider, error) {
+	rows, err := db.conn.Query(
+		`SELECT id, type, display_name, rclone_remote, quota_total_bytes, quota_free_bytes, quota_polled_at, rate_limited_until
+		 FROM providers ORDER BY display_name`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var providers []Provider
+	for rows.Next() {
+		var p Provider
+		if err := rows.Scan(&p.ID, &p.Type, &p.DisplayName, &p.RcloneRemote, &p.QuotaTotalBytes, &p.QuotaFreeBytes, &p.QuotaPolledAt, &p.RateLimitedUntil); err != nil {
+			return nil, err
+		}
+		providers = append(providers, p)
+	}
+	return providers, rows.Err()
+}
+
+// GetChunkLocationsForFile returns all chunk locations for every chunk belonging to a file.
+func (db *DB) GetChunkLocationsForFile(fileID string) ([]ChunkLocation, error) {
+	rows, err := db.conn.Query(
+		`SELECT cl.chunk_id, cl.provider_id, cl.remote_path, cl.upload_confirmed_at
+		 FROM chunk_locations cl
+		 JOIN chunks c ON c.id = cl.chunk_id
+		 WHERE c.file_id = ?
+		 ORDER BY c.sequence`, fileID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var locs []ChunkLocation
+	for rows.Next() {
+		var cl ChunkLocation
+		if err := rows.Scan(&cl.ChunkID, &cl.ProviderID, &cl.RemotePath, &cl.UploadConfirmedAt); err != nil {
+			return nil, err
+		}
+		locs = append(locs, cl)
+	}
+	return locs, rows.Err()
+}
+
+// FileExists checks if a virtual path exists in the database.
+func (db *DB) FileExists(virtualPath string) (bool, error) {
+	var count int
+	err := db.conn.QueryRow(`SELECT COUNT(*) FROM files WHERE virtual_path = ?`, virtualPath).Scan(&count)
+	return count > 0, err
+}
+
+// PathIsDir checks if any files exist under the given directory path.
+func (db *DB) PathIsDir(dirPath string) (bool, error) {
+	if !strings.HasSuffix(dirPath, "/") {
+		dirPath += "/"
+	}
+	var count int
+	err := db.conn.QueryRow(`SELECT COUNT(*) FROM files WHERE virtual_path LIKE ? || '%'`, dirPath).Scan(&count)
+	return count > 0, err
+}
+
+// VirtualDir returns the parent directory of a path.
+func VirtualDir(virtualPath string) string {
+	dir := path.Dir(virtualPath)
+	if dir == "." {
+		return "/"
+	}
+	return dir
+}
