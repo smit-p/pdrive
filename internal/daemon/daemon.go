@@ -26,10 +26,10 @@ type Config struct {
 
 // Daemon is the main pdrive daemon that ties everything together.
 type Daemon struct {
-	config  Config
-	db      *metadata.DB
-	rclone  *RcloneManager
-	engine  *engine.Engine
+	config       Config
+	db           *metadata.DB
+	rclone       *RcloneManager
+	engine       *engine.Engine
 	webdavServer *http.Server
 }
 
@@ -54,8 +54,17 @@ func (d *Daemon) Start(ctx context.Context) error {
 	d.db = db
 	slog.Info("metadata database opened", "path", dbPath)
 
-	// Start rclone RC.
+	// Start rclone RC — use existing rclone config if available.
 	rcloneConf := filepath.Join(d.config.ConfigDir, "rclone.conf")
+	if _, err := os.Stat(rcloneConf); os.IsNotExist(err) {
+		// Fall back to default rclone config location.
+		if home, _ := os.UserHomeDir(); home != "" {
+			defaultConf := filepath.Join(home, ".config", "rclone", "rclone.conf")
+			if _, err := os.Stat(defaultConf); err == nil {
+				rcloneConf = defaultConf
+			}
+		}
+	}
 	d.rclone = NewRcloneManager(d.config.RcloneBin, rcloneConf, d.config.RcloneAddr)
 	if err := d.rclone.Start(ctx); err != nil {
 		d.db.Close()

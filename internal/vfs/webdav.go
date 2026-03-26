@@ -72,9 +72,9 @@ func (fs *WebDAVFS) OpenFile(ctx context.Context, name string, flag int, perm os
 	}
 
 	return &webDAVFile{
-		fs:     fs,
-		name:   name,
-		size:   file.SizeBytes,
+		fs:      fs,
+		name:    name,
+		size:    file.SizeBytes,
 		modTime: time.Unix(file.ModifiedAt, 0),
 	}, nil
 }
@@ -267,21 +267,21 @@ type fileInfo struct {
 	modTime time.Time
 }
 
-func (fi *fileInfo) Name() string      { return fi.name }
-func (fi *fileInfo) Size() int64       { return fi.size }
-func (fi *fileInfo) Mode() os.FileMode { return 0644 }
+func (fi *fileInfo) Name() string       { return fi.name }
+func (fi *fileInfo) Size() int64        { return fi.size }
+func (fi *fileInfo) Mode() os.FileMode  { return 0644 }
 func (fi *fileInfo) ModTime() time.Time { return fi.modTime }
-func (fi *fileInfo) IsDir() bool       { return false }
-func (fi *fileInfo) Sys() interface{}  { return nil }
+func (fi *fileInfo) IsDir() bool        { return false }
+func (fi *fileInfo) Sys() interface{}   { return nil }
 
 // dirInfo implements os.FileInfo for directories.
 type dirInfo struct {
 	name string
 }
 
-func (di *dirInfo) Name() string      { return di.name }
-func (di *dirInfo) Size() int64       { return 0 }
-func (di *dirInfo) Mode() os.FileMode { return os.ModeDir | 0755 }
+func (di *dirInfo) Name() string       { return di.name }
+func (di *dirInfo) Size() int64        { return 0 }
+func (di *dirInfo) Mode() os.FileMode  { return os.ModeDir | 0755 }
 func (di *dirInfo) ModTime() time.Time { return time.Now() }
-func (di *dirInfo) IsDir() bool       { return true }
-func (di *dirInfo) Sys() interface{}  { return nil }
+func (di *dirInfo) IsDir() bool        { return true }
+func (di *dirInfo) Sys() interface{}   { return nil }

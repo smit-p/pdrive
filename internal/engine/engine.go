@@ -65,6 +65,18 @@ func (e *Engine) WriteFile(virtualPath string, data []byte) error {
 	fileID := uuid.New().String()
 	now := time.Now().Unix()
 
+	// Insert the file record first so chunk FK references are valid.
+	if err := e.db.InsertFile(&metadata.File{
+		ID:          fileID,
+		VirtualPath: virtualPath,
+		SizeBytes:   int64(len(data)),
+		CreatedAt:   now,
+		ModifiedAt:  now,
+		SHA256Full:  fullHashStr,
+	}); err != nil {
+		return fmt.Errorf("inserting file record: %w", err)
+	}
+
 	// Upload each chunk: encrypt → assign provider → upload → write metadata.
 	for _, chunk := range chunks {
 		encrypted, err := chunker.Encrypt(e.encKey, chunk.Data)
@@ -110,18 +122,6 @@ func (e *Engine) WriteFile(virtualPath string, data []byte) error {
 		}
 
 		slog.Debug("chunk uploaded", "seq", chunk.Sequence, "provider", provider.DisplayName, "size", len(encrypted))
-	}
-
-	// All chunks uploaded and metadata written — commit the file record.
-	if err := e.db.InsertFile(&metadata.File{
-		ID:          fileID,
-		VirtualPath: virtualPath,
-		SizeBytes:   int64(len(data)),
-		CreatedAt:   now,
-		ModifiedAt:  now,
-		SHA256Full:  fullHashStr,
-	}); err != nil {
-		return fmt.Errorf("inserting file record: %w", err)
 	}
 
 	slog.Info("file written", "path", virtualPath, "size", len(data), "chunks", len(chunks))

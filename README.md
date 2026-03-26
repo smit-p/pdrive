@@ -52,6 +52,7 @@ go build -o pdrive ./cmd/pdrive
 ## Setup
 
 1. Install and configure rclone:
+
    ```bash
    # Install rclone
    ./scripts/download-rclone.sh
@@ -62,11 +63,13 @@ go build -o pdrive ./cmd/pdrive
    ```
 
 2. Build pdrive:
+
    ```bash
    go build -o pdrive ./cmd/pdrive
    ```
 
 3. Run:
+
    ```bash
    ./pdrive
    ```
@@ -78,13 +81,13 @@ go build -o pdrive ./cmd/pdrive
 
 ## Flags
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--config-dir` | `~/.pdrive` | Directory for metadata DB and config |
-| `--rclone-addr` | `127.0.0.1:5572` | rclone RC listen address |
-| `--webdav-addr` | `127.0.0.1:8765` | WebDAV server listen address |
-| `--enc-key` | (test key) | Hex-encoded 32-byte AES-256 encryption key |
-| `--debug` | `false` | Enable debug logging |
+| Flag            | Default          | Description                                |
+| --------------- | ---------------- | ------------------------------------------ |
+| `--config-dir`  | `~/.pdrive`      | Directory for metadata DB and config       |
+| `--rclone-addr` | `127.0.0.1:5572` | rclone RC listen address                   |
+| `--webdav-addr` | `127.0.0.1:8765` | WebDAV server listen address               |
+| `--enc-key`     | (test key)       | Hex-encoded 32-byte AES-256 encryption key |
+| `--debug`       | `false`          | Enable debug logging                       |
 
 ## Running Tests
 

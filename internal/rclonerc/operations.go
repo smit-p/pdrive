@@ -7,24 +7,30 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
 )
 
+// ensureColon normalizes a remote name to always end with a colon.
+func ensureColon(remote string) string {
+	return strings.TrimSuffix(remote, ":") + ":"
+}
+
 // PutFile uploads data to remote:remotePath using rclone RC operations/uploadfile.
-// The remote should be the rclone remote name (e.g., "gdrive").
+// remotePath should be the full path (e.g., "pdrive-chunks/abc123").
 func (c *Client) PutFile(remote, remotePath string, data io.Reader) error {
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 
-	// Add the fs (remote name with colon) and remote (path) fields.
-	if err := writer.WriteField("fs", remote+":"); err != nil {
-		return fmt.Errorf("writing fs field: %w", err)
-	}
-	if err := writer.WriteField("remote", remotePath); err != nil {
-		return fmt.Errorf("writing remote field: %w", err)
-	}
+	// operations/uploadfile expects:
+	//   remote = parent directory to upload into
+	//   file0 = file content with the filename as the base name
+	dir := filepath.Dir(remotePath)
+	base := filepath.Base(remotePath)
 
-	// Add the file content.
-	part, err := writer.CreateFormFile("file0", remotePath)
+	part, err := writer.CreateFormFile("file0", base)
 	if err != nil {
 		return fmt.Errorf("creating form file: %w", err)
 	}
@@ -36,7 +42,10 @@ func (c *Client) PutFile(remote, remotePath string, data io.Reader) error {
 		return fmt.Errorf("closing multipart writer: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", c.baseURL+"/operations/uploadfile", &body)
+	params := url.Values{}
+	params.Set("fs", ensureColon(remote))
+	params.Set("remote", dir)
+	req, err := http.NewRequest("POST", c.baseURL+"/operations/uploadfile?"+params.Encode(), &body)
 	if err != nil {
 		return fmt.Errorf("creating upload request: %w", err)
 	}
@@ -56,29 +65,39 @@ func (c *Client) PutFile(remote, remotePath string, data io.Reader) error {
 	return nil
 }
 
-// GetFile downloads a file from remote:remotePath using rclone RC operations/cat.
+// GetFile downloads a file from remote:remotePath using rclone RC operations/copyfile
+// to a local temp directory, reads the content, and cleans up.
 func (c *Client) GetFile(remote, remotePath string) ([]byte, error) {
-	result, err := c.call("operations/cat", map[string]interface{}{
-		"fs":     remote + ":",
-		"remote": remotePath,
+	tmpDir, err := os.MkdirTemp("", "pdrive-dl-")
+	if err != nil {
+		return nil, fmt.Errorf("creating temp dir: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	dstRemote := filepath.Base(remotePath)
+
+	_, err = c.call("operations/copyfile", map[string]interface{}{
+		"srcFs":     ensureColon(remote),
+		"srcRemote": remotePath,
+		"dstFs":     tmpDir + "/",
+		"dstRemote": dstRemote,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("downloading file: %w", err)
 	}
 
-	// operations/cat returns the raw content as a JSON string
-	var content string
-	if err := json.Unmarshal(result, &content); err != nil {
-		// If it's not a JSON string, the raw bytes are the content
-		return []byte(result), nil
+	data, err := os.ReadFile(filepath.Join(tmpDir, dstRemote))
+	if err != nil {
+		return nil, fmt.Errorf("reading downloaded file: %w", err)
 	}
-	return []byte(content), nil
+
+	return data, nil
 }
 
 // DeleteFile deletes a file at remote:remotePath using rclone RC operations/deletefile.
 func (c *Client) DeleteFile(remote, remotePath string) error {
 	_, err := c.call("operations/deletefile", map[string]interface{}{
-		"fs":     remote + ":",
+		"fs":     ensureColon(remote),
 		"remote": remotePath,
 	})
 	if err != nil {
@@ -99,7 +118,7 @@ type ListItem struct {
 // ListDir lists the contents of remote:remotePath using rclone RC operations/list.
 func (c *Client) ListDir(remote, remotePath string) ([]ListItem, error) {
 	result, err := c.call("operations/list", map[string]interface{}{
-		"fs":     remote + ":",
+		"fs":     ensureColon(remote),
 		"remote": remotePath,
 	})
 	if err != nil {
