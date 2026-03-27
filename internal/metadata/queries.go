@@ -16,6 +16,8 @@ type File struct {
 	CreatedAt   int64
 	ModifiedAt  int64
 	SHA256Full  string
+	UploadState string  // "pending" or "complete"
+	TmpPath     *string // path to local tmp file while pending; nil when complete
 }
 
 // ChunkRecord represents a chunk row in the database.
@@ -50,12 +52,46 @@ type Provider struct {
 
 // InsertFile inserts a new file record.
 func (db *DB) InsertFile(f *File) error {
+	state := f.UploadState
+	if state == "" {
+		state = "complete"
+	}
 	_, err := db.conn.Exec(
-		`INSERT INTO files (id, virtual_path, size_bytes, created_at, modified_at, sha256_full)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		f.ID, f.VirtualPath, f.SizeBytes, f.CreatedAt, f.ModifiedAt, f.SHA256Full,
+		`INSERT INTO files (id, virtual_path, size_bytes, created_at, modified_at, sha256_full, upload_state, tmp_path)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		f.ID, f.VirtualPath, f.SizeBytes, f.CreatedAt, f.ModifiedAt, f.SHA256Full, state, f.TmpPath,
 	)
 	return err
+}
+
+// SetUploadComplete marks a file as fully uploaded and clears the tmp_path.
+func (db *DB) SetUploadComplete(fileID string) error {
+	_, err := db.conn.Exec(
+		`UPDATE files SET upload_state = 'complete', tmp_path = NULL WHERE id = ?`, fileID,
+	)
+	return err
+}
+
+// GetPendingUploads returns all files with upload_state = 'pending'.
+func (db *DB) GetPendingUploads() ([]File, error) {
+	rows, err := db.conn.Query(
+		`SELECT id, virtual_path, size_bytes, created_at, modified_at, sha256_full, upload_state, tmp_path
+		 FROM files WHERE upload_state = 'pending'`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var files []File
+	for rows.Next() {
+		var f File
+		if err := rows.Scan(&f.ID, &f.VirtualPath, &f.SizeBytes, &f.CreatedAt, &f.ModifiedAt, &f.SHA256Full, &f.UploadState, &f.TmpPath); err != nil {
+			return nil, err
+		}
+		files = append(files, f)
+	}
+	return files, rows.Err()
 }
 
 // InsertChunk inserts a new chunk record.
@@ -99,9 +135,9 @@ func (db *DB) ConfirmUpload(chunkID, providerID string) error {
 func (db *DB) GetFileByPath(virtualPath string) (*File, error) {
 	f := &File{}
 	err := db.conn.QueryRow(
-		`SELECT id, virtual_path, size_bytes, created_at, modified_at, sha256_full
+		`SELECT id, virtual_path, size_bytes, created_at, modified_at, sha256_full, upload_state, tmp_path
 		 FROM files WHERE virtual_path = ?`, virtualPath,
-	).Scan(&f.ID, &f.VirtualPath, &f.SizeBytes, &f.CreatedAt, &f.ModifiedAt, &f.SHA256Full)
+	).Scan(&f.ID, &f.VirtualPath, &f.SizeBytes, &f.CreatedAt, &f.ModifiedAt, &f.SHA256Full, &f.UploadState, &f.TmpPath)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -173,7 +209,7 @@ func (db *DB) ListFiles(dirPath string) ([]File, error) {
 	}
 
 	rows, err := db.conn.Query(
-		`SELECT id, virtual_path, size_bytes, created_at, modified_at, sha256_full
+		`SELECT id, virtual_path, size_bytes, created_at, modified_at, sha256_full, upload_state, tmp_path
 		 FROM files WHERE virtual_path LIKE ? || '%'`, dirPath,
 	)
 	if err != nil {
@@ -184,7 +220,7 @@ func (db *DB) ListFiles(dirPath string) ([]File, error) {
 	var files []File
 	for rows.Next() {
 		var f File
-		if err := rows.Scan(&f.ID, &f.VirtualPath, &f.SizeBytes, &f.CreatedAt, &f.ModifiedAt, &f.SHA256Full); err != nil {
+		if err := rows.Scan(&f.ID, &f.VirtualPath, &f.SizeBytes, &f.CreatedAt, &f.ModifiedAt, &f.SHA256Full, &f.UploadState, &f.TmpPath); err != nil {
 			return nil, err
 		}
 		// Only include direct children (no deeper nesting)

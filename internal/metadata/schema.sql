@@ -15,7 +15,9 @@ CREATE TABLE IF NOT EXISTS files (
     size_bytes  INTEGER NOT NULL,
     created_at  INTEGER NOT NULL,
     modified_at INTEGER NOT NULL,
-    sha256_full TEXT NOT NULL
+    sha256_full TEXT NOT NULL,
+    upload_state TEXT NOT NULL DEFAULT 'complete', -- 'pending' or 'complete'
+    tmp_path    TEXT                               -- local tmp file path while pending
 );
 
 CREATE TABLE IF NOT EXISTS chunks (

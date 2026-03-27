@@ -47,6 +47,16 @@ func Open(dbPath string) (*DB, error) {
 		return nil, fmt.Errorf("running schema: %w", err)
 	}
 
+	// Incremental migrations for existing databases.
+	migrations := []string{
+		`ALTER TABLE files ADD COLUMN upload_state TEXT NOT NULL DEFAULT 'complete'`,
+		`ALTER TABLE files ADD COLUMN tmp_path TEXT`,
+	}
+	for _, m := range migrations {
+		// SQLite returns an error if the column already exists; ignore it.
+		conn.Exec(m) //nolint:errcheck
+	}
+
 	return &DB{conn: conn}, nil
 }
 

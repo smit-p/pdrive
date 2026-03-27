@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"html"
 	"log/slog"
@@ -139,6 +140,9 @@ func (d *Daemon) Start(ctx context.Context) error {
 		"rclone", d.config.RcloneAddr,
 	)
 
+	// Resume any uploads interrupted by a prior daemon restart.
+	go d.engine.ResumeUploads()
+
 	// Run orphan GC: first pass after 60s (let any in-progress uploads settle),
 	// then every 24h. Runs entirely in the background.
 	go func() {
@@ -250,6 +254,14 @@ type browserHandler struct {
 }
 
 func (h *browserHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// JSON API for upload progress (polled by the browser UI).
+	if r.URL.Path == "/api/uploads" {
+		ups := h.engine.UploadProgress()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(ups) //nolint:errcheck
+		return
+	}
+
 	// Only intercept GET/HEAD with a browser-like Accept header.
 	if (r.Method == "GET" || r.Method == "HEAD") && strings.Contains(r.Header.Get("Accept"), "text/html") {
 		h.serveBrowser(w, r)
@@ -309,7 +321,41 @@ td { padding: 6px 12px 6px 0; border-bottom: 1px solid #eee; }
 td.size { text-align: right; color: #666; font-variant-numeric: tabular-nums; }
 .dir { font-weight: 500; }
 .empty { color: #999; font-style: italic; padding: 20px 0; }
-</style></head><body>
+#uploads { margin-bottom: 24px; }
+#uploads h2 { font-size: 1.1em; color: #555; margin: 0 0 10px; }
+.upload-item { margin-bottom: 10px; }
+.upload-name { font-size: 0.9em; margin-bottom: 3px; word-break: break-all; }
+.upload-name.failed { color: #c0392b; }
+.bar-bg { background: #eee; border-radius: 4px; height: 10px; width: 100%%; overflow: hidden; }
+.bar-fg { background: #2ecc71; height: 10px; border-radius: 4px; transition: width 0.4s; }
+.bar-fg.failed { background: #e74c3c; }
+.pct { font-size: 0.8em; color: #666; margin-top: 2px; }
+</style>
+<script>
+function fmtSize(b){if(b>=1073741824)return(b/1073741824).toFixed(1)+' GB';if(b>=1048576)return(b/1048576).toFixed(1)+' MB';if(b>=1024)return(b/1024).toFixed(1)+' KB';return b+' B';}
+function refreshUploads(){
+  fetch('/api/uploads').then(r=>r.json()).then(ups=>{
+    var div=document.getElementById('uploads');
+    if(!ups||ups.length===0){div.innerHTML='';return;}
+    var html='<h2>⬆ Uploading…</h2>';
+    ups.forEach(function(u){
+      var pct=u.TotalChunks>0?Math.round(u.ChunksUploaded/u.TotalChunks*100):0;
+      if(pct>100)pct=100;
+      var failed=u.Failed;
+      html+='<div class="upload-item">';
+      html+='<div class="upload-name'+(failed?' failed':'')+'">'+u.VirtualPath+(failed?' ✗ failed':'')+'</div>';
+      html+='<div class="bar-bg"><div class="bar-fg'+(failed?' failed':'')+'" style="width:'+pct+'%%"></div></div>';
+      html+='<div class="pct">'+pct+'%%  ('+u.ChunksUploaded+'/'+u.TotalChunks+' chunks, '+fmtSize(u.SizeBytes)+')</div>';
+      html+='</div>';
+    });
+    div.innerHTML=html;
+  }).catch(function(){});
+}
+refreshUploads();
+setInterval(refreshUploads,2000);
+</script>
+</head><body>
+<div id="uploads"></div>
 <h1>📁 %s</h1>`, html.EscapeString(p), html.EscapeString(p))
 
 	if p != "/" {

@@ -20,6 +20,26 @@ import (
 
 const chunkRemoteDir = "pdrive-chunks"
 
+// uploadProgress tracks in-flight async upload state.
+type uploadProgress struct {
+	VirtualPath    string
+	TotalChunks    int
+	ChunksUploaded int
+	SizeBytes      int64
+	StartedAt      time.Time
+	Failed         bool
+}
+
+// UploadProgressInfo is the exported snapshot of an in-flight upload.
+type UploadProgressInfo struct {
+	VirtualPath    string
+	TotalChunks    int
+	ChunksUploaded int
+	SizeBytes      int64
+	StartedAt      time.Time
+	Failed         bool
+}
+
 // Engine orchestrates file write and read operations.
 type Engine struct {
 	db           *metadata.DB
@@ -28,6 +48,9 @@ type Engine struct {
 	broker       *broker.Broker
 	encKey       []byte        // AES-256 key (32 bytes)
 	uploadTokens chan struct{} // token bucket: limits upload API calls per second
+
+	uploadsMu sync.RWMutex
+	uploads   map[string]*uploadProgress // fileID → progress
 }
 
 const (
@@ -47,6 +70,7 @@ func NewEngine(db *metadata.DB, dbPath string, rc *rclonerc.Client, b *broker.Br
 		broker:       b,
 		encKey:       encKey,
 		uploadTokens: make(chan struct{}, uploadRateBurst),
+		uploads:      make(map[string]*uploadProgress),
 	}
 	// Pre-fill the burst quota.
 	for i := 0; i < uploadRateBurst; i++ {
@@ -108,13 +132,13 @@ type chunkMeta struct {
 
 // WriteFileStream writes a file from a stream synchronously (hash + upload + metadata).
 func (e *Engine) WriteFileStream(virtualPath string, r io.ReadSeeker, size int64) error {
-	fileID, fullHashStr, err := e.prepareFileWrite(virtualPath, r, size)
+	fileID, fullHashStr, err := e.prepareFileWrite(virtualPath, r, size, "")
 	if err != nil {
 		return err
 	}
 	_ = fullHashStr
 
-	metas, err := e.uploadChunks(r, fileID, size)
+	metas, err := e.uploadChunks(r, fileID, size, nil)
 	if err != nil {
 		return err
 	}
@@ -132,7 +156,7 @@ func (e *Engine) WriteFileStream(virtualPath string, r io.ReadSeeker, size int64
 // chunks in a background goroutine. The caller must NOT close or remove tmpFile;
 // the engine takes ownership and cleans up when done.
 func (e *Engine) WriteFileAsync(virtualPath string, tmpFile *os.File, tmpPath string, size int64) error {
-	fileID, _, err := e.prepareFileWrite(virtualPath, tmpFile, size)
+	fileID, _, err := e.prepareFileWrite(virtualPath, tmpFile, size, tmpPath)
 	if err != nil {
 		tmpFile.Close()
 		os.Remove(tmpPath)
@@ -141,10 +165,21 @@ func (e *Engine) WriteFileAsync(virtualPath string, tmpFile *os.File, tmpPath st
 
 	go func() {
 		defer tmpFile.Close()
-		defer os.Remove(tmpPath)
+		defer func() {
+			e.uploadsMu.Lock()
+			delete(e.uploads, fileID)
+			e.uploadsMu.Unlock()
+			os.Remove(tmpPath)
+		}()
 
-		metas, err := e.uploadChunks(tmpFile, fileID, size)
+		metas, err := e.uploadChunksTracked(tmpFile, fileID, virtualPath, size)
 		if err != nil {
+			// Mark as failed in the progress tracker so the UI shows it.
+			e.uploadsMu.Lock()
+			if p, ok := e.uploads[fileID]; ok {
+				p.Failed = true
+			}
+			e.uploadsMu.Unlock()
 			// Keep the file record so the user can still see and delete the file.
 			slog.Error("background upload failed",
 				"path", virtualPath, "error", err)
@@ -156,6 +191,10 @@ func (e *Engine) WriteFileAsync(virtualPath string, tmpFile *os.File, tmpPath st
 			return
 		}
 
+		if err := e.db.SetUploadComplete(fileID); err != nil {
+			slog.Warn("failed to mark upload complete in DB", "path", virtualPath, "error", err)
+		}
+
 		slog.Info("file written", "path", virtualPath, "size", size, "chunks", len(metas))
 		e.scheduleBackup()
 	}()
@@ -165,8 +204,9 @@ func (e *Engine) WriteFileAsync(virtualPath string, tmpFile *os.File, tmpPath st
 
 // prepareFileWrite hashes the data, deletes any existing file, and inserts the
 // new file record. It returns the fileID and hash. The reader is rewound to the
-// start, ready for chunk reading.
-func (e *Engine) prepareFileWrite(virtualPath string, r io.ReadSeeker, size int64) (string, string, error) {
+// start, ready for chunk reading. tmpPath, if non-empty, is stored in the DB so
+// the upload can be resumed after a daemon restart.
+func (e *Engine) prepareFileWrite(virtualPath string, r io.ReadSeeker, size int64, tmpPath string) (string, string, error) {
 	hasher := sha256.New()
 	if _, err := io.Copy(hasher, r); err != nil {
 		return "", "", fmt.Errorf("hashing file: %w", err)
@@ -194,6 +234,12 @@ func (e *Engine) prepareFileWrite(virtualPath string, r io.ReadSeeker, size int6
 
 	fileID := uuid.New().String()
 	now := time.Now().Unix()
+	uploadState := "complete"
+	var dbTmpPath *string
+	if tmpPath != "" {
+		uploadState = "pending"
+		dbTmpPath = &tmpPath
+	}
 	if err := e.db.InsertFile(&metadata.File{
 		ID:          fileID,
 		VirtualPath: virtualPath,
@@ -201,6 +247,8 @@ func (e *Engine) prepareFileWrite(virtualPath string, r io.ReadSeeker, size int6
 		CreatedAt:   now,
 		ModifiedAt:  now,
 		SHA256Full:  fullHashStr,
+		UploadState: uploadState,
+		TmpPath:     dbTmpPath,
 	}); err != nil {
 		return "", "", fmt.Errorf("inserting file record: %w", err)
 	}
@@ -211,8 +259,9 @@ func (e *Engine) prepareFileWrite(virtualPath string, r io.ReadSeeker, size int6
 // uploadChunks reads, encrypts, and uploads chunks concurrently with retry.
 // Chunk size is chosen dynamically based on fileSize to keep the total chunk
 // count near ~100, reducing cloud API calls for large files.
+// onChunkUploaded, if non-nil, is called after each successful chunk upload.
 // Returns the ordered slice of chunk metadata on success.
-func (e *Engine) uploadChunks(r io.ReadSeeker, fileID string, fileSize int64) ([]chunkMeta, error) {
+func (e *Engine) uploadChunks(r io.ReadSeeker, fileID string, fileSize int64, onChunkUploaded func()) ([]chunkMeta, error) {
 	chunkSize := chunker.ChunkSizeForFile(fileSize)
 	workers := workersForChunkSize(chunkSize)
 	slog.Debug("upload plan", "fileSize", fileSize, "chunkSize", chunkSize, "workers", workers)
@@ -296,6 +345,9 @@ func (e *Engine) uploadChunks(r io.ReadSeeker, fileID string, fileSize int64) ([
 					continue
 				}
 				slog.Debug("chunk uploaded", "seq", seq, "provider", prov.DisplayName)
+				if onChunkUploaded != nil {
+					onChunkUploaded()
+				}
 				return // success
 			}
 			mu.Lock()
@@ -341,6 +393,103 @@ func (e *Engine) insertChunkMetadata(fileID string, metas []chunkMeta) error {
 		}
 	}
 	return nil
+}
+
+// uploadChunksTracked registers upload progress for fileID, then delegates to
+// uploadChunks with a callback that increments the chunk counter.
+func (e *Engine) uploadChunksTracked(r io.ReadSeeker, fileID, virtualPath string, fileSize int64) ([]chunkMeta, error) {
+	chunkSize := chunker.ChunkSizeForFile(fileSize)
+	estimated := int(fileSize/int64(chunkSize)) + 1
+
+	e.uploadsMu.Lock()
+	e.uploads[fileID] = &uploadProgress{
+		VirtualPath: virtualPath,
+		TotalChunks: estimated,
+		SizeBytes:   fileSize,
+		StartedAt:   time.Now(),
+	}
+	e.uploadsMu.Unlock()
+
+	callback := func() {
+		e.uploadsMu.Lock()
+		if p, ok := e.uploads[fileID]; ok {
+			p.ChunksUploaded++
+			if p.ChunksUploaded > p.TotalChunks {
+				p.TotalChunks = p.ChunksUploaded
+			}
+		}
+		e.uploadsMu.Unlock()
+	}
+
+	metas, err := e.uploadChunks(r, fileID, fileSize, callback)
+	if err != nil {
+		return nil, err
+	}
+
+	// Correct total once we know the actual chunk count.
+	e.uploadsMu.Lock()
+	if p, ok := e.uploads[fileID]; ok {
+		p.TotalChunks = len(metas)
+	}
+	e.uploadsMu.Unlock()
+
+	return metas, nil
+}
+
+// UploadProgress returns a snapshot of all currently in-flight async uploads.
+func (e *Engine) UploadProgress() []UploadProgressInfo {
+	e.uploadsMu.RLock()
+	defer e.uploadsMu.RUnlock()
+
+	out := make([]UploadProgressInfo, 0, len(e.uploads))
+	for _, p := range e.uploads {
+		out = append(out, UploadProgressInfo{
+			VirtualPath:    p.VirtualPath,
+			TotalChunks:    p.TotalChunks,
+			ChunksUploaded: p.ChunksUploaded,
+			SizeBytes:      p.SizeBytes,
+			StartedAt:      p.StartedAt,
+			Failed:         p.Failed,
+		})
+	}
+	return out
+}
+
+// ResumeUploads re-queues any uploads that were interrupted by a prior daemon
+// restart. It reads pending file records from the DB, checks that the tmp file
+// still exists on disk, and hands each one back to WriteFileAsync.
+func (e *Engine) ResumeUploads() {
+	pending, err := e.db.GetPendingUploads()
+	if err != nil {
+		slog.Error("failed to query pending uploads", "error", err)
+		return
+	}
+	for _, f := range pending {
+		if f.TmpPath == nil {
+			slog.Warn("pending file has no tmp_path, removing", "path", f.VirtualPath)
+			e.db.DeleteFile(f.ID) //nolint:errcheck
+			continue
+		}
+		tmpPath := *f.TmpPath
+		if _, err := os.Stat(tmpPath); err != nil {
+			slog.Warn("tmp file missing for pending upload, removing record",
+				"path", f.VirtualPath, "tmpPath", tmpPath)
+			e.db.DeleteFile(f.ID) //nolint:errcheck
+			continue
+		}
+		tmpFile, err := os.Open(tmpPath)
+		if err != nil {
+			slog.Error("cannot open tmp file for pending upload",
+				"path", f.VirtualPath, "tmpPath", tmpPath, "error", err)
+			continue
+		}
+		slog.Info("resuming interrupted upload", "path", f.VirtualPath, "size", f.SizeBytes)
+		// WriteFileAsync takes ownership of tmpFile and tmpPath.
+		if err := e.WriteFileAsync(f.VirtualPath, tmpFile, tmpPath, f.SizeBytes); err != nil {
+			slog.Error("failed to resume upload", "path", f.VirtualPath, "error", err)
+			tmpFile.Close()
+		}
+	}
 }
 
 // ReadFile reads a file from the virtual filesystem, downloading and decrypting chunks.
