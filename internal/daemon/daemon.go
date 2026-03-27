@@ -28,6 +28,7 @@ type Config struct {
 	EncKey       []byte // 32-byte AES-256 key
 	BrokerPolicy string // "pfrd" or "mfs"
 	MinFreeSpace int64  // bytes to keep free on each provider
+	SkipRestore  bool   // skip cloud DB restore on startup (useful after a manual wipe)
 }
 
 // Daemon is the main pdrive daemon that ties everything together.
@@ -77,12 +78,12 @@ func (d *Daemon) Start(ctx context.Context) error {
 		return fmt.Errorf("starting rclone: %w", err)
 	}
 
-	// If local DB is empty, try to restore from a cloud backup.
+	// If local DB is empty and restore is not disabled, try to restore from a cloud backup.
 	var fileCount int
 	d.db.Conn().QueryRow("SELECT COUNT(*) FROM files").Scan(&fileCount)
 	var provCount int
 	d.db.Conn().QueryRow("SELECT COUNT(*) FROM providers").Scan(&provCount)
-	if fileCount == 0 && provCount == 0 {
+	if !d.config.SkipRestore && fileCount == 0 && provCount == 0 {
 		if restored := d.tryRestoreDB(dbPath); restored {
 			// Reopen the DB after restore.
 			d.db.Close()
@@ -91,6 +92,16 @@ func (d *Daemon) Start(ctx context.Context) error {
 				return fmt.Errorf("reopening restored DB: %w", err)
 			}
 			d.db = db
+			// Validate: if the restored DB has chunk records but no matching
+			// cloud chunks exist, discard the restore to avoid ghost files.
+			if !d.validateRestoredDB() {
+				slog.Warn("restored DB failed cloud validation — discarding and starting fresh")
+				d.db.Close()
+				if err := os.Remove(dbPath); err == nil {
+					db, _ = metadata.Open(dbPath)
+					d.db = db
+				}
+			}
 		}
 	}
 
@@ -153,6 +164,46 @@ func (d *Daemon) Stop() {
 // Engine returns the daemon's engine (useful for testing).
 func (d *Daemon) Engine() *engine.Engine {
 	return d.engine
+}
+
+// validateRestoredDB checks that the chunk records in the restored DB correspond
+// to files that actually exist on the cloud. Returns false if the DB looks stale
+// (i.e., has chunk locations pointing to cloud objects that no longer exist).
+func (d *Daemon) validateRestoredDB() bool {
+	var chunkCount int
+	d.db.Conn().QueryRow("SELECT COUNT(*) FROM chunk_locations").Scan(&chunkCount)
+	if chunkCount == 0 {
+		// Empty or providers-only DB — always valid.
+		return true
+	}
+
+	// Sample up to 3 chunk locations and verify they exist on cloud.
+	rows, err := d.db.Conn().Query(
+		`SELECT cl.provider_id, cl.remote_path, p.rclone_remote
+		   FROM chunk_locations cl
+		   JOIN providers p ON p.id = cl.provider_id
+		  LIMIT 3`)
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var provID, remotePath, rcloneRemote string
+		if err := rows.Scan(&provID, &remotePath, &rcloneRemote); err != nil {
+			continue
+		}
+		// Use a lightweight directory listing of the parent folder to check existence
+		// without downloading the full chunk.
+		dir := path.Dir(remotePath)
+		items, err := d.rclone.Client().ListDir(rcloneRemote, dir)
+		if err != nil || len(items) == 0 {
+			slog.Warn("restored DB references missing cloud chunk — treating as stale",
+				"provider", provID, "path", remotePath)
+			return false
+		}
+	}
+	return true
 }
 
 // tryRestoreDB attempts to download a metadata DB backup from any configured rclone remote.

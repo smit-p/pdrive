@@ -1,5 +1,5 @@
 # Binaries
-pdrive
+/pdrive
 *.exe
 
 # Go build cache
