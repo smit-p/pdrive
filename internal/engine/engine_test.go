@@ -765,7 +765,7 @@ func TestFileExists_Variants(t *testing.T) {
 		want bool
 	}{
 		{"/complete.txt", true},
-		{"/pending.mkv", true},  // FileExists sees ALL states
+		{"/pending.mkv", true}, // FileExists sees ALL states
 		{"/missing.txt", false},
 	}
 	for _, c := range cases {
