@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"log/slog"
 	"os"
+	"path"
+	"strings"
 	"sync"
 	"time"
 )
@@ -73,4 +75,87 @@ func (e *Engine) BackupDB() error {
 
 	slog.Info("metadata DB backed up to cloud", "provider", provider.DisplayName, "size", len(data))
 	return nil
+}
+
+// GCOrphanedChunks reconciles cloud storage against the metadata DB:
+//   - Cloud objects with no DB record → deleted (true orphans from failed uploads/crashes)
+//   - DB records with no cloud object → logged as warnings (broken/unreadable files)
+//
+// Safe to call concurrently with uploads; it only touches objects in pdrive-chunks/
+// and never removes anything that has a valid DB entry.
+func (e *Engine) GCOrphanedChunks() {
+	providers, err := e.db.GetAllProviders()
+	if err != nil || len(providers) == 0 {
+		return
+	}
+
+	// Build set of all remote_paths the DB knows about, keyed by provider.
+	allLocs, err := e.db.GetAllChunkLocations()
+	if err != nil {
+		slog.Warn("gc: failed to load chunk locations", "error", err)
+		return
+	}
+	// known[providerID][remotePath] = true
+	known := make(map[string]map[string]bool, len(providers))
+	for _, loc := range allLocs {
+		if known[loc.ProviderID] == nil {
+			known[loc.ProviderID] = make(map[string]bool)
+		}
+		known[loc.ProviderID][loc.RemotePath] = true
+	}
+
+	var orphansDeleted, brokenRecords int
+
+	for _, p := range providers {
+		items, err := e.rc.ListDir(p.RcloneRemote, chunkRemoteDir)
+		if err != nil {
+			// Folder may not exist yet (fresh install) — not an error.
+			slog.Debug("gc: could not list cloud chunks", "provider", p.DisplayName, "error", err)
+			continue
+		}
+
+		provKnown := known[p.ID]
+		for _, item := range items {
+			if item.IsDir {
+				continue
+			}
+			// remote_path stored in DB is e.g. "pdrive-chunks/<uuid>"
+			remotePath := path.Join(chunkRemoteDir, item.Name)
+			// Normalise — rclone may return "pdrive-chunks/uuid" or just "uuid"
+			if !strings.HasPrefix(item.Path, chunkRemoteDir) {
+				remotePath = path.Join(chunkRemoteDir, item.Path)
+			} else {
+				remotePath = item.Path
+			}
+
+			if !provKnown[remotePath] {
+				slog.Info("gc: deleting orphaned chunk",
+					"provider", p.DisplayName, "path", remotePath)
+				if err := e.rc.DeleteFile(p.RcloneRemote, remotePath); err != nil {
+					slog.Warn("gc: failed to delete orphaned chunk",
+						"provider", p.DisplayName, "path", remotePath, "error", err)
+				} else {
+					orphansDeleted++
+				}
+			}
+		}
+
+		// Inverse check: DB records for this provider with no cloud object.
+		cloudPaths := make(map[string]bool, len(items))
+		for _, item := range items {
+			cloudPaths[item.Path] = true
+			cloudPaths[path.Join(chunkRemoteDir, item.Name)] = true
+		}
+		for remotePath := range provKnown {
+			if !cloudPaths[remotePath] && !cloudPaths[path.Base(remotePath)] {
+				slog.Warn("gc: DB record references missing cloud object — file may be unreadable",
+					"provider", p.DisplayName, "path", remotePath)
+				brokenRecords++
+			}
+		}
+	}
+
+	slog.Info("gc: orphan scan complete",
+		"orphans_deleted", orphansDeleted,
+		"broken_db_records", brokenRecords)
 }

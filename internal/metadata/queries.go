@@ -342,6 +342,27 @@ func (db *DB) GetChunkLocationsForFile(fileID string) ([]ChunkLocation, error) {
 	return locs, rows.Err()
 }
 
+// GetAllChunkLocations returns every chunk_location record in the database.
+// Used by the orphan GC to build the set of cloud objects that should exist.
+func (db *DB) GetAllChunkLocations() ([]ChunkLocation, error) {
+	rows, err := db.conn.Query(
+		`SELECT chunk_id, provider_id, remote_path, upload_confirmed_at FROM chunk_locations`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var locs []ChunkLocation
+	for rows.Next() {
+		var cl ChunkLocation
+		if err := rows.Scan(&cl.ChunkID, &cl.ProviderID, &cl.RemotePath, &cl.UploadConfirmedAt); err != nil {
+			return nil, err
+		}
+		locs = append(locs, cl)
+	}
+	return locs, rows.Err()
+}
+
 // FileExists checks if a virtual path exists in the database.
 func (db *DB) FileExists(virtualPath string) (bool, error) {
 	var count int

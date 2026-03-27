@@ -138,6 +138,19 @@ func (d *Daemon) Start(ctx context.Context) error {
 		"webdav", d.config.WebDAVAddr,
 		"rclone", d.config.RcloneAddr,
 	)
+
+	// Run orphan GC: first pass after 60s (let any in-progress uploads settle),
+	// then every 24h. Runs entirely in the background.
+	go func() {
+		time.Sleep(60 * time.Second)
+		d.engine.GCOrphanedChunks()
+		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		for range ticker.C {
+			d.engine.GCOrphanedChunks()
+		}
+	}()
+
 	return nil
 }
 
