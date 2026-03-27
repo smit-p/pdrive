@@ -136,6 +136,21 @@ func (db *DB) GetFileByPath(virtualPath string) (*File, error) {
 	f := &File{}
 	err := db.conn.QueryRow(
 		`SELECT id, virtual_path, size_bytes, created_at, modified_at, sha256_full, upload_state, tmp_path
+		 FROM files WHERE virtual_path = ?`, virtualPath,
+	).Scan(&f.ID, &f.VirtualPath, &f.SizeBytes, &f.CreatedAt, &f.ModifiedAt, &f.SHA256Full, &f.UploadState, &f.TmpPath)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return f, err
+}
+
+// GetCompleteFileByPath returns the file record only if it is fully uploaded.
+// Used for read operations (Stat, ReadFile) where pending files must appear
+// "not yet visible" to the mount.
+func (db *DB) GetCompleteFileByPath(virtualPath string) (*File, error) {
+	f := &File{}
+	err := db.conn.QueryRow(
+		`SELECT id, virtual_path, size_bytes, created_at, modified_at, sha256_full, upload_state, tmp_path
 		 FROM files WHERE virtual_path = ? AND upload_state = 'complete'`, virtualPath,
 	).Scan(&f.ID, &f.VirtualPath, &f.SizeBytes, &f.CreatedAt, &f.ModifiedAt, &f.SHA256Full, &f.UploadState, &f.TmpPath)
 	if err == sql.ErrNoRows {

@@ -35,6 +35,11 @@ func Open(dbPath string) (*DB, error) {
 		return nil, fmt.Errorf("enabling WAL mode: %w", err)
 	}
 
+	// SQLite pragmas are per-connection. Restrict the pool to a single
+	// connection so every query uses the one we configure here. This is the
+	// standard pattern for SQLite in Go and prevents FK/WAL surprises.
+	conn.SetMaxOpenConns(1)
+
 	// Enable foreign keys.
 	if _, err := conn.Exec("PRAGMA foreign_keys=ON"); err != nil {
 		conn.Close()

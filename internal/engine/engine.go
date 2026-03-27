@@ -18,6 +18,15 @@ import (
 	"github.com/smit-p/pdrive/internal/rclonerc"
 )
 
+// cloudStorage is the interface the Engine uses to talk to cloud providers.
+// *rclonerc.Client satisfies this interface in production; tests use a fake.
+type cloudStorage interface {
+	PutFile(remote, remotePath string, data io.Reader) error
+	GetFile(remote, remotePath string) ([]byte, error)
+	DeleteFile(remote, remotePath string) error
+	ListDir(remote, remotePath string) ([]rclonerc.ListItem, error)
+}
+
 const chunkRemoteDir = "pdrive-chunks"
 
 // uploadProgress tracks in-flight async upload state.
@@ -44,10 +53,13 @@ type UploadProgressInfo struct {
 type Engine struct {
 	db           *metadata.DB
 	dbPath       string
-	rc           *rclonerc.Client
+	rc           cloudStorage
 	broker       *broker.Broker
 	encKey       []byte        // AES-256 key (32 bytes)
 	uploadTokens chan struct{} // token bucket: limits upload API calls per second
+	// maxChunkRetries overrides maxUploadRetries when > 0 (used by tests to
+	// avoid long exponential-backoff delays).
+	maxChunkRetries int
 
 	uploadsMu sync.RWMutex
 	uploads   map[string]*uploadProgress // fileID → progress
@@ -62,8 +74,7 @@ const (
 )
 
 // NewEngine creates a new engine.
-func NewEngine(db *metadata.DB, dbPath string, rc *rclonerc.Client, b *broker.Broker, encKey []byte) *Engine {
-	e := &Engine{
+func NewEngine(db *metadata.DB, dbPath string, rc *rclonerc.Client, b *broker.Broker, encKey []byte) *Engine {	e := &Engine{
 		db:           db,
 		dbPath:       dbPath,
 		rc:           rc,
@@ -132,6 +143,17 @@ type chunkMeta struct {
 
 // WriteFileStream writes a file from a stream synchronously (hash + upload + metadata).
 func (e *Engine) WriteFileStream(virtualPath string, r io.ReadSeeker, size int64) error {
+	// Delete any existing record (complete or pending) at this path so the
+	// INSERT below never hits a UNIQUE constraint on virtual_path.
+	existing, _ := e.db.GetFileByPath(virtualPath)
+	if existing != nil {
+		locs, _ := e.db.GetChunkLocationsForFile(existing.ID)
+		e.db.DeleteFile(existing.ID) //nolint:errcheck
+		if len(locs) > 0 {
+			go e.deleteCloudChunks(locs)
+		}
+	}
+
 	fileID := uuid.New().String()
 	hasher := sha256.New()
 	if _, err := io.Copy(hasher, r); err != nil {
@@ -145,9 +167,8 @@ func (e *Engine) WriteFileStream(virtualPath string, r io.ReadSeeker, size int64
 	if err != nil {
 		return err
 	}
-	if err := e.insertChunkMetadata(fileID, metas); err != nil {
-		return err
-	}
+	// Insert the file record FIRST — chunk records have a FK to files.id so the
+	// parent row must exist before we insert children.
 	now := time.Now().Unix()
 	if err := e.db.InsertFile(&metadata.File{
 		ID:          fileID,
@@ -159,6 +180,10 @@ func (e *Engine) WriteFileStream(virtualPath string, r io.ReadSeeker, size int64
 		UploadState: "complete",
 		TmpPath:     nil,
 	}); err != nil {
+		return err
+	}
+	if err := e.insertChunkMetadata(fileID, metas); err != nil {
+		e.db.DeleteFile(fileID) //nolint:errcheck
 		return err
 	}
 	slog.Info("file written", "path", virtualPath, "size", size, "chunks", len(metas))
@@ -221,10 +246,20 @@ func (e *Engine) WriteFileAsync(virtualPath string, tmpFile *os.File, tmpPath st
 		metas, err := e.uploadChunksTracked(tmpFile, fileID, virtualPath, size)
 		if err != nil {
 			slog.Error("background upload failed", "path", virtualPath, "error", err)
+			// Remove the pending record so the path is free for retry and
+			// the file doesn't appear stuck/unreadable.
+			if delErr := e.db.DeleteFile(fileID); delErr != nil {
+				slog.Error("failed to remove pending record after upload failure",
+					"path", virtualPath, "error", delErr)
+			}
 			return
 		}
 		if err := e.insertChunkMetadata(fileID, metas); err != nil {
 			slog.Error("failed to insert chunk metadata", "path", virtualPath, "error", err)
+			if delErr := e.db.DeleteFile(fileID); delErr != nil {
+				slog.Error("failed to remove pending record after metadata failure",
+					"path", virtualPath, "error", delErr)
+			}
 			return
 		}
 		if err := e.db.SetUploadComplete(fileID); err != nil {
@@ -361,8 +396,12 @@ func (e *Engine) uploadChunks(r io.ReadSeeker, fileID string, fileSize int64, on
 		wg.Add(1)
 		go func(enc []byte, remote string, prov *metadata.Provider, seq int) {
 			defer func() { <-sem; wg.Done() }()
+			retries := maxUploadRetries
+			if e.maxChunkRetries > 0 {
+				retries = e.maxChunkRetries
+			}
 			var lastErr error
-			for attempt := 0; attempt < maxUploadRetries; attempt++ {
+			for attempt := 0; attempt < retries; attempt++ {
 				if attempt > 0 {
 					backoff := time.Duration(1<<uint(attempt)) * time.Second
 					if backoff > 30*time.Second {
@@ -388,7 +427,7 @@ func (e *Engine) uploadChunks(r io.ReadSeeker, fileID string, fileSize int64, on
 			mu.Lock()
 			if firstErr == nil {
 				firstErr = fmt.Errorf("uploading chunk %d to %s after %d retries: %w",
-					seq, prov.DisplayName, maxUploadRetries, lastErr)
+							seq, prov.DisplayName, retries, lastErr)
 			}
 			mu.Unlock()
 		}(encrypted, remotePath, provider, chunk.Sequence)
@@ -528,12 +567,17 @@ func (e *Engine) ResumeUploads() {
 }
 
 // ReadFile reads a file from the virtual filesystem, downloading and decrypting chunks.
+// Returns an error if the file is still uploading (upload_state='pending').
 func (e *Engine) ReadFile(virtualPath string) ([]byte, error) {
-	file, err := e.db.GetFileByPath(virtualPath)
+	file, err := e.db.GetCompleteFileByPath(virtualPath)
 	if err != nil {
 		return nil, fmt.Errorf("looking up file: %w", err)
 	}
 	if file == nil {
+		// Check if the file exists but is still uploading.
+		if any, _ := e.db.GetFileByPath(virtualPath); any != nil {
+			return nil, fmt.Errorf("file upload in progress: %s", virtualPath)
+		}
 		return nil, fmt.Errorf("file not found: %s", virtualPath)
 	}
 

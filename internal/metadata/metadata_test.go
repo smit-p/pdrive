@@ -1,6 +1,7 @@
 package metadata
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -267,5 +268,291 @@ func TestListFilesAndDirs(t *testing.T) {
 	}
 	if !isDir {
 		t.Error("/sub/ should be a directory")
+	}
+}
+
+// ── Upload-state tests ──────────────────────────────────────────────────────
+
+func seedProvider(t *testing.T, db *DB) {
+	t.Helper()
+	total, free := int64(15e9), int64(10e9)
+	db.UpsertProvider(&Provider{
+		ID: "p1", Type: "drive", DisplayName: "GDrive", RcloneRemote: "gdrive",
+		QuotaTotalBytes: &total, QuotaFreeBytes: &free,
+	})
+}
+
+func newCompleteFile(id, path string) *File {
+	now := time.Now().Unix()
+	return &File{ID: id, VirtualPath: path, SizeBytes: 1024,
+		CreatedAt: now, ModifiedAt: now, SHA256Full: "hash", UploadState: "complete"}
+}
+
+func newPendingFile(id, path, tmpPath string) *File {
+	now := time.Now().Unix()
+	f := &File{ID: id, VirtualPath: path, SizeBytes: 655 * 1024 * 1024,
+		CreatedAt: now, ModifiedAt: now, SHA256Full: "hash", UploadState: "pending"}
+	f.TmpPath = &tmpPath
+	return f
+}
+
+// TestGetFileByPath_ReturnsPendingRecords verifies that GetFileByPath returns
+// both pending and complete records (required so Stat after a PUT succeeds and
+// overwrite logic can find and delete existing pending records).
+func TestGetFileByPath_ReturnsPendingRecords(t *testing.T) {
+	db := testDB(t)
+	seedProvider(t, db)
+
+	if err := db.InsertFile(newPendingFile("f1", "/movie.mkv", "/tmp/x")); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := db.GetFileByPath("/movie.mkv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil {
+		t.Fatal("GetFileByPath must return pending records")
+	}
+	if got.UploadState != "pending" {
+		t.Errorf("expected pending, got %q", got.UploadState)
+	}
+}
+
+// TestGetCompleteFileByPath_HidesPendingRecords verifies that the read-path
+// query does NOT return pending files.
+func TestGetCompleteFileByPath_HidesPendingRecords(t *testing.T) {
+	db := testDB(t)
+	seedProvider(t, db)
+
+	if err := db.InsertFile(newPendingFile("f1", "/movie.mkv", "/tmp/x")); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := db.GetCompleteFileByPath("/movie.mkv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != nil {
+		t.Error("GetCompleteFileByPath must not return pending records")
+	}
+
+	// Mark complete; now it should be visible.
+	if err := db.SetUploadComplete("f1"); err != nil {
+		t.Fatal(err)
+	}
+	got, err = db.GetCompleteFileByPath("/movie.mkv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil {
+		t.Fatal("GetCompleteFileByPath must return complete records")
+	}
+}
+
+// TestListFiles_HidesPendingFiles verifies that directory listings only show
+// complete files so that partially-uploaded files are invisible in the mount.
+func TestListFiles_HidesPendingFiles(t *testing.T) {
+	db := testDB(t)
+	seedProvider(t, db)
+
+	db.InsertFile(newCompleteFile("f1", "/dir/complete.txt"))
+	db.InsertFile(newPendingFile("f2", "/dir/pending.mkv", "/tmp/p"))
+
+	files, err := db.ListFiles("/dir/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("expected 1 file in listing, got %d (pending must be hidden)", len(files))
+	}
+	if files[0].ID != "f1" {
+		t.Errorf("expected complete file f1, got %q", files[0].ID)
+	}
+}
+
+// TestGetPendingUploads verifies that GetPendingUploads finds pending records
+// for ResumeUploads to pick up on daemon restart.
+func TestGetPendingUploads(t *testing.T) {
+	db := testDB(t)
+	seedProvider(t, db)
+
+	db.InsertFile(newCompleteFile("f1", "/ready.txt"))
+	db.InsertFile(newPendingFile("f2", "/uploading.mkv", "/tmp/u"))
+
+	pending, err := db.GetPendingUploads()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("expected 1 pending upload, got %d", len(pending))
+	}
+	if pending[0].ID != "f2" {
+		t.Errorf("expected f2, got %q", pending[0].ID)
+	}
+}
+
+// TestUploadStateLifecycle tests the complete pending→complete transition and
+// verifies visibility at each stage.
+func TestUploadStateLifecycle(t *testing.T) {
+	db := testDB(t)
+	seedProvider(t, db)
+
+	// Insert as pending.
+	tmp := "/tmp/lifecycle"
+	if err := db.InsertFile(newPendingFile("f1", "/video.mkv", tmp)); err != nil {
+		t.Fatal(err)
+	}
+
+	// Not visible in listing.
+	files, _ := db.ListFiles("/")
+	if len(files) != 0 {
+		t.Error("pending file must not show in directory listing")
+	}
+
+	// Visible via direct lookup.
+	f, _ := db.GetFileByPath("/video.mkv")
+	if f == nil || f.UploadState != "pending" {
+		t.Error("GetFileByPath must find the pending record")
+	}
+	if f.TmpPath == nil || *f.TmpPath != tmp {
+		t.Error("TmpPath must be stored")
+	}
+
+	// Not visible to read operations.
+	if c, _ := db.GetCompleteFileByPath("/video.mkv"); c != nil {
+		t.Error("GetCompleteFileByPath must hide the pending record")
+	}
+
+	// Mark complete.
+	if err := db.SetUploadComplete("f1"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Now visible everywhere.
+	files, _ = db.ListFiles("/")
+	if len(files) != 1 {
+		t.Error("complete file must show in directory listing")
+	}
+	if c, _ := db.GetCompleteFileByPath("/video.mkv"); c == nil {
+		t.Error("GetCompleteFileByPath must find complete record")
+	}
+	// TmpPath cleared.
+	f, _ = db.GetFileByPath("/video.mkv")
+	if f.TmpPath != nil {
+		t.Error("TmpPath must be cleared after SetUploadComplete")
+	}
+}
+
+// TestOverwritePendingWithNewWrite verifies that writing a file to a path that
+// already has a pending record succeeds (the old record must be replaced, not
+// cause a UNIQUE constraint violation).
+func TestOverwritePendingWithNewWrite(t *testing.T) {
+	db := testDB(t)
+	seedProvider(t, db)
+
+	// Insert a stuck pending record.
+	if err := db.InsertFile(newPendingFile("old", "/movie.mkv", "/tmp/old")); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate what WriteFileAsync does: find + delete the old record, insert new.
+	existing, err := db.GetFileByPath("/movie.mkv")
+	if err != nil || existing == nil {
+		t.Fatal("must find the existing pending record before overwrite")
+	}
+	if err := db.DeleteFile(existing.ID); err != nil {
+		t.Fatal("must be able to delete the old record")
+	}
+
+	// Insert the new record — must not fail with UNIQUE constraint.
+	if err := db.InsertFile(newPendingFile("new", "/movie.mkv", "/tmp/new")); err != nil {
+		t.Fatalf("inserting new record after delete must succeed: %v", err)
+	}
+
+	f, _ := db.GetFileByPath("/movie.mkv")
+	if f == nil || f.ID != "new" {
+		t.Error("new record should be the active one")
+	}
+}
+
+// TestFKConstraintEnforced verifies that foreign key constraints are enforced
+// (requires SetMaxOpenConns(1) so the PRAGMA applies to all connections).
+func TestFKConstraintEnforced(t *testing.T) {
+	db := testDB(t)
+
+	// Inserting a chunk that references a non-existent file must fail.
+	err := db.InsertChunk(&ChunkRecord{
+		ID:            "c1",
+		FileID:        "nonexistent-file-id",
+		Sequence:      0,
+		SizeBytes:     100,
+		SHA256:        "hash",
+		EncryptedSize: 128,
+	})
+	if err == nil {
+		t.Error("InsertChunk with non-existent file_id must fail (FK constraint)")
+	}
+}
+
+// TestConcurrentWritesFK verifies FK constraints hold under concurrent writes
+// from multiple goroutines (catches the multi-connection PRAGMA bug).
+func TestConcurrentWritesFK(t *testing.T) {
+	db := testDB(t)
+	seedProvider(t, db)
+
+	now := time.Now().Unix()
+	// Insert 10 files and their chunks concurrently.
+	errs := make(chan error, 20)
+	for i := 0; i < 10; i++ {
+		id := fmt.Sprintf("f%d", i)
+		cid := fmt.Sprintf("c%d", i)
+		go func(fileID, chunkID string) {
+			if err := db.InsertFile(&File{
+				ID: fileID, VirtualPath: "/" + fileID + ".bin",
+				SizeBytes: 100, CreatedAt: now, ModifiedAt: now,
+				SHA256Full: "h", UploadState: "complete",
+			}); err != nil {
+				errs <- err
+				return
+			}
+			if err := db.InsertChunk(&ChunkRecord{
+				ID: chunkID, FileID: fileID, Sequence: 0,
+				SizeBytes: 100, SHA256: "h", EncryptedSize: 128,
+			}); err != nil {
+				errs <- err
+				return
+			}
+			errs <- nil
+		}(id, cid)
+	}
+	for i := 0; i < 10; i++ {
+		if err := <-errs; err != nil {
+			t.Errorf("concurrent write error: %v", err)
+		}
+	}
+}
+
+// TestPathIsDir_CountsPendingFiles ensures that a directory with only pending
+// files still reports as a directory (so the parent folder is visible in mount).
+func TestPathIsDir_CountsPendingFiles(t *testing.T) {
+	db := testDB(t)
+	seedProvider(t, db)
+
+	// Only a pending file under /movies/
+	db.InsertFile(newPendingFile("f1", "/movies/clip.mkv", "/tmp/clip"))
+
+	isDir, err := db.PathIsDir("/movies/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !isDir {
+		t.Error("directory with only pending files must still appear as a directory")
+	}
+
+	// But the listing is empty.
+	files, _ := db.ListFiles("/movies/")
+	if len(files) != 0 {
+		t.Error("listing must be empty while file is pending")
 	}
 }
