@@ -642,6 +642,31 @@ func (e *Engine) DeleteDir(dirPath string) error {
 	return nil
 }
 
+// RenameFile updates a file's virtual path in the metadata DB without touching
+// cloud storage. If the destination already exists it is deleted first (its
+// chunks are removed from the cloud in the background).
+func (e *Engine) RenameFile(oldPath, newPath string) error {
+	existing, err := e.db.GetFileByPath(newPath)
+	if err != nil {
+		return fmt.Errorf("checking rename destination: %w", err)
+	}
+	if existing != nil {
+		locs, _ := e.db.GetChunkLocationsForFile(existing.ID)
+		if err := e.db.DeleteFile(existing.ID); err != nil {
+			return fmt.Errorf("deleting existing destination file: %w", err)
+		}
+		if len(locs) > 0 {
+			go e.deleteCloudChunks(locs)
+		}
+	}
+	if err := e.db.RenameFileByPath(oldPath, newPath); err != nil {
+		return fmt.Errorf("renaming file: %w", err)
+	}
+	slog.Info("file renamed", "old", oldPath, "new", newPath)
+	e.scheduleBackup()
+	return nil
+}
+
 // RenameDir renames a directory and all its contents in the metadata DB.
 func (e *Engine) RenameDir(oldPath, newPath string) error {
 	if err := e.db.RenameFilesUnderDir(oldPath, newPath); err != nil {

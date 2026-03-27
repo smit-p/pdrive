@@ -102,15 +102,8 @@ func (fs *WebDAVFS) Rename(ctx context.Context, oldName, newName string) error {
 		return fs.engine.RenameDir(oldName, newName)
 	}
 
-	// Read old file, write to new path, delete old — simple but works for v0.
-	data, err := fs.engine.ReadFile(oldName)
-	if err != nil {
-		return err
-	}
-	if err := fs.engine.WriteFile(newName, data); err != nil {
-		return err
-	}
-	return fs.engine.DeleteFile(oldName)
+	// Rename is a pure metadata operation — the chunks stay in place on cloud.
+	return fs.engine.RenameFile(oldName, newName)
 }
 
 // Stat returns file info.

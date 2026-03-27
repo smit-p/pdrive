@@ -110,6 +110,7 @@ func (e *Engine) GCOrphanedChunks() {
 	}
 
 	var orphansDeleted, brokenRecords int
+	brokenFileIDs := make(map[string]bool)
 
 	for _, p := range providers {
 		items, err := e.rc.ListDir(p.RcloneRemote, chunkRemoteDir)
@@ -145,7 +146,10 @@ func (e *Engine) GCOrphanedChunks() {
 			}
 		}
 
-		// Inverse check: DB records for this provider with no cloud object.
+		// Inverse check: DB records for this provider with no matching cloud object.
+		// Collect the file IDs so we can purge them from the DB entirely — leaving
+		// them in place means they show up in the WebDAV listing as readable files
+		// but every read attempt fails, which can crash macOS Finder.
 		cloudPaths := make(map[string]bool, len(items))
 		for _, item := range items {
 			cloudPaths[item.Path] = true
@@ -153,14 +157,53 @@ func (e *Engine) GCOrphanedChunks() {
 		}
 		for remotePath := range provKnown {
 			if !cloudPaths[remotePath] && !cloudPaths[path.Base(remotePath)] {
-				slog.Warn("gc: DB record references missing cloud object — file may be unreadable",
-					"provider", p.DisplayName, "path", remotePath)
 				brokenRecords++
+				// Look up the file_id that owns this chunk location.
+				var fileID string
+				err := e.db.Conn().QueryRow(`
+					SELECT c.file_id FROM chunk_locations cl
+					JOIN chunks c ON cl.chunk_id = c.id
+					WHERE cl.remote_path = ?
+					LIMIT 1`, remotePath).Scan(&fileID)
+				if err == nil {
+					brokenFileIDs[fileID] = true
+				}
 			}
 		}
 	}
 
+	// Remove all files whose cloud chunks are gone. These are unreadable and
+	// must not be served over WebDAV.
+	for fileID := range brokenFileIDs {
+		// Get virtual_path for logging before deletion.
+		var vpath string
+		_ = e.db.Conn().QueryRow(`SELECT virtual_path FROM files WHERE id = ?`, fileID).Scan(&vpath)
+		slog.Warn("gc: removing file with missing cloud chunks",
+			"fileID", fileID, "path", vpath)
+		if err := e.db.DeleteFile(fileID); err != nil {
+			slog.Error("gc: failed to remove broken file record",
+				"fileID", fileID, "error", err)
+		}
+		// If the files record was already gone (orphaned chunks), clean up directly.
+		_, _ = e.db.Conn().Exec(`DELETE FROM chunk_locations WHERE chunk_id IN (SELECT id FROM chunks WHERE file_id = ?)`, fileID)
+		_, _ = e.db.Conn().Exec(`DELETE FROM chunks WHERE file_id = ?`, fileID)
+	}
+
+	// Sweep any leftover orphaned chunk records where the parent file no longer
+	// exists (can occur if a previous daemon crash left partial state).
+	if _, err := e.db.Conn().Exec(`
+		DELETE FROM chunk_locations WHERE chunk_id IN (
+			SELECT id FROM chunks WHERE file_id NOT IN (SELECT id FROM files)
+		)`); err != nil {
+		slog.Warn("gc: failed to sweep orphaned chunk_locations", "error", err)
+	}
+	if _, err := e.db.Conn().Exec(`
+		DELETE FROM chunks WHERE file_id NOT IN (SELECT id FROM files)`); err != nil {
+		slog.Warn("gc: failed to sweep orphaned chunks", "error", err)
+	}
+
 	slog.Info("gc: orphan scan complete",
 		"orphans_deleted", orphansDeleted,
-		"broken_db_records", brokenRecords)
+		"broken_db_records", brokenRecords,
+		"broken_files_removed", len(brokenFileIDs))
 }

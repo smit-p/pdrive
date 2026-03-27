@@ -500,6 +500,15 @@ func (db *DB) GetFilesUnderDir(dirPath string) ([]File, error) {
 	return files, rows.Err()
 }
 
+// RenameFileByPath updates the virtual_path of a single file record.
+func (db *DB) RenameFileByPath(oldPath, newPath string) error {
+	_, err := db.conn.Exec(
+		`UPDATE files SET virtual_path = ?, modified_at = ? WHERE virtual_path = ?`,
+		newPath, time.Now().Unix(), oldPath,
+	)
+	return err
+}
+
 // RenameFilesUnderDir renames all files under oldDir to be under newDir.
 func (db *DB) RenameFilesUnderDir(oldDir, newDir string) error {
 	oldPrefix := strings.TrimSuffix(oldDir, "/") + "/"
