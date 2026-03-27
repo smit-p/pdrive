@@ -137,6 +137,9 @@ func (e *Engine) GCOrphanedChunks() {
 			if !provKnown[remotePath] {
 				slog.Info("gc: deleting orphaned chunk",
 					"provider", p.DisplayName, "path", remotePath)
+				// Consume a rate-limit token before each cloud API call so GC
+				// doesn't burst through the provider quota and starve uploads.
+				<-e.uploadTokens
 				if err := e.rc.DeleteFile(p.RcloneRemote, remotePath); err != nil {
 					slog.Warn("gc: failed to delete orphaned chunk",
 						"provider", p.DisplayName, "path", remotePath, "error", err)
