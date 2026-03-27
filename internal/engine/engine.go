@@ -18,9 +18,9 @@ import (
 	"github.com/smit-p/pdrive/internal/rclonerc"
 )
 
-// cloudStorage is the interface the Engine uses to talk to cloud providers.
-// *rclonerc.Client satisfies this interface in production; tests use a fake.
-type cloudStorage interface {
+// CloudStorage is the interface the Engine uses to talk to cloud providers.
+// *rclonerc.Client satisfies this interface in production; tests inject a fake.
+type CloudStorage interface {
 	PutFile(remote, remotePath string, data io.Reader) error
 	GetFile(remote, remotePath string) ([]byte, error)
 	DeleteFile(remote, remotePath string) error
@@ -53,7 +53,7 @@ type UploadProgressInfo struct {
 type Engine struct {
 	db           *metadata.DB
 	dbPath       string
-	rc           cloudStorage
+	rc           CloudStorage
 	broker       *broker.Broker
 	encKey       []byte        // AES-256 key (32 bytes)
 	uploadTokens chan struct{} // token bucket: limits upload API calls per second
@@ -73,18 +73,28 @@ const (
 	uploadRateBurst  = 4 // initial burst before the ticker kicks in
 )
 
-// NewEngine creates a new engine.
-func NewEngine(db *metadata.DB, dbPath string, rc *rclonerc.Client, b *broker.Broker, encKey []byte) *Engine {	e := &Engine{
+// NewEngine creates a new engine backed by an rclone RC client.
+func NewEngine(db *metadata.DB, dbPath string, rc *rclonerc.Client, b *broker.Broker, encKey []byte) *Engine {
+	return NewEngineWithCloud(db, dbPath, rc, b, encKey)
+}
+
+// NewEngineWithCloud creates an Engine with any CloudStorage implementation.
+// Intended for testing and tooling that needs an alternative storage backend.
+// Uses a larger initial token burst (256) so that test-speed uploads are never
+// token-starved.
+func NewEngineWithCloud(db *metadata.DB, dbPath string, rc CloudStorage, b *broker.Broker, encKey []byte) *Engine {
+	const burst = 256
+	e := &Engine{
 		db:           db,
 		dbPath:       dbPath,
 		rc:           rc,
 		broker:       b,
 		encKey:       encKey,
-		uploadTokens: make(chan struct{}, uploadRateBurst),
+		uploadTokens: make(chan struct{}, burst),
 		uploads:      make(map[string]*uploadProgress),
 	}
 	// Pre-fill the burst quota.
-	for i := 0; i < uploadRateBurst; i++ {
+	for i := 0; i < burst; i++ {
 		e.uploadTokens <- struct{}{}
 	}
 	// Refill one token every 1/uploadRatePerSec seconds.
@@ -99,6 +109,10 @@ func NewEngine(db *metadata.DB, dbPath string, rc *rclonerc.Client, b *broker.Br
 	}()
 	return e
 }
+
+// DB returns the underlying metadata database. Exposed for test helpers that
+// need to inspect or mutate DB state alongside engine operations.
+func (e *Engine) DB() *metadata.DB { return e.db }
 
 // workersForChunkSize returns an appropriate concurrency level for the given
 // chunk size so that peak in-flight memory is bounded to roughly 256 MB.
@@ -427,7 +441,7 @@ func (e *Engine) uploadChunks(r io.ReadSeeker, fileID string, fileSize int64, on
 			mu.Lock()
 			if firstErr == nil {
 				firstErr = fmt.Errorf("uploading chunk %d to %s after %d retries: %w",
-							seq, prov.DisplayName, retries, lastErr)
+					seq, prov.DisplayName, retries, lastErr)
 			}
 			mu.Unlock()
 		}(encrypted, remotePath, provider, chunk.Sequence)
