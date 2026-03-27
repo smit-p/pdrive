@@ -136,7 +136,7 @@ func (db *DB) GetFileByPath(virtualPath string) (*File, error) {
 	f := &File{}
 	err := db.conn.QueryRow(
 		`SELECT id, virtual_path, size_bytes, created_at, modified_at, sha256_full, upload_state, tmp_path
-		 FROM files WHERE virtual_path = ?`, virtualPath,
+		 FROM files WHERE virtual_path = ? AND upload_state = 'complete'`, virtualPath,
 	).Scan(&f.ID, &f.VirtualPath, &f.SizeBytes, &f.CreatedAt, &f.ModifiedAt, &f.SHA256Full, &f.UploadState, &f.TmpPath)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -210,7 +210,7 @@ func (db *DB) ListFiles(dirPath string) ([]File, error) {
 
 	rows, err := db.conn.Query(
 		`SELECT id, virtual_path, size_bytes, created_at, modified_at, sha256_full, upload_state, tmp_path
-		 FROM files WHERE virtual_path LIKE ? || '%'`, dirPath,
+		 FROM files WHERE virtual_path LIKE ? || '%' AND upload_state = 'complete'`, dirPath,
 	)
 	if err != nil {
 		return nil, err

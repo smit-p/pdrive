@@ -166,27 +166,58 @@ func (e *Engine) WriteFileStream(virtualPath string, r io.ReadSeeker, size int64
 	return nil
 }
 
-// WriteFileAsync hashes and creates the file record synchronously, then uploads
-// chunks in a background goroutine. The caller must NOT close or remove tmpFile;
-// the engine takes ownership and cleans up when done.
+// WriteFileAsync hashes the file synchronously, writes a pending DB record
+// (so uploads survive a daemon restart via ResumeUploads), then uploads chunks
+// in a background goroutine. The file stays invisible in the WebDAV listing
+// until the upload completes (ListFiles/GetFileByPath filter pending records).
+// The caller must NOT close or remove tmpFile; the engine takes ownership.
 func (e *Engine) WriteFileAsync(virtualPath string, tmpFile *os.File, tmpPath string, size int64) error {
+	// Hash synchronously so we can write the pending DB record now.
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, tmpFile); err != nil {
+		tmpFile.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("hashing file: %w", err)
+	}
+	fullHashStr := hex.EncodeToString(hasher.Sum(nil))
+	if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
+		tmpFile.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("rewinding after hash: %w", err)
+	}
+
+	// Delete any existing file at this path.
+	existing, _ := e.db.GetFileByPath(virtualPath)
+	if existing != nil {
+		locs, _ := e.db.GetChunkLocationsForFile(existing.ID)
+		e.db.DeleteFile(existing.ID) //nolint:errcheck
+		if len(locs) > 0 {
+			go e.deleteCloudChunks(locs)
+		}
+	}
+
 	fileID := uuid.New().String()
-	// Do NOT insert the file record yet; wait until upload is complete.
+	now := time.Now().Unix()
+	dbTmpPath := tmpPath
+	if err := e.db.InsertFile(&metadata.File{
+		ID:          fileID,
+		VirtualPath: virtualPath,
+		SizeBytes:   size,
+		CreatedAt:   now,
+		ModifiedAt:  now,
+		SHA256Full:  fullHashStr,
+		UploadState: "pending",
+		TmpPath:     &dbTmpPath,
+	}); err != nil {
+		tmpFile.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("inserting pending file record: %w", err)
+	}
+
 	go func() {
 		defer tmpFile.Close()
 		defer os.Remove(tmpPath)
 
-		// Hash and upload chunks
-		hasher := sha256.New()
-		if _, err := io.Copy(hasher, tmpFile); err != nil {
-			slog.Error("hashing failed", "path", virtualPath, "error", err)
-			return
-		}
-		fullHashStr := hex.EncodeToString(hasher.Sum(nil))
-		if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
-			slog.Error("rewind failed", "path", virtualPath, "error", err)
-			return
-		}
 		metas, err := e.uploadChunksTracked(tmpFile, fileID, virtualPath, size)
 		if err != nil {
 			slog.Error("background upload failed", "path", virtualPath, "error", err)
@@ -196,19 +227,8 @@ func (e *Engine) WriteFileAsync(virtualPath string, tmpFile *os.File, tmpPath st
 			slog.Error("failed to insert chunk metadata", "path", virtualPath, "error", err)
 			return
 		}
-		now := time.Now().Unix()
-		// Only now insert the file record, making it visible to the mount
-		if err := e.db.InsertFile(&metadata.File{
-			ID:          fileID,
-			VirtualPath: virtualPath,
-			SizeBytes:   size,
-			CreatedAt:   now,
-			ModifiedAt:  now,
-			SHA256Full:  fullHashStr,
-			UploadState: "complete",
-			TmpPath:     nil,
-		}); err != nil {
-			slog.Error("inserting file record after upload", "path", virtualPath, "error", err)
+		if err := e.db.SetUploadComplete(fileID); err != nil {
+			slog.Error("failed to mark upload complete", "path", virtualPath, "error", err)
 			return
 		}
 		slog.Info("file written", "path", virtualPath, "size", size, "chunks", len(metas))
