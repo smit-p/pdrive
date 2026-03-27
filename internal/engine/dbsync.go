@@ -48,7 +48,9 @@ func (e *Engine) FlushBackup() {
 	}
 }
 
-// BackupDB uploads the metadata database to the first available cloud provider.
+// BackupDB uploads the metadata database to ALL configured cloud providers.
+// Having a copy on every provider ensures it can be restored after a total
+// loss of one account.
 func (e *Engine) BackupDB() error {
 	if e.dbPath == "" {
 		return nil
@@ -68,13 +70,16 @@ func (e *Engine) BackupDB() error {
 		return err
 	}
 
-	provider := providers[0]
-	if err := e.rc.PutFile(provider.RcloneRemote, dbSyncRemotePath, bytes.NewReader(data)); err != nil {
-		return err
+	var lastErr error
+	for _, provider := range providers {
+		if err := e.rc.PutFile(provider.RcloneRemote, dbSyncRemotePath, bytes.NewReader(data)); err != nil {
+			slog.Warn("metadata DB backup failed", "provider", provider.DisplayName, "error", err)
+			lastErr = err
+			continue
+		}
+		slog.Info("metadata DB backed up to cloud", "provider", provider.DisplayName, "size", len(data))
 	}
-
-	slog.Info("metadata DB backed up to cloud", "provider", provider.DisplayName, "size", len(data))
-	return nil
+	return lastErr
 }
 
 // GCOrphanedChunks reconciles cloud storage against the metadata DB:

@@ -2,9 +2,9 @@ package daemon
 
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
 	"fmt"
-	"html"
 	"log/slog"
 	"net/http"
 	"os"
@@ -19,6 +19,36 @@ import (
 	"github.com/smit-p/pdrive/internal/vfs"
 	"golang.org/x/net/webdav"
 )
+
+//go:embed browser_ui.html
+var browserUIHTML string
+
+// API response types.
+
+type lsFile struct {
+	Name       string `json:"name"`
+	Path       string `json:"path"`
+	Size       int64  `json:"size"`
+	ModifiedAt int64  `json:"modified_at"`
+}
+
+type lsResponse struct {
+	Path  string   `json:"path"`
+	Dirs  []string `json:"dirs"`
+	Files []lsFile `json:"files"`
+}
+
+type statusProvider struct {
+	Name            string `json:"name"`
+	QuotaTotalBytes *int64 `json:"quota_total_bytes"`
+	QuotaFreeBytes  *int64 `json:"quota_free_bytes"`
+}
+
+type statusResponse struct {
+	TotalFiles int64            `json:"total_files"`
+	TotalBytes int64            `json:"total_bytes"`
+	Providers  []statusProvider `json:"providers"`
+}
 
 // Config holds daemon configuration.
 type Config struct {
@@ -254,11 +284,17 @@ type browserHandler struct {
 }
 
 func (h *browserHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// JSON API for upload progress (polled by the browser UI).
-	if r.URL.Path == "/api/uploads" {
+	switch r.URL.Path {
+	case "/api/uploads":
 		ups := h.engine.UploadProgress()
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(ups) //nolint:errcheck
+		return
+	case "/api/ls":
+		h.serveAPILs(w, r)
+		return
+	case "/api/status":
+		h.serveAPIStatus(w, r)
 		return
 	}
 
@@ -268,6 +304,56 @@ func (h *browserHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.davHandler.ServeHTTP(w, r)
+}
+
+func (h *browserHandler) serveAPILs(w http.ResponseWriter, r *http.Request) {
+	p := path.Clean(r.URL.Query().Get("path"))
+	if p == "" || p == "." {
+		p = "/"
+	}
+	dirPath := p
+	if dirPath != "/" {
+		dirPath += "/"
+	}
+	files, dirs, err := h.engine.ListDir(dirPath)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	resp := lsResponse{
+		Path:  p,
+		Dirs:  make([]string, 0, len(dirs)),
+		Files: make([]lsFile, 0, len(files)),
+	}
+	resp.Dirs = append(resp.Dirs, dirs...)
+	for _, f := range files {
+		resp.Files = append(resp.Files, lsFile{
+			Name:       path.Base(f.VirtualPath),
+			Path:       f.VirtualPath,
+			Size:       f.SizeBytes,
+			ModifiedAt: f.ModifiedAt,
+		})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp) //nolint:errcheck
+}
+
+func (h *browserHandler) serveAPIStatus(w http.ResponseWriter, r *http.Request) {
+	st := h.engine.StorageStatus()
+	resp := statusResponse{
+		TotalFiles: st.TotalFiles,
+		TotalBytes: st.TotalBytes,
+		Providers:  make([]statusProvider, 0, len(st.Providers)),
+	}
+	for _, p := range st.Providers {
+		resp.Providers = append(resp.Providers, statusProvider{
+			Name:            p.DisplayName,
+			QuotaTotalBytes: p.QuotaTotalBytes,
+			QuotaFreeBytes:  p.QuotaFreeBytes,
+		})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp) //nolint:errcheck
 }
 
 func (h *browserHandler) serveBrowser(w http.ResponseWriter, r *http.Request) {
@@ -288,114 +374,7 @@ func (h *browserHandler) serveBrowser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Otherwise treat as directory listing.
-	dirPath := p
-	if dirPath != "/" && !strings.HasSuffix(dirPath, "/") {
-		dirPath += "/"
-	}
-
-	files, dirs, err := h.engine.ListDir(dirPath)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	if p != "/" {
-		isDir, _ := h.engine.IsDir(dirPath)
-		if !isDir && len(files) == 0 && len(dirs) == 0 {
-			http.NotFound(w, r)
-			return
-		}
-	}
-
+	// Otherwise serve the SPA shell — JS handles listing and navigation.
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprintf(w, `<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>pdrive — %s</title>
-<style>
-body { font-family: -apple-system, system-ui, sans-serif; max-width: 700px; margin: 40px auto; padding: 0 20px; color: #333; }
-h1 { font-size: 1.4em; border-bottom: 1px solid #ddd; padding-bottom: 8px; }
-a { color: #0366d6; text-decoration: none; }
-a:hover { text-decoration: underline; }
-table { width: 100%%; border-collapse: collapse; }
-td { padding: 6px 12px 6px 0; border-bottom: 1px solid #eee; }
-td.size { text-align: right; color: #666; font-variant-numeric: tabular-nums; }
-.dir { font-weight: 500; }
-.empty { color: #999; font-style: italic; padding: 20px 0; }
-#uploads { margin-bottom: 24px; }
-#uploads h2 { font-size: 1.1em; color: #555; margin: 0 0 10px; }
-.upload-item { margin-bottom: 10px; }
-.upload-name { font-size: 0.9em; margin-bottom: 3px; word-break: break-all; }
-.upload-name.failed { color: #c0392b; }
-.bar-bg { background: #eee; border-radius: 4px; height: 10px; width: 100%%; overflow: hidden; }
-.bar-fg { background: #2ecc71; height: 10px; border-radius: 4px; transition: width 0.4s; }
-.bar-fg.failed { background: #e74c3c; }
-.pct { font-size: 0.8em; color: #666; margin-top: 2px; }
-</style>
-<script>
-function fmtSize(b){if(b>=1073741824)return(b/1073741824).toFixed(1)+' GB';if(b>=1048576)return(b/1048576).toFixed(1)+' MB';if(b>=1024)return(b/1024).toFixed(1)+' KB';return b+' B';}
-function refreshUploads(){
-  fetch('/api/uploads').then(r=>r.json()).then(ups=>{
-    var div=document.getElementById('uploads');
-    if(!ups||ups.length===0){div.innerHTML='';return;}
-    var html='<h2>⬆ Uploading…</h2>';
-    ups.forEach(function(u){
-      var pct=u.TotalChunks>0?Math.round(u.ChunksUploaded/u.TotalChunks*100):0;
-      if(pct>100)pct=100;
-      var failed=u.Failed;
-      html+='<div class="upload-item">';
-      html+='<div class="upload-name'+(failed?' failed':'')+'">'+u.VirtualPath+(failed?' ✗ failed':'')+'</div>';
-      html+='<div class="bar-bg"><div class="bar-fg'+(failed?' failed':'')+'" style="width:'+pct+'%%"></div></div>';
-      html+='<div class="pct">'+pct+'%%  ('+u.ChunksUploaded+'/'+u.TotalChunks+' chunks, '+fmtSize(u.SizeBytes)+')</div>';
-      html+='</div>';
-    });
-    div.innerHTML=html;
-  }).catch(function(){});
-}
-refreshUploads();
-setInterval(refreshUploads,2000);
-</script>
-</head><body>
-<div id="uploads"></div>
-<h1>📁 %s</h1>`, html.EscapeString(p), html.EscapeString(p))
-
-	if p != "/" {
-		parent := path.Dir(strings.TrimSuffix(p, "/"))
-		if parent == "" {
-			parent = "/"
-		}
-		fmt.Fprintf(w, `<table><tr><td class="dir"><a href="%s">⬆ ..</a></td><td></td></tr>`, html.EscapeString(parent))
-	} else {
-		fmt.Fprint(w, `<table>`)
-	}
-
-	for _, d := range dirs {
-		link := path.Join(p, d) + "/"
-		fmt.Fprintf(w, `<tr><td class="dir"><a href="%s">📁 %s/</a></td><td class="size">—</td></tr>`,
-			html.EscapeString(link), html.EscapeString(d))
-	}
-	for _, f := range files {
-		name := path.Base(f.VirtualPath)
-		link := path.Join(p, name)
-		fmt.Fprintf(w, `<tr><td><a href="%s">📄 %s</a></td><td class="size">%s</td></tr>`,
-			html.EscapeString(link), html.EscapeString(name), formatSize(f.SizeBytes))
-	}
-
-	if len(dirs) == 0 && len(files) == 0 {
-		fmt.Fprint(w, `<tr><td colspan="2" class="empty">This directory is empty</td></tr>`)
-	}
-
-	fmt.Fprint(w, `</table></body></html>`)
-}
-
-func formatSize(b int64) string {
-	switch {
-	case b >= 1<<30:
-		return fmt.Sprintf("%.1f GB", float64(b)/float64(1<<30))
-	case b >= 1<<20:
-		return fmt.Sprintf("%.1f MB", float64(b)/float64(1<<20))
-	case b >= 1<<10:
-		return fmt.Sprintf("%.1f KB", float64(b)/float64(1<<10))
-	default:
-		return fmt.Sprintf("%d B", b)
-	}
+	fmt.Fprint(w, browserUIHTML)
 }

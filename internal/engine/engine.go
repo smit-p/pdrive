@@ -132,21 +132,35 @@ type chunkMeta struct {
 
 // WriteFileStream writes a file from a stream synchronously (hash + upload + metadata).
 func (e *Engine) WriteFileStream(virtualPath string, r io.ReadSeeker, size int64) error {
-	fileID, fullHashStr, err := e.prepareFileWrite(virtualPath, r, size, "")
-	if err != nil {
+	fileID := uuid.New().String()
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, r); err != nil {
 		return err
 	}
-	_ = fullHashStr
-
+	fullHashStr := hex.EncodeToString(hasher.Sum(nil))
+	if _, err := r.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
 	metas, err := e.uploadChunks(r, fileID, size, nil)
 	if err != nil {
 		return err
 	}
-
 	if err := e.insertChunkMetadata(fileID, metas); err != nil {
 		return err
 	}
-
+	now := time.Now().Unix()
+	if err := e.db.InsertFile(&metadata.File{
+		ID:          fileID,
+		VirtualPath: virtualPath,
+		SizeBytes:   size,
+		CreatedAt:   now,
+		ModifiedAt:  now,
+		SHA256Full:  fullHashStr,
+		UploadState: "complete",
+		TmpPath:     nil,
+	}); err != nil {
+		return err
+	}
 	slog.Info("file written", "path", virtualPath, "size", size, "chunks", len(metas))
 	e.scheduleBackup()
 	return nil
@@ -156,49 +170,50 @@ func (e *Engine) WriteFileStream(virtualPath string, r io.ReadSeeker, size int64
 // chunks in a background goroutine. The caller must NOT close or remove tmpFile;
 // the engine takes ownership and cleans up when done.
 func (e *Engine) WriteFileAsync(virtualPath string, tmpFile *os.File, tmpPath string, size int64) error {
-	fileID, _, err := e.prepareFileWrite(virtualPath, tmpFile, size, tmpPath)
-	if err != nil {
-		tmpFile.Close()
-		os.Remove(tmpPath)
-		return err
-	}
-
+	fileID := uuid.New().String()
+	// Do NOT insert the file record yet; wait until upload is complete.
 	go func() {
 		defer tmpFile.Close()
-		defer func() {
-			e.uploadsMu.Lock()
-			delete(e.uploads, fileID)
-			e.uploadsMu.Unlock()
-			os.Remove(tmpPath)
-		}()
+		defer os.Remove(tmpPath)
 
-		metas, err := e.uploadChunksTracked(tmpFile, fileID, virtualPath, size)
-		if err != nil {
-			// Mark as failed in the progress tracker so the UI shows it.
-			e.uploadsMu.Lock()
-			if p, ok := e.uploads[fileID]; ok {
-				p.Failed = true
-			}
-			e.uploadsMu.Unlock()
-			// Keep the file record so the user can still see and delete the file.
-			slog.Error("background upload failed",
-				"path", virtualPath, "error", err)
+		// Hash and upload chunks
+		hasher := sha256.New()
+		if _, err := io.Copy(hasher, tmpFile); err != nil {
+			slog.Error("hashing failed", "path", virtualPath, "error", err)
 			return
 		}
-
+		fullHashStr := hex.EncodeToString(hasher.Sum(nil))
+		if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
+			slog.Error("rewind failed", "path", virtualPath, "error", err)
+			return
+		}
+		metas, err := e.uploadChunksTracked(tmpFile, fileID, virtualPath, size)
+		if err != nil {
+			slog.Error("background upload failed", "path", virtualPath, "error", err)
+			return
+		}
 		if err := e.insertChunkMetadata(fileID, metas); err != nil {
 			slog.Error("failed to insert chunk metadata", "path", virtualPath, "error", err)
 			return
 		}
-
-		if err := e.db.SetUploadComplete(fileID); err != nil {
-			slog.Warn("failed to mark upload complete in DB", "path", virtualPath, "error", err)
+		now := time.Now().Unix()
+		// Only now insert the file record, making it visible to the mount
+		if err := e.db.InsertFile(&metadata.File{
+			ID:          fileID,
+			VirtualPath: virtualPath,
+			SizeBytes:   size,
+			CreatedAt:   now,
+			ModifiedAt:  now,
+			SHA256Full:  fullHashStr,
+			UploadState: "complete",
+			TmpPath:     nil,
+		}); err != nil {
+			slog.Error("inserting file record after upload", "path", virtualPath, "error", err)
+			return
 		}
-
 		slog.Info("file written", "path", virtualPath, "size", size, "chunks", len(metas))
 		e.scheduleBackup()
 	}()
-
 	return nil
 }
 
@@ -682,4 +697,24 @@ func (e *Engine) FileExists(virtualPath string) (bool, error) {
 // IsDir checks if a path is a directory (has files underneath it).
 func (e *Engine) IsDir(path string) (bool, error) {
 	return e.db.PathIsDir(path)
+}
+
+// StorageStatus holds aggregate storage statistics.
+type StorageStatus struct {
+	TotalFiles int64
+	TotalBytes int64
+	Providers  []metadata.Provider
+}
+
+// StorageStatus returns total file count, total bytes stored, and per-provider quota info.
+func (e *Engine) StorageStatus() StorageStatus {
+	var totalFiles, totalBytes int64
+	// nolint:errcheck — best-effort stats query
+	e.db.Conn().QueryRow(`SELECT COUNT(*), COALESCE(SUM(size_bytes),0) FROM files`).Scan(&totalFiles, &totalBytes)
+	providers, _ := e.db.GetAllProviders()
+	return StorageStatus{
+		TotalFiles: totalFiles,
+		TotalBytes: totalBytes,
+		Providers:  providers,
+	}
 }
