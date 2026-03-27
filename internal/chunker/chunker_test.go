@@ -10,13 +10,15 @@ import (
 )
 
 func TestSplitAndAssemble(t *testing.T) {
-	// 20 MB of random data
+	// Use an explicit small chunk size so the test doesn't depend on DefaultChunkSize.
+	const testChunkSize = 4 * 1024 * 1024 // 4 MB
+	// 20 MB of random data → 5 chunks
 	data := make([]byte, 20*1024*1024)
 	if _, err := rand.Read(data); err != nil {
 		t.Fatal(err)
 	}
 
-	chunks, err := Split(bytes.NewReader(data), DefaultChunkSize)
+	chunks, err := Split(bytes.NewReader(data), testChunkSize)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,8 +32,8 @@ func TestSplitAndAssemble(t *testing.T) {
 		if c.Sequence != i {
 			t.Errorf("chunk %d has sequence %d", i, c.Sequence)
 		}
-		if c.Size != DefaultChunkSize {
-			t.Errorf("chunk %d size = %d, want %d", i, c.Size, DefaultChunkSize)
+		if c.Size != testChunkSize {
+			t.Errorf("chunk %d size = %d, want %d", i, c.Size, testChunkSize)
 		}
 		hash := sha256.Sum256(c.Data)
 		if hex.EncodeToString(hash[:]) != c.SHA256 {
@@ -200,9 +202,9 @@ func TestChunkSizeForFile(t *testing.T) {
 		{"zero", 0, DefaultChunkSize, DefaultChunkSize},
 		{"1 MB", 1 * 1024 * 1024, DefaultChunkSize, DefaultChunkSize},
 		{"100 MB", 100 * 1024 * 1024, DefaultChunkSize, DefaultChunkSize},
-		{"500 MB", 500 * 1024 * 1024, DefaultChunkSize, MaxChunkSize},
-		{"1 GB", 1024 * 1024 * 1024, 8 * 1024 * 1024, MaxChunkSize},
-		{"2 GB", 2 * 1024 * 1024 * 1024, 16 * 1024 * 1024, MaxChunkSize},
+		{"500 MB", 500 * 1024 * 1024, DefaultChunkSize, DefaultChunkSize},
+		{"1 GB", 1024 * 1024 * 1024, DefaultChunkSize, MaxChunkSize},
+		{"2 GB", 2 * 1024 * 1024 * 1024, DefaultChunkSize, MaxChunkSize},
 		{"10 GB", 10 * 1024 * 1024 * 1024, MaxChunkSize, MaxChunkSize},
 	}
 	for _, tc := range cases {
@@ -212,10 +214,10 @@ func TestChunkSizeForFile(t *testing.T) {
 				t.Errorf("ChunkSizeForFile(%d) = %d, want [%d, %d]",
 					tc.fileSize, got, tc.wantMin, tc.wantMax)
 			}
-			// chunk count sanity: should never exceed targetChunkCount*2
+			// chunk count sanity: with target=25, never exceed targetChunkCount*4
 			if tc.fileSize > 0 {
 				chunkCount := int(tc.fileSize)/got + 1
-				if chunkCount > targetChunkCount*2 {
+				if chunkCount > targetChunkCount*4 {
 					t.Errorf("too many chunks: fileSize=%d chunkSize=%d count=%d",
 						tc.fileSize, got, chunkCount)
 				}

@@ -81,15 +81,15 @@ go build -o pdrive ./cmd/pdrive
 
 ## Flags
 
-| Flag            | Default          | Description                                |
-| --------------- | ---------------- | ------------------------------------------ |
-| `--config-dir`  | `~/.pdrive`      | Directory for metadata DB and config       |
-| `--rclone-addr` | `127.0.0.1:5572` | rclone RC listen address                   |
-| `--webdav-addr` | `127.0.0.1:8765` | WebDAV server listen address               |
-| `--enc-key`     | (test key)       | Hex-encoded 32-byte AES-256 encryption key |
-| `--broker-policy` | `pfrd`         | Chunk placement policy: `pfrd` or `mfs`    |
-| `--min-free-space` | `268435456`   | Minimum free bytes required per provider    |
-| `--debug`       | `false`          | Enable debug logging                       |
+| Flag               | Default          | Description                                |
+| ------------------ | ---------------- | ------------------------------------------ |
+| `--config-dir`     | `~/.pdrive`      | Directory for metadata DB and config       |
+| `--rclone-addr`    | `127.0.0.1:5572` | rclone RC listen address                   |
+| `--webdav-addr`    | `127.0.0.1:8765` | WebDAV server listen address               |
+| `--enc-key`        | (test key)       | Hex-encoded 32-byte AES-256 encryption key |
+| `--broker-policy`  | `pfrd`           | Chunk placement policy: `pfrd` or `mfs`    |
+| `--min-free-space` | `268435456`      | Minimum free bytes required per provider   |
+| `--debug`          | `false`          | Enable debug logging                       |
 
 ## Running Tests
 

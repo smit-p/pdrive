@@ -22,20 +22,20 @@ const chunkRemoteDir = "pdrive-chunks"
 
 // Engine orchestrates file write and read operations.
 type Engine struct {
-	db            *metadata.DB
-	dbPath        string
-	rc            *rclonerc.Client
-	broker        *broker.Broker
-	encKey        []byte        // AES-256 key (32 bytes)
-	uploadTokens  chan struct{}  // token bucket: limits upload API calls per second
+	db           *metadata.DB
+	dbPath       string
+	rc           *rclonerc.Client
+	broker       *broker.Broker
+	encKey       []byte        // AES-256 key (32 bytes)
+	uploadTokens chan struct{} // token bucket: limits upload API calls per second
 }
 
 const (
 	// uploadRatePerSec is the maximum number of chunk-upload API calls per second
 	// across all providers. Google Drive's per-user quota is ~10 req/100s; 8/s
 	// gives comfortable headroom without stalling uploads.
-	uploadRatePerSec  = 8
-	uploadRateBurst   = 4 // initial burst before the ticker kicks in
+	uploadRatePerSec = 8
+	uploadRateBurst  = 4 // initial burst before the ticker kicks in
 )
 
 // NewEngine creates a new engine.

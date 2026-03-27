@@ -9,19 +9,19 @@ import (
 )
 
 const (
-	DefaultChunkSize = 4 * 1024 * 1024  // 4 MB — default / minimum
-	MaxChunkSize     = 64 * 1024 * 1024 // 64 MB — upper bound
-	targetChunkCount = 100              // aim for ~100 chunks per file
+	DefaultChunkSize = 32 * 1024 * 1024  // 32 MB — default / minimum
+	MaxChunkSize     = 128 * 1024 * 1024 // 128 MB — upper bound
+	targetChunkCount = 25                // aim for ~25 chunks per file
 )
 
 // ChunkSizeForFile returns an appropriate chunk size for the given file size.
 // Larger files get proportionally larger chunks to keep the total chunk count
 // near targetChunkCount, reducing the number of cloud API calls.
 //
-//	< 400 MB  → 4 MB  (100 chunks max)
-//	1 GB      → 10 MB (~100 chunks)
-//	2 GB      → 20 MB (~100 chunks)
-//	≥ 6.4 GB  → 64 MB (capped)
+//	< 800 MB  → 32 MB  (~25 chunks or fewer)
+//	1 GB      → 40 MB  (~25 chunks)
+//	2 GB      → 80 MB  (~25 chunks)
+//	≥ 3.2 GB  → 128 MB (capped)
 func ChunkSizeForFile(fileSize int64) int {
 	if fileSize <= 0 {
 		return DefaultChunkSize

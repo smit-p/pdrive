@@ -23,9 +23,9 @@ const (
 
 // Broker assigns chunks to providers based on available space.
 type Broker struct {
-	db            *metadata.DB
-	policy        Policy
-	minFreeSpace  int64 // bytes; providers below this threshold are skipped
+	db           *metadata.DB
+	policy       Policy
+	minFreeSpace int64 // bytes; providers below this threshold are skipped
 }
 
 // NewBroker creates a new space broker.

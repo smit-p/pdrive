@@ -30,10 +30,12 @@ A native FUSE mount is the biggest architecture upgrade for user experience and 
 Two viable options were evaluated:
 
 1. go-fuse (hanwen/go-fuse)
+
 - Strong performance, widely used, low-level control
 - Good choice if we want maximum behavior control
 
 2. cgofuse
+
 - Portable wrapper with easier API in some areas
 - Simpler transition for teams that prefer a more direct callback style
 
@@ -49,6 +51,7 @@ Reason: better ecosystem traction and performance profile for high-operation wor
 - Keep WebDAV mode as fallback during transition
 
 Flow:
+
 1. Kernel/Finder issues FS op -> fusefs handler
 2. fusefs resolves path and operation semantics
 3. calls Engine (ReadFile, WriteFileStream, DeleteFile, DeleteDir, RenameDir, etc.)
@@ -74,6 +77,7 @@ Implement in internal/fusefs:
 - Path normalization and root handling
 
 Mapping:
+
 - Readdir -> Engine.ListDir
 - Getattr -> Engine.Stat + Engine.IsDir
 - Read -> Engine.ReadFile (same current read path)
@@ -89,6 +93,7 @@ Implement:
 - Mkdir / Unlink / Rmdir / Rename
 
 Strategy:
+
 - Reuse temp-file staging model used in WebDAV layer
 - On Release/Flush for large files, dispatch async write path already implemented
 - For small files, use synchronous WriteFileStream
@@ -112,6 +117,7 @@ Deliverable: Finder and shell operations behave predictably under contention.
 - Benchmark suite against WebDAV baseline
 
 KPIs:
+
 - reduced median create/rename/delete latency
 - no timeout-induced failures on multi-GB operations
 - stable memory usage under concurrent copy workloads
@@ -126,20 +132,24 @@ KPIs:
 ## API / Code Changes Required
 
 1. Daemon config
+
 - Add mount backend selection and mountpoint
 - Add startup path for FUSE server lifecycle
 
 2. New package
+
 - internal/fusefs
   - fs.go: node and file handlers
   - errors.go: errno mapping
   - staging.go: temp write file lifecycle
 
 3. Engine touch points
+
 - Optional context-aware cancellation support for long writes
 - Optional lightweight handle-level read streaming API (future optimization)
 
 4. CLI
+
 - Add command/flags:
   - --backend webdav|fuse
   - --mountpoint
@@ -167,15 +177,19 @@ KPIs:
 ## Risks and Mitigations
 
 1. FUSE behavior differs by OS version
+
 - Mitigation: macOS and Linux CI matrix, explicit compatibility table
 
 2. Locking semantics mismatch
+
 - Mitigation: implement strict default lock mode + configuration toggle
 
 3. Increased complexity during dual-backend period
+
 - Mitigation: keep backend-specific logic isolated in vfs/webdav and fusefs packages; Engine remains shared core
 
 4. Background upload visibility
+
 - Mitigation: add upload-state metadata and surface status via logs/API
 
 ## Proposed Milestones
