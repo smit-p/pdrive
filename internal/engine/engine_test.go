@@ -1316,3 +1316,39 @@ func TestGracefulShutdown_WaitsForAsyncUploads(t *testing.T) {
 		t.Error("async upload should have completed before Close() returned")
 	}
 }
+
+// TestConfigurableChunkSize verifies that SetChunkSize overrides the dynamic
+// chunk-size calculation, producing more (smaller) chunks than the default.
+func TestConfigurableChunkSize(t *testing.T) {
+	eng, cloud := newTestEngine(t)
+
+	// Write a 2 KB file with default chunk size → should produce 1 chunk.
+	data := make([]byte, 2048)
+	for i := range data {
+		data[i] = byte(i % 256)
+	}
+	if err := eng.WriteFileStream("/default.bin", bytes.NewReader(data), int64(len(data))); err != nil {
+		t.Fatal(err)
+	}
+	cloud.mu.Lock()
+	defaultChunks := len(cloud.objects)
+	cloud.mu.Unlock()
+
+	// Override chunk size to 512 bytes → a different file should produce 4 chunks.
+	eng.SetChunkSize(512)
+	data2 := make([]byte, 2048)
+	for i := range data2 {
+		data2[i] = byte((i + 7) % 256)
+	}
+	if err := eng.WriteFileStream("/small-chunks.bin", bytes.NewReader(data2), int64(len(data2))); err != nil {
+		t.Fatal(err)
+	}
+	cloud.mu.Lock()
+	smallChunkTotal := len(cloud.objects)
+	cloud.mu.Unlock()
+
+	newChunks := smallChunkTotal - defaultChunks
+	if newChunks < 4 {
+		t.Errorf("expected at least 4 chunks with 512-byte chunk size, got %d", newChunks)
+	}
+}

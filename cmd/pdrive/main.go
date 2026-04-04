@@ -72,6 +72,7 @@ func main() {
 	brokerPolicy := flag.String("broker-policy", "pfrd", "Chunk placement policy: pfrd (weighted random by free space) or mfs (most free space)")
 	minFreeSpace := flag.Int64("min-free-space", 256*1024*1024, "Minimum free space (bytes) to keep on each provider (default 256 MB)")
 	skipRestore := flag.Bool("skip-restore", false, "Skip restoring metadata DB from cloud on startup (use after a manual wipe)")
+	chunkSize := flag.Int("chunk-size", 0, "Override chunk size in bytes (e.g. 67108864 for 64 MB); 0 uses dynamic sizing")
 	debug := flag.Bool("debug", false, "Enable debug logging")
 	install := flag.Bool("install", false, "Install pdrive as a launchd service (macOS) that auto-restarts on crash/reboot")
 	uninstall := flag.Bool("uninstall", false, "Remove the launchd service installed by --install")
@@ -170,6 +171,7 @@ func main() {
 		BrokerPolicy: *brokerPolicy,
 		MinFreeSpace: *minFreeSpace,
 		SkipRestore:  *skipRestore,
+		ChunkSize:    *chunkSize,
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

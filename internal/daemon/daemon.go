@@ -63,6 +63,7 @@ type Config struct {
 	BrokerPolicy string // "pfrd" or "mfs"
 	MinFreeSpace int64  // bytes to keep free on each provider
 	SkipRestore  bool   // skip cloud DB restore on startup (useful after a manual wipe)
+	ChunkSize    int    // override chunk size (bytes); 0 uses dynamic sizing
 }
 
 // Daemon is the main pdrive daemon that ties everything together.
@@ -155,6 +156,9 @@ func (d *Daemon) Start(ctx context.Context) error {
 	// Create engine.
 	b := broker.NewBroker(d.db, broker.Policy(d.config.BrokerPolicy), d.config.MinFreeSpace)
 	d.engine = engine.NewEngine(d.db, dbPath, d.rclone.Client(), b, d.config.EncKey)
+	if d.config.ChunkSize > 0 {
+		d.engine.SetChunkSize(d.config.ChunkSize)
+	}
 
 	// Start local sync dir if configured.
 	if d.config.SyncDir != "" {

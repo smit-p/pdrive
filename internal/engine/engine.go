@@ -63,6 +63,9 @@ type Engine struct {
 	// avoid long exponential-backoff delays).
 	maxChunkRetries int
 
+	// overrideChunkSize, when > 0, replaces the dynamic chunk-size calculation.
+	overrideChunkSize int
+
 	uploadsMu sync.RWMutex
 	uploads   map[string]*uploadProgress // fileID → progress
 
@@ -162,6 +165,18 @@ func (e *Engine) Close() {
 // DB returns the underlying metadata database. Exposed for test helpers that
 // need to inspect or mutate DB state alongside engine operations.
 func (e *Engine) DB() *metadata.DB { return e.db }
+
+// SetChunkSize overrides the dynamic chunk-size calculation with a fixed value.
+// Pass 0 to revert to the default dynamic behaviour.
+func (e *Engine) SetChunkSize(bytes int) { e.overrideChunkSize = bytes }
+
+// chunkSize returns the chunk size to use for a file of the given size.
+func (e *Engine) chunkSize(fileSize int64) int {
+	if e.overrideChunkSize > 0 {
+		return e.overrideChunkSize
+	}
+	return chunker.ChunkSizeForFile(fileSize)
+}
 
 // workersForChunkSize returns an appropriate concurrency level for the given
 // chunk size so that peak in-flight memory is bounded to roughly 256 MB.
@@ -350,7 +365,7 @@ func (e *Engine) WriteFileAsync(virtualPath string, tmpFile *os.File, tmpPath st
 // onChunkUploaded, if non-nil, is called after each successful chunk upload.
 // Returns the ordered slice of chunk metadata on success.
 func (e *Engine) uploadChunks(r io.ReadSeeker, fileID string, fileSize int64, onChunkUploaded func()) ([]chunkMeta, error) {
-	chunkSize := chunker.ChunkSizeForFile(fileSize)
+	chunkSize := e.chunkSize(fileSize)
 	workers := workersForChunkSize(chunkSize)
 	slog.Debug("upload plan", "fileSize", fileSize, "chunkSize", chunkSize, "workers", workers)
 	cr := chunker.NewChunkReader(r, chunkSize)
@@ -553,7 +568,7 @@ func (e *Engine) uploadChunksTracked(r io.ReadSeeker, fileID, virtualPath string
 	e.fileGate <- struct{}{}
 	defer func() { <-e.fileGate }()
 
-	chunkSize := chunker.ChunkSizeForFile(fileSize)
+	chunkSize := e.chunkSize(fileSize)
 	estimated := int(fileSize/int64(chunkSize)) + 1
 
 	e.uploadsMu.Lock()
