@@ -30,6 +30,7 @@ type lsFile struct {
 	Path       string `json:"path"`
 	Size       int64  `json:"size"`
 	ModifiedAt int64  `json:"modified_at"`
+	LocalState string `json:"local_state"` // "local", "stub", or "uploading"
 }
 
 type lsResponse struct {
@@ -175,7 +176,7 @@ func (d *Daemon) Start(ctx context.Context) error {
 
 	d.webdavServer = &http.Server{
 		Addr:    d.config.WebDAVAddr,
-		Handler: &browserHandler{davHandler: handler, engine: d.engine},
+		Handler: &browserHandler{davHandler: handler, engine: d.engine, syncDir: d.syncDir},
 	}
 
 	go func() {
@@ -306,6 +307,7 @@ func (d *Daemon) tryRestoreDB(dbPath string) bool {
 type browserHandler struct {
 	davHandler http.Handler
 	engine     *engine.Engine
+	syncDir    *vfs.SyncDir // may be nil if sync is disabled
 }
 
 func (h *browserHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -320,6 +322,12 @@ func (h *browserHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	case "/api/status":
 		h.serveAPIStatus(w, r)
+		return
+	case "/api/pin":
+		h.serveAPIPin(w, r)
+		return
+	case "/api/unpin":
+		h.serveAPIUnpin(w, r)
 		return
 	}
 
@@ -352,11 +360,18 @@ func (h *browserHandler) serveAPILs(w http.ResponseWriter, r *http.Request) {
 	}
 	resp.Dirs = append(resp.Dirs, dirs...)
 	for _, f := range files {
+		state := "local"
+		if h.syncDir != nil && h.syncDir.IsStub(f.VirtualPath) {
+			state = "stub"
+		} else if f.UploadState == "pending" {
+			state = "uploading"
+		}
 		resp.Files = append(resp.Files, lsFile{
 			Name:       path.Base(f.VirtualPath),
 			Path:       f.VirtualPath,
 			Size:       f.SizeBytes,
 			ModifiedAt: f.ModifiedAt,
+			LocalState: state,
 		})
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -379,6 +394,50 @@ func (h *browserHandler) serveAPIStatus(w http.ResponseWriter, r *http.Request) 
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp) //nolint:errcheck
+}
+
+func (h *browserHandler) serveAPIPin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	if h.syncDir == nil {
+		http.Error(w, "sync dir not configured", http.StatusServiceUnavailable)
+		return
+	}
+	p := path.Clean(r.URL.Query().Get("path"))
+	if p == "" || p == "." || p == "/" {
+		http.Error(w, "path required", http.StatusBadRequest)
+		return
+	}
+	if err := h.syncDir.PinFile(p); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprintf(w, `{"status":"ok","path":%q,"state":"local"}`, p)
+}
+
+func (h *browserHandler) serveAPIUnpin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	if h.syncDir == nil {
+		http.Error(w, "sync dir not configured", http.StatusServiceUnavailable)
+		return
+	}
+	p := path.Clean(r.URL.Query().Get("path"))
+	if p == "" || p == "." || p == "/" {
+		http.Error(w, "path required", http.StatusBadRequest)
+		return
+	}
+	if err := h.syncDir.UnpinFile(p); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprintf(w, `{"status":"ok","path":%q,"state":"stub"}`, p)
 }
 
 func (h *browserHandler) serveBrowser(w http.ResponseWriter, r *http.Request) {

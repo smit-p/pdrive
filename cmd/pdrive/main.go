@@ -7,10 +7,13 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"text/template"
 
@@ -126,6 +129,22 @@ func main() {
 		fmt.Printf("  Plist:  %s\n", launchAgentPlistPath(homeDir))
 		fmt.Printf("  Logs:   %s\n", filepath.Join(homeDir, ".pdrive", "daemon.log"))
 		return
+	}
+
+	// Handle subcommands: pin / unpin
+	if args := flag.Args(); len(args) > 0 {
+		switch args[0] {
+		case "pin", "unpin":
+			if len(args) < 2 {
+				fmt.Fprintf(os.Stderr, "Usage: pdrive %s <path>\n", args[0])
+				os.Exit(1)
+			}
+			runPinUnpin(*webdavAddr, args[0], args[1:])
+			return
+		default:
+			fmt.Fprintf(os.Stderr, "Unknown subcommand: %s\n", args[0])
+			os.Exit(1)
+		}
 	}
 
 	cfg := daemon.Config{
@@ -274,4 +293,35 @@ func copyFile(src, dst string, perm os.FileMode) error {
 		return err
 	}
 	return os.Rename(tmp, dst)
+}
+
+// runPinUnpin calls the running daemon's /api/pin or /api/unpin endpoint.
+func runPinUnpin(addr, action string, paths []string) {
+	for _, p := range paths {
+		// Normalize: allow relative paths from ~/pdrive or absolute virtual paths.
+		if !filepath.IsAbs(p) || !strings.HasPrefix(p, "/") {
+			// could be relative — just prefix with /
+		}
+		if !strings.HasPrefix(p, "/") {
+			p = "/" + p
+		}
+		apiURL := fmt.Sprintf("http://%s/api/%s?path=%s", addr, action, url.QueryEscape(p))
+		resp, err := http.Post(apiURL, "", nil)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: cannot reach daemon at %s: %v\n", addr, err)
+			os.Exit(1)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != 200 {
+			fmt.Fprintf(os.Stderr, "%s %s: %s\n", action, p, string(body))
+			os.Exit(1)
+		}
+		switch action {
+		case "pin":
+			fmt.Printf("Downloaded: %s\n", p)
+		case "unpin":
+			fmt.Printf("Evicted local data: %s\n", p)
+		}
+	}
 }

@@ -2,6 +2,7 @@ package vfs
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -227,6 +228,11 @@ func (s *SyncDir) upload(absPath, vp string) {
 	}
 	size := info.Size()
 
+	// Never upload stub files — they're placeholders for cloud-only content.
+	if isStubFile(absPath) {
+		return
+	}
+
 	// Skip if already uploaded with same size (cheap dedup).
 	if existing, _ := s.engine.Stat(vp); existing != nil && existing.SizeBytes == size {
 		return
@@ -281,7 +287,7 @@ func (s *SyncDir) upload(absPath, vp string) {
 func (s *SyncDir) initialSync() {
 	slog.Info("sync: initial sync starting", "root", s.root)
 
-	// 1. Upload local files that are not yet in the cloud.
+	// 1. Upload local files that are not yet in the cloud (skip stubs).
 	filepath.Walk(s.root, func(p string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil // best-effort
@@ -292,6 +298,9 @@ func (s *SyncDir) initialSync() {
 			}
 			return nil
 		}
+		if isStubFile(p) {
+			return nil // don't upload stubs
+		}
 		vp := s.virtualPath(p)
 		if shouldSkipPath(vp) {
 			return nil
@@ -300,6 +309,9 @@ func (s *SyncDir) initialSync() {
 		if existing == nil {
 			slog.Info("sync: uploading local-only file", "path", vp)
 			s.upload(p, vp)
+		} else {
+			// Mark existing local files with green Finder tag.
+			setFinderTag(p, "Local", finderColorGreen)
 		}
 		return nil
 	})
@@ -332,20 +344,73 @@ func (s *SyncDir) downloadMissing(dirPath string) {
 		}
 		localPath := filepath.Join(s.root, f.VirtualPath)
 		if _, err := os.Stat(localPath); err == nil {
-			continue // already present locally
+			continue // already present locally (real file or stub)
 		}
-		slog.Info("sync: downloading", "path", f.VirtualPath, "size", f.SizeBytes)
-		data, err := s.engine.ReadFile(f.VirtualPath)
-		if err != nil {
-			slog.Error("sync: download failed", "path", f.VirtualPath, "error", err)
-			continue
-		}
+		// Create a stub (0-byte placeholder) instead of downloading.
+		// The user can "pin" files to download them on demand.
 		os.MkdirAll(filepath.Dir(localPath), 0755)
 		s.suppressEvent(localPath)
-		if err := os.WriteFile(localPath, data, 0644); err != nil {
-			slog.Error("sync: write failed", "path", f.VirtualPath, "error", err)
+		if err := createStubFile(localPath, f.SizeBytes); err != nil {
+			slog.Error("sync: stub creation failed", "path", f.VirtualPath, "error", err)
+			continue
 		}
+		slog.Info("sync: stub created", "path", f.VirtualPath, "size", f.SizeBytes)
 	}
+}
+
+// PinFile downloads a cloud-only file to the local folder, replacing the stub.
+func (s *SyncDir) PinFile(virtualPath string) error {
+	localPath := filepath.Join(s.root, virtualPath)
+
+	// Download from cloud.
+	data, err := s.engine.ReadFile(virtualPath)
+	if err != nil {
+		return fmt.Errorf("downloading %s: %w", virtualPath, err)
+	}
+
+	os.MkdirAll(filepath.Dir(localPath), 0755)
+	s.suppressEvent(localPath)
+	if err := os.WriteFile(localPath, data, 0644); err != nil {
+		return fmt.Errorf("writing %s: %w", virtualPath, err)
+	}
+
+	clearStubMarker(localPath)
+	slog.Info("sync: pinned (downloaded)", "path", virtualPath, "size", len(data))
+	return nil
+}
+
+// UnpinFile removes local data and replaces it with a stub.
+func (s *SyncDir) UnpinFile(virtualPath string) error {
+	localPath := filepath.Join(s.root, virtualPath)
+
+	// Verify the file exists in the cloud DB.
+	f, err := s.engine.Stat(virtualPath)
+	if err != nil || f == nil {
+		return fmt.Errorf("file not found in cloud: %s", virtualPath)
+	}
+	if f.UploadState != "complete" {
+		return fmt.Errorf("file still uploading: %s", virtualPath)
+	}
+
+	// Replace local file with a stub.
+	s.suppressEvent(localPath)
+	if err := createStubFile(localPath, f.SizeBytes); err != nil {
+		return fmt.Errorf("creating stub for %s: %w", virtualPath, err)
+	}
+
+	slog.Info("sync: unpinned (evicted local data)", "path", virtualPath, "size", f.SizeBytes)
+	return nil
+}
+
+// IsStub returns true if the local copy of virtualPath is a cloud-only stub.
+func (s *SyncDir) IsStub(virtualPath string) bool {
+	localPath := filepath.Join(s.root, virtualPath)
+	return isStubFile(localPath)
+}
+
+// Root returns the local sync directory path.
+func (s *SyncDir) Root() string {
+	return s.root
 }
 
 // ---------------------------------------------------------------------------
