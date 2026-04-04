@@ -504,6 +504,14 @@ func writeWorkflowDoc(contentsDir, script, uuid string) error {
 	<dict/>
 	<key>workflowMetaData</key>
 	<dict>
+		<key>serviceApplicationBundleID</key>
+		<string></string>
+		<key>serviceInputTypeIdentifier</key>
+		<string>com.apple.Automator.fileSystemObject</string>
+		<key>serviceOutputTypeIdentifier</key>
+		<string>com.apple.Automator.nothing</string>
+		<key>serviceProcessesInput</key>
+		<integer>0</integer>
 		<key>workflowTypeIdentifier</key>
 		<string>com.apple.Automator.servicesMenu</string>
 	</dict>
@@ -529,9 +537,15 @@ func writeWorkflowInfo(contentsDir, menuTitle string) error {
 			</dict>
 			<key>NSMessage</key>
 			<string>runWorkflowAsService</string>
+			<key>NSRequiredContext</key>
+			<dict>
+				<key>NSApplicationIdentifier</key>
+				<string>com.apple.finder</string>
+			</dict>
 			<key>NSSendFileTypes</key>
 			<array>
 				<string>public.item</string>
+				<string>public.folder</string>
 			</array>
 		</dict>
 	</array>
