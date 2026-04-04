@@ -52,8 +52,8 @@ func main() {
 	defaultConfigDir := filepath.Join(homeDir, ".pdrive")
 
 	configDir := flag.String("config-dir", defaultConfigDir, "Configuration directory")
-	rcloneAddr := flag.String("rclone-addr", "localhost:5572", "rclone RC address")
-	webdavAddr := flag.String("webdav-addr", "localhost:8765", "WebDAV server address")
+	rcloneAddr := flag.String("rclone-addr", "127.0.0.1:5572", "rclone RC address")
+	webdavAddr := flag.String("webdav-addr", "127.0.0.1:8765", "WebDAV server address")
 	rcloneBinFlag := flag.String("rclone-bin", "", "Absolute path to rclone binary (auto-detected if empty)")
 	encKeyHex := flag.String("enc-key", "", "Encryption key (64-char hex string for AES-256). If empty, uses a test key.")
 	brokerPolicy := flag.String("broker-policy", "pfrd", "Chunk placement policy: pfrd (weighted random by free space) or mfs (most free space)")

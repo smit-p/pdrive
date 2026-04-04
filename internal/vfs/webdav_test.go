@@ -28,7 +28,7 @@ type fakeCloud struct {
 	putDelay time.Duration
 }
 
-func newFakeCloud() *fakeCloud { return &fakeCloud{objects: make(map[string][]byte)} }
+func newFakeCloud() *fakeCloud                   { return &fakeCloud{objects: make(map[string][]byte)} }
 func (f *fakeCloud) key(remote, p string) string { return remote + ":" + p }
 
 func (f *fakeCloud) PutFile(remote, p string, r io.Reader) error {
