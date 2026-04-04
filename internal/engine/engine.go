@@ -66,6 +66,9 @@ type Engine struct {
 	uploadsMu sync.RWMutex
 	uploads   map[string]*uploadProgress // fileID → progress
 
+	// asyncWG tracks in-flight async upload goroutines for graceful shutdown.
+	asyncWG sync.WaitGroup
+
 	// closeCh is closed by Close() to stop the rate-limit refill goroutine.
 	closeCh chan struct{}
 
@@ -132,13 +135,27 @@ func newEngine(db *metadata.DB, dbPath string, rc CloudStorage, b *broker.Broker
 	return e
 }
 
-// Close stops the rate-limit refill goroutine. Safe to call multiple times.
+// Close stops the rate-limit refill goroutine and waits up to 30 seconds for
+// any in-flight async uploads to complete. Safe to call multiple times.
 func (e *Engine) Close() {
 	select {
 	case <-e.closeCh:
 		return // already closed
 	default:
 		close(e.closeCh)
+	}
+
+	// Wait for in-flight async uploads with a timeout.
+	done := make(chan struct{})
+	go func() {
+		e.asyncWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		slog.Info("all async uploads finished")
+	case <-time.After(30 * time.Second):
+		slog.Warn("shutdown timeout: some async uploads may not have completed")
 	}
 }
 
@@ -292,7 +309,9 @@ func (e *Engine) WriteFileAsync(virtualPath string, tmpFile *os.File, tmpPath st
 		return fmt.Errorf("inserting pending file record: %w", err)
 	}
 
+	e.asyncWG.Add(1)
 	go func() {
+		defer e.asyncWG.Done()
 		defer tmpFile.Close()
 		defer os.Remove(tmpPath)
 

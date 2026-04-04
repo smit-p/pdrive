@@ -131,6 +131,7 @@ func newTestEngine(t *testing.T) (*Engine, *fakeCloud) {
 		uploadTokens:    make(chan struct{}, uploadRateBurst+100),
 		fileGate:        make(chan struct{}, 1),
 		uploads:         make(map[string]*uploadProgress),
+		closeCh:         make(chan struct{}),
 	}
 	// Pre-fill all tokens so uploads never block on the rate limiter in tests.
 	for i := 0; i < uploadRateBurst+100; i++ {
@@ -1286,5 +1287,32 @@ func TestContentHashDedup_DifferentContentUploads(t *testing.T) {
 
 	if after2 <= after1 {
 		t.Errorf("different content must upload new chunks: after_a=%d after_b=%d", after1, after2)
+	}
+}
+
+// TestGracefulShutdown_WaitsForAsyncUploads verifies that Close() waits for
+// in-flight async uploads to complete instead of abandoning them.
+func TestGracefulShutdown_WaitsForAsyncUploads(t *testing.T) {
+	eng, cloud := newTestEngine(t)
+	// Add artificial delay to uploads so the goroutine is still running when
+	// we call Close().
+	cloud.mu.Lock()
+	cloud.putDelay = 200 * time.Millisecond
+	cloud.mu.Unlock()
+
+	content := make([]byte, 512)
+	tmpFile, tmpPath := writeTmpFile(t, content)
+
+	if err := eng.WriteFileAsync("/shutdown.bin", tmpFile, tmpPath, int64(len(content))); err != nil {
+		t.Fatalf("WriteFileAsync: %v", err)
+	}
+
+	// Close should wait for the upload to finish (not abandon it).
+	eng.Close()
+
+	// After Close(), the file should be complete (upload had time to finish).
+	f, _ := eng.db.GetCompleteFileByPath("/shutdown.bin")
+	if f == nil {
+		t.Error("async upload should have completed before Close() returned")
 	}
 }
