@@ -90,6 +90,25 @@ func main() {
 	}
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel})))
 
+	// Handle subcommands: pin / unpin — do this early, before any rclone lookup,
+	// because pin/unpin are pure HTTP API calls and don't need rclone at all.
+	// This is critical: Services/Quick Actions run with a stripped PATH that
+	// doesn't include /opt/homebrew/bin, so rclone lookup would fail here.
+	if args := flag.Args(); len(args) > 0 {
+		switch args[0] {
+		case "pin", "unpin":
+			if len(args) < 2 {
+				fmt.Fprintf(os.Stderr, "Usage: pdrive %s <path>\n", args[0])
+				os.Exit(1)
+			}
+			runPinUnpin(*webdavAddr, args[0], args[1:])
+			return
+		default:
+			fmt.Fprintf(os.Stderr, "Unknown subcommand: %s\n", args[0])
+			os.Exit(1)
+		}
+	}
+
 	// Resolve encryption key.
 	var encKey []byte
 	if *encKeyHex != "" {
@@ -135,22 +154,6 @@ func main() {
 		fmt.Printf("  Logs:          %s\n", filepath.Join(homeDir, ".pdrive", "daemon.log"))
 		fmt.Printf("  Quick Actions: right-click a file in ~/pdrive → Services → 'Pin to Local' or 'Free Up Space'\n")
 		return
-	}
-
-	// Handle subcommands: pin / unpin
-	if args := flag.Args(); len(args) > 0 {
-		switch args[0] {
-		case "pin", "unpin":
-			if len(args) < 2 {
-				fmt.Fprintf(os.Stderr, "Usage: pdrive %s <path>\n", args[0])
-				os.Exit(1)
-			}
-			runPinUnpin(*webdavAddr, args[0], args[1:])
-			return
-		default:
-			fmt.Fprintf(os.Stderr, "Unknown subcommand: %s\n", args[0])
-			os.Exit(1)
-		}
 	}
 
 	cfg := daemon.Config{
