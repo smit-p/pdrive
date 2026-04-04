@@ -359,6 +359,10 @@ func (h *browserHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/api/health":
 		h.serveAPIHealth(w, r)
 		return
+	case "/api/metrics":
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(h.engine.Metrics()) //nolint:errcheck
+		return
 	}
 
 	// Only intercept GET/HEAD with a browser-like Accept header.

@@ -68,3 +68,46 @@ func TestHealthEndpoint(t *testing.T) {
 		t.Errorf("expected 0 in-flight uploads, got %d", resp.InFlightUploads)
 	}
 }
+
+func TestMetricsEndpoint(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	db, err := metadata.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	total, free := int64(100e9), int64(99e9)
+	db.UpsertProvider(&metadata.Provider{
+		ID: "p1", Type: "drive", DisplayName: "TestDrive",
+		RcloneRemote:    "fake:",
+		QuotaTotalBytes: &total, QuotaFreeBytes: &free,
+	})
+
+	b := broker.NewBroker(db, broker.PolicyPFRD, 0)
+	encKey := make([]byte, 32)
+	eng := engine.NewEngineWithCloud(db, dbPath, nil, b, encKey)
+
+	h := &browserHandler{
+		engine:    eng,
+		startTime: time.Now(),
+	}
+
+	req := httptest.NewRequest("GET", "/api/metrics", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	var resp engine.MetricsSnapshot
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	// Fresh engine should have all-zero counters.
+	if resp.FilesUploaded != 0 || resp.FilesDownloaded != 0 || resp.DedupHits != 0 {
+		t.Errorf("fresh engine should have zero metrics: %+v", resp)
+	}
+}

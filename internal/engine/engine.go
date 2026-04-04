@@ -10,6 +10,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -79,6 +80,15 @@ type Engine struct {
 	// backupTimer/backupMu handle debounced metadata DB backups.
 	backupTimer *time.Timer
 	backupMu    sync.Mutex
+
+	// Telemetry counters (atomic).
+	filesUploaded  atomic.Int64
+	filesDownloaded atomic.Int64
+	filesDeleted   atomic.Int64
+	chunksUploaded atomic.Int64
+	bytesUploaded  atomic.Int64
+	bytesDownloaded atomic.Int64
+	dedupHits      atomic.Int64
 }
 
 const (
@@ -173,6 +183,30 @@ func (e *Engine) SetChunkSize(bytes int) { e.overrideChunkSize = bytes }
 
 // SetMaxChunkRetries overrides the default retry count for chunk uploads.
 func (e *Engine) SetMaxChunkRetries(n int) { e.maxChunkRetries = n }
+
+// MetricsSnapshot is a point-in-time snapshot of engine telemetry counters.
+type MetricsSnapshot struct {
+	FilesUploaded   int64 `json:"files_uploaded"`
+	FilesDownloaded int64 `json:"files_downloaded"`
+	FilesDeleted    int64 `json:"files_deleted"`
+	ChunksUploaded  int64 `json:"chunks_uploaded"`
+	BytesUploaded   int64 `json:"bytes_uploaded"`
+	BytesDownloaded int64 `json:"bytes_downloaded"`
+	DedupHits       int64 `json:"dedup_hits"`
+}
+
+// Metrics returns a snapshot of the engine's telemetry counters.
+func (e *Engine) Metrics() MetricsSnapshot {
+	return MetricsSnapshot{
+		FilesUploaded:   e.filesUploaded.Load(),
+		FilesDownloaded: e.filesDownloaded.Load(),
+		FilesDeleted:    e.filesDeleted.Load(),
+		ChunksUploaded:  e.chunksUploaded.Load(),
+		BytesUploaded:   e.bytesUploaded.Load(),
+		BytesDownloaded: e.bytesDownloaded.Load(),
+		DedupHits:       e.dedupHits.Load(),
+	}
+}
 
 // chunkSize returns the chunk size to use for a file of the given size.
 func (e *Engine) chunkSize(fileSize int64) int {
@@ -276,6 +310,8 @@ func (e *Engine) WriteFileStream(virtualPath string, r io.ReadSeeker, size int64
 		return err
 	}
 	slog.Info("file written", "path", virtualPath, "size", size, "chunks", len(metas))
+	e.filesUploaded.Add(1)
+	e.bytesUploaded.Add(size)
 	e.scheduleBackup()
 	return nil
 }
@@ -358,6 +394,8 @@ func (e *Engine) WriteFileAsync(virtualPath string, tmpFile *os.File, tmpPath st
 			return
 		}
 		slog.Info("file written", "path", virtualPath, "size", size, "chunks", len(metas))
+		e.filesUploaded.Add(1)
+		e.bytesUploaded.Add(size)
 		e.scheduleBackup()
 	}()
 	return nil
@@ -459,6 +497,7 @@ func (e *Engine) uploadChunks(r io.ReadSeeker, fileID string, fileSize int64, on
 					continue
 				}
 				slog.Debug("chunk uploaded", "seq", seq, "provider", prov.DisplayName)
+				e.chunksUploaded.Add(1)
 				if onChunkUploaded != nil {
 					onChunkUploaded()
 				}
@@ -563,6 +602,9 @@ func (e *Engine) cloneFileFromDonor(donor *metadata.File, fileID, virtualPath st
 	}
 
 	slog.Info("file deduped (cloned from existing)", "path", virtualPath, "donor", donor.VirtualPath, "size", size)
+	e.dedupHits.Add(1)
+	e.filesUploaded.Add(1)
+	e.bytesUploaded.Add(size)
 	e.scheduleBackup()
 	return nil
 }
@@ -742,6 +784,8 @@ func (e *Engine) ReadFile(virtualPath string) ([]byte, error) {
 	}
 
 	slog.Info("file read", "path", virtualPath, "size", len(result))
+	e.filesDownloaded.Add(1)
+	e.bytesDownloaded.Add(int64(len(result)))
 	return result, nil
 }
 
@@ -771,6 +815,7 @@ func (e *Engine) DeleteFile(virtualPath string) error {
 	}
 
 	slog.Info("file deleted", "path", virtualPath)
+	e.filesDeleted.Add(1)
 	e.scheduleBackup()
 	return nil
 }

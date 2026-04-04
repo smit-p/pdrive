@@ -1393,3 +1393,61 @@ func TestRetryWithJitter(t *testing.T) {
 		t.Errorf("expected at least 2 PutFile calls (1 fail + 1 success), got %d", calls)
 	}
 }
+
+// TestMetricsCounters verifies that engine telemetry counters are correctly
+// incremented after uploads, downloads, deletes, and dedup hits.
+func TestMetricsCounters(t *testing.T) {
+	eng, _ := newTestEngine(t)
+
+	m0 := eng.Metrics()
+	if m0.FilesUploaded != 0 || m0.FilesDownloaded != 0 || m0.FilesDeleted != 0 {
+		t.Fatalf("fresh engine should have zero counters: %+v", m0)
+	}
+
+	// Upload a file.
+	data := []byte("metrics-test-data")
+	if err := eng.WriteFileStream("/m.txt", bytes.NewReader(data), int64(len(data))); err != nil {
+		t.Fatal(err)
+	}
+	m1 := eng.Metrics()
+	if m1.FilesUploaded != 1 {
+		t.Errorf("FilesUploaded: want 1, got %d", m1.FilesUploaded)
+	}
+	if m1.BytesUploaded != int64(len(data)) {
+		t.Errorf("BytesUploaded: want %d, got %d", len(data), m1.BytesUploaded)
+	}
+	if m1.ChunksUploaded < 1 {
+		t.Errorf("ChunksUploaded: want >= 1, got %d", m1.ChunksUploaded)
+	}
+
+	// Read the file.
+	_, err := eng.ReadFile("/m.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m2 := eng.Metrics()
+	if m2.FilesDownloaded != 1 {
+		t.Errorf("FilesDownloaded: want 1, got %d", m2.FilesDownloaded)
+	}
+	if m2.BytesDownloaded != int64(len(data)) {
+		t.Errorf("BytesDownloaded: want %d, got %d", len(data), m2.BytesDownloaded)
+	}
+
+	// Upload identical content → dedup hit.
+	if err := eng.WriteFileStream("/m-dup.txt", bytes.NewReader(data), int64(len(data))); err != nil {
+		t.Fatal(err)
+	}
+	m3 := eng.Metrics()
+	if m3.DedupHits != 1 {
+		t.Errorf("DedupHits: want 1, got %d", m3.DedupHits)
+	}
+
+	// Delete a file.
+	if err := eng.DeleteFile("/m.txt"); err != nil {
+		t.Fatal(err)
+	}
+	m4 := eng.Metrics()
+	if m4.FilesDeleted != 1 {
+		t.Errorf("FilesDeleted: want 1, got %d", m4.FilesDeleted)
+	}
+}
