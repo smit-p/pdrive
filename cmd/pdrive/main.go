@@ -5,15 +5,47 @@ import (
 	"encoding/hex"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"text/template"
 
 	"github.com/smit-p/pdrive/internal/daemon"
 )
+
+const launchAgentLabel = "com.smit.pdrive"
+
+// launchAgentPlist is the launchd plist template for auto-restart on macOS.
+var launchAgentPlist = template.Must(template.New("plist").Parse(`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>{{.Label}}</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>{{.BinPath}}</string>
+		{{- range .Args}}
+		<string>{{.}}</string>
+		{{- end}}
+	</array>
+	<key>KeepAlive</key>
+	<true/>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>{{.LogPath}}</string>
+	<key>StandardErrorPath</key>
+	<string>{{.LogPath}}</string>
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+</dict>
+</plist>
+`))
 
 func main() {
 	homeDir, _ := os.UserHomeDir()
@@ -22,12 +54,25 @@ func main() {
 	configDir := flag.String("config-dir", defaultConfigDir, "Configuration directory")
 	rcloneAddr := flag.String("rclone-addr", "localhost:5572", "rclone RC address")
 	webdavAddr := flag.String("webdav-addr", "localhost:8765", "WebDAV server address")
+	rcloneBinFlag := flag.String("rclone-bin", "", "Absolute path to rclone binary (auto-detected if empty)")
 	encKeyHex := flag.String("enc-key", "", "Encryption key (64-char hex string for AES-256). If empty, uses a test key.")
 	brokerPolicy := flag.String("broker-policy", "pfrd", "Chunk placement policy: pfrd (weighted random by free space) or mfs (most free space)")
 	minFreeSpace := flag.Int64("min-free-space", 256*1024*1024, "Minimum free space (bytes) to keep on each provider (default 256 MB)")
 	skipRestore := flag.Bool("skip-restore", false, "Skip restoring metadata DB from cloud on startup (use after a manual wipe)")
 	debug := flag.Bool("debug", false, "Enable debug logging")
+	install := flag.Bool("install", false, "Install pdrive as a launchd service (macOS) that auto-restarts on crash/reboot")
+	uninstall := flag.Bool("uninstall", false, "Remove the launchd service installed by --install")
 	flag.Parse()
+
+	// Handle --uninstall before anything else.
+	if *uninstall {
+		if err := uninstallLaunchAgent(homeDir); err != nil {
+			fmt.Fprintf(os.Stderr, "uninstall failed: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("pdrive launchd service removed.")
+		return
+	}
 
 	// Configure logging.
 	logLevel := slog.LevelInfo
@@ -51,18 +96,35 @@ func main() {
 		slog.Warn("using hardcoded test encryption key — do not use in production")
 	}
 
-	// Find rclone binary.
-	rcloneBin, err := exec.LookPath("rclone")
-	if err != nil {
-		// Try bundled rclone next to our binary.
-		exe, _ := os.Executable()
-		bundled := filepath.Join(filepath.Dir(exe), "rclone")
-		if _, err := os.Stat(bundled); err == nil {
-			rcloneBin = bundled
-		} else {
-			fmt.Fprintf(os.Stderr, "Error: rclone not found. Install it: brew install rclone\n")
+	// Find rclone binary — honor --rclone-bin if given.
+	rcloneBin := *rcloneBinFlag
+	if rcloneBin == "" {
+		var err error
+		rcloneBin, err = exec.LookPath("rclone")
+		if err != nil {
+			// Try bundled rclone next to our binary.
+			exe, _ := os.Executable()
+			bundled := filepath.Join(filepath.Dir(exe), "rclone")
+			if _, err := os.Stat(bundled); err == nil {
+				rcloneBin = bundled
+			} else {
+				fmt.Fprintf(os.Stderr, "Error: rclone not found. Install it: brew install rclone\n")
+				os.Exit(1)
+			}
+		}
+	}
+
+	// --install: copy binary to ~/.pdrive/bin/ and register a launchd agent.
+	if *install {
+		if err := installLaunchAgent(homeDir, *configDir, *webdavAddr, *rcloneAddr, *encKeyHex, *brokerPolicy, *minFreeSpace, *debug, rcloneBin); err != nil {
+			fmt.Fprintf(os.Stderr, "install failed: %v\n", err)
 			os.Exit(1)
 		}
+		fmt.Println("pdrive installed as launchd service. It will start now and restart automatically on crash or reboot.")
+		fmt.Printf("  Binary: %s\n", filepath.Join(homeDir, ".pdrive", "bin", "pdrive"))
+		fmt.Printf("  Plist:  %s\n", launchAgentPlistPath(homeDir))
+		fmt.Printf("  Logs:   %s\n", filepath.Join(homeDir, ".pdrive", "daemon.log"))
+		return
 	}
 
 	cfg := daemon.Config{
@@ -93,4 +155,120 @@ func main() {
 	slog.Info("received signal, shutting down", "signal", sig)
 	cancel()
 	d.Stop()
+}
+
+func launchAgentPlistPath(homeDir string) string {
+	return filepath.Join(homeDir, "Library", "LaunchAgents", launchAgentLabel+".plist")
+}
+
+// installLaunchAgent copies the current binary to ~/.pdrive/bin/pdrive,
+// writes a launchd plist, and loads the agent.
+func installLaunchAgent(homeDir, configDir, webdavAddr, rcloneAddr, encKeyHex, brokerPolicy string, minFreeSpace int64, debug bool, rcloneBin string) error {
+	// Copy current binary to a persistent location.
+	binDir := filepath.Join(homeDir, ".pdrive", "bin")
+	if err := os.MkdirAll(binDir, 0700); err != nil {
+		return fmt.Errorf("creating bin dir: %w", err)
+	}
+	exePath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolving executable path: %w", err)
+	}
+	destBin := filepath.Join(binDir, "pdrive")
+	if err := copyFile(exePath, destBin, 0755); err != nil {
+		return fmt.Errorf("copying binary: %w", err)
+	}
+
+	// Build the argument list for the plist (omit flags that have default values).
+	args := []string{
+		"--config-dir", configDir,
+		"--webdav-addr", webdavAddr,
+		"--rclone-addr", rcloneAddr,
+		// Always bake in the resolved rclone path so launchd doesn't need PATH.
+		"--rclone-bin", rcloneBin,
+	}
+	if encKeyHex != "" {
+		args = append(args, "--enc-key", encKeyHex)
+	}
+	if brokerPolicy != "" && brokerPolicy != "pfrd" {
+		args = append(args, "--broker-policy", brokerPolicy)
+	}
+	if minFreeSpace != 256*1024*1024 {
+		args = append(args, "--min-free-space", fmt.Sprintf("%d", minFreeSpace))
+	}
+	if debug {
+		args = append(args, "--debug")
+	}
+
+	logPath := filepath.Join(homeDir, ".pdrive", "daemon.log")
+
+	// Write plist file.
+	plistPath := launchAgentPlistPath(homeDir)
+	if err := os.MkdirAll(filepath.Dir(plistPath), 0755); err != nil {
+		return fmt.Errorf("creating LaunchAgents dir: %w", err)
+	}
+	f, err := os.Create(plistPath)
+	if err != nil {
+		return fmt.Errorf("creating plist: %w", err)
+	}
+	defer f.Close()
+	type plistData struct {
+		Label   string
+		BinPath string
+		Args    []string
+		LogPath string
+	}
+	if err := launchAgentPlist.Execute(f, plistData{
+		Label:   launchAgentLabel,
+		BinPath: destBin,
+		Args:    args,
+		LogPath: logPath,
+	}); err != nil {
+		return fmt.Errorf("rendering plist: %w", err)
+	}
+	f.Close()
+
+	// Unload first in case it was previously loaded (ignore errors).
+	exec.Command("launchctl", "unload", plistPath).Run() //nolint:errcheck
+
+	// Load the agent.
+	if out, err := exec.Command("launchctl", "load", plistPath).CombinedOutput(); err != nil {
+		return fmt.Errorf("launchctl load: %w: %s", err, out)
+	}
+	return nil
+}
+
+// uninstallLaunchAgent unloads and removes the plist.
+func uninstallLaunchAgent(homeDir string) error {
+	plistPath := launchAgentPlistPath(homeDir)
+	// Unload (ignore error if not loaded).
+	exec.Command("launchctl", "unload", plistPath).Run() //nolint:errcheck
+	if err := os.Remove(plistPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("removing plist: %w", err)
+	}
+	return nil
+}
+
+// copyFile copies src to dst with the given permissions.
+func copyFile(src, dst string, perm os.FileMode) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	// Write to a temp file in the same dir then rename for atomicity.
+	tmp := dst + ".tmp"
+	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, perm)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := out.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return os.Rename(tmp, dst)
 }

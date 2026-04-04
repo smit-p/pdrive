@@ -136,12 +136,20 @@ func (d *Daemon) Start(ctx context.Context) error {
 		}
 	}
 
+	// Create persistent spool directory for in-progress upload temp files so
+	// they survive a daemon restart and can be resumed automatically.
+	spoolDir := filepath.Join(d.config.ConfigDir, "spool")
+	if err := os.MkdirAll(spoolDir, 0700); err != nil {
+		slog.Warn("could not create spool directory, falling back to os.TempDir", "error", err)
+		spoolDir = ""
+	}
+
 	// Create engine.
 	b := broker.NewBroker(d.db, broker.Policy(d.config.BrokerPolicy), d.config.MinFreeSpace)
 	d.engine = engine.NewEngine(d.db, dbPath, d.rclone.Client(), b, d.config.EncKey)
 
 	// Start WebDAV server.
-	davFS := vfs.NewWebDAVFS(d.engine)
+	davFS := vfs.NewWebDAVFS(d.engine, spoolDir)
 	handler := &webdav.Handler{
 		FileSystem: davFS,
 		LockSystem: webdav.NewMemLS(),

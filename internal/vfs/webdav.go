@@ -16,12 +16,16 @@ import (
 
 // WebDAVFS implements webdav.FileSystem backed by the pdrive engine.
 type WebDAVFS struct {
-	engine *engine.Engine
+	engine   *engine.Engine
+	spoolDir string // persistent directory for in-progress upload spool files
 }
 
 // NewWebDAVFS creates a new WebDAV filesystem.
-func NewWebDAVFS(eng *engine.Engine) *WebDAVFS {
-	return &WebDAVFS{engine: eng}
+// spoolDir is a persistent directory (e.g. ~/.pdrive/spool) used for upload
+// spool files so they survive a daemon restart and can be resumed.
+// Pass an empty string to fall back to os.TempDir().
+func NewWebDAVFS(eng *engine.Engine, spoolDir string) *WebDAVFS {
+	return &WebDAVFS{engine: eng, spoolDir: spoolDir}
 }
 
 func cleanPath(name string) string {
@@ -222,7 +226,8 @@ func (f *webDAVFile) Write(p []byte) (int, error) {
 	}
 	// Lazily create temp file on first write.
 	if f.tmpFile == nil {
-		tmp, err := os.CreateTemp("", "pdrive-upload-*")
+		spoolDir := f.fs.spoolDir // may be empty — falls back to os.TempDir()
+		tmp, err := os.CreateTemp(spoolDir, "pdrive-upload-*")
 		if err != nil {
 			return 0, fmt.Errorf("creating temp file: %w", err)
 		}

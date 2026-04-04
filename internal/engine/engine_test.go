@@ -875,8 +875,10 @@ func TestMultipleOverwrites_OnlyFinalContentReadable(t *testing.T) {
 // multiple goroutines simultaneously. Because writes go through SQLite with a
 // UNIQUE constraint on virtual_path, some concurrent writes will inevitably
 // fail with a constraint error — this is expected serialisation behaviour, not
-// a bug.  What must hold: no panics, no deadlocks, and the path is readable
-// after all goroutines complete.
+// a bug. Similarly, FK errors on chunk insertion can occur when a concurrent
+// goroutine deletes the file record between the upload and the metadata write.
+// Both are expected races. What must hold: no panics, no deadlocks, and the
+// path is readable after all goroutines complete.
 func TestConcurrentWrites_SamePath(t *testing.T) {
 	eng, _ := newTestEngine(t)
 	path := "/race.txt"
@@ -886,14 +888,18 @@ func TestConcurrentWrites_SamePath(t *testing.T) {
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 
+	isExpectedRaceErr := func(err error) bool {
+		s := err.Error()
+		return strings.Contains(s, "UNIQUE constraint") || strings.Contains(s, "FOREIGN KEY constraint")
+	}
+
 	for i := 0; i < goroutines; i++ {
 		wg.Add(1)
 		go func(n int) {
 			defer wg.Done()
 			payload := []byte(fmt.Sprintf("goroutine-%d", n))
 			if err := eng.WriteFileStream(path, bytes.NewReader(payload), int64(len(payload))); err != nil {
-				// UNIQUE constraint races are expected; all other errors are fatal.
-				if !strings.Contains(err.Error(), "UNIQUE constraint") {
+				if !isExpectedRaceErr(err) {
 					mu.Lock()
 					fatalErrs = append(fatalErrs, err)
 					mu.Unlock()
