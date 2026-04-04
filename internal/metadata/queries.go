@@ -232,6 +232,8 @@ func (db *DB) DeleteFileByPath(virtualPath string) error {
 
 // ListFiles returns files whose virtual_path is directly inside dirPath.
 // dirPath should be like "/" or "/subdir/".
+// Filtering for direct children is done in SQL using INSTR to avoid fetching
+// deeply nested files into Go.
 func (db *DB) ListFiles(dirPath string) ([]File, error) {
 	// Normalize: ensure dirPath ends with /
 	if !strings.HasSuffix(dirPath, "/") {
@@ -240,7 +242,10 @@ func (db *DB) ListFiles(dirPath string) ([]File, error) {
 
 	rows, err := db.conn.Query(
 		`SELECT id, virtual_path, size_bytes, created_at, modified_at, sha256_full, upload_state, tmp_path
-		 FROM files WHERE virtual_path LIKE ? || '%' AND upload_state = 'complete'`, dirPath,
+		 FROM files
+		 WHERE virtual_path LIKE ? || '%'
+		   AND upload_state = 'complete'
+		   AND INSTR(SUBSTR(virtual_path, LENGTH(?) + 1), '/') = 0`, dirPath, dirPath,
 	)
 	if err != nil {
 		return nil, err
@@ -253,11 +258,7 @@ func (db *DB) ListFiles(dirPath string) ([]File, error) {
 		if err := rows.Scan(&f.ID, &f.VirtualPath, &f.SizeBytes, &f.CreatedAt, &f.ModifiedAt, &f.SHA256Full, &f.UploadState, &f.TmpPath); err != nil {
 			return nil, err
 		}
-		// Only include direct children (no deeper nesting)
-		rel := strings.TrimPrefix(f.VirtualPath, dirPath)
-		if !strings.Contains(rel, "/") {
-			files = append(files, f)
-		}
+		files = append(files, f)
 	}
 	return files, rows.Err()
 }

@@ -731,3 +731,40 @@ func TestRenameDirectoriesUnder(t *testing.T) {
 		t.Error("/other should be untouched")
 	}
 }
+
+// TestListFiles_DirectChildrenOnly verifies that ListFiles returns only direct
+// children and excludes deeply nested files (SQL-only filtering via INSTR).
+func TestListFiles_DirectChildrenOnly(t *testing.T) {
+	db := testDB(t)
+	now := time.Now().Unix()
+
+	files := []struct {
+		id   string
+		vp   string
+	}{
+		{"f1", "/docs/readme.txt"},
+		{"f2", "/docs/license.txt"},
+		{"f3", "/docs/sub/nested.txt"},
+		{"f4", "/docs/sub/deep/very.txt"},
+		{"f5", "/other/file.txt"},
+	}
+	for _, f := range files {
+		db.InsertFile(&File{
+			ID: f.id, VirtualPath: f.vp, SizeBytes: 100,
+			CreatedAt: now, ModifiedAt: now, SHA256Full: "h" + f.id,
+		})
+	}
+
+	got, err := db.ListFiles("/docs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 direct children of /docs, got %d", len(got))
+	}
+	for _, f := range got {
+		if f.VirtualPath != "/docs/readme.txt" && f.VirtualPath != "/docs/license.txt" {
+			t.Errorf("unexpected file in ListFiles: %s", f.VirtualPath)
+		}
+	}
+}
