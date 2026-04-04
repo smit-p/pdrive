@@ -56,6 +56,8 @@ func Open(dbPath string) (*DB, error) {
 	migrations := []string{
 		`ALTER TABLE files ADD COLUMN upload_state TEXT NOT NULL DEFAULT 'complete'`,
 		`ALTER TABLE files ADD COLUMN tmp_path TEXT`,
+		`CREATE INDEX IF NOT EXISTS idx_files_upload_state ON files(upload_state)`,
+		`CREATE INDEX IF NOT EXISTS idx_chunks_file_id_seq ON chunks(file_id, sequence)`,
 	}
 	for _, m := range migrations {
 		// SQLite returns an error if the column already exists; ignore it.
