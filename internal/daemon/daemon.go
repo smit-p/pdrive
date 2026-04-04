@@ -54,8 +54,9 @@ type statusResponse struct {
 type Config struct {
 	ConfigDir    string // ~/.pdrive/
 	RcloneBin    string // path to rclone binary
-	RcloneAddr   string // e.g., "localhost:5572"
-	WebDAVAddr   string // e.g., "localhost:8765"
+	RcloneAddr   string // e.g., "127.0.0.1:5572"
+	WebDAVAddr   string // e.g., "127.0.0.1:8765"
+	SyncDir      string // local folder to sync (e.g. ~/pdrive); empty disables sync
 	EncKey       []byte // 32-byte AES-256 key
 	BrokerPolicy string // "pfrd" or "mfs"
 	MinFreeSpace int64  // bytes to keep free on each provider
@@ -69,6 +70,7 @@ type Daemon struct {
 	rclone       *RcloneManager
 	engine       *engine.Engine
 	webdavServer *http.Server
+	syncDir      *vfs.SyncDir
 }
 
 // New creates a new daemon with the given configuration.
@@ -148,7 +150,18 @@ func (d *Daemon) Start(ctx context.Context) error {
 	b := broker.NewBroker(d.db, broker.Policy(d.config.BrokerPolicy), d.config.MinFreeSpace)
 	d.engine = engine.NewEngine(d.db, dbPath, d.rclone.Client(), b, d.config.EncKey)
 
-	// Start WebDAV server.
+	// Start local sync dir if configured.
+	if d.config.SyncDir != "" {
+		if err := os.MkdirAll(d.config.SyncDir, 0755); err != nil {
+			return fmt.Errorf("creating sync directory: %w", err)
+		}
+		d.syncDir = vfs.NewSyncDir(d.config.SyncDir, d.engine, spoolDir)
+		if err := d.syncDir.Start(ctx); err != nil {
+			return fmt.Errorf("starting sync dir: %w", err)
+		}
+	}
+
+	// Start HTTP server — includes WebDAV + status/upload APIs.
 	davFS := vfs.NewWebDAVFS(d.engine, spoolDir)
 	handler := &webdav.Handler{
 		FileSystem: davFS,
@@ -166,15 +179,16 @@ func (d *Daemon) Start(ctx context.Context) error {
 	}
 
 	go func() {
-		slog.Info("WebDAV server starting", "addr", d.config.WebDAVAddr)
+		slog.Info("HTTP server starting", "addr", d.config.WebDAVAddr)
 		if err := d.webdavServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			slog.Error("WebDAV server error", "error", err)
+			slog.Error("HTTP server error", "error", err)
 		}
 	}()
 
 	slog.Info("pdrive daemon started",
 		"configDir", d.config.ConfigDir,
-		"webdav", d.config.WebDAVAddr,
+		"syncDir", d.config.SyncDir,
+		"http", d.config.WebDAVAddr,
 		"rclone", d.config.RcloneAddr,
 	)
 
@@ -200,6 +214,9 @@ func (d *Daemon) Start(ctx context.Context) error {
 func (d *Daemon) Stop() {
 	slog.Info("pdrive daemon shutting down")
 
+	if d.syncDir != nil {
+		d.syncDir.Stop()
+	}
 	if d.webdavServer != nil {
 		d.webdavServer.Close()
 	}

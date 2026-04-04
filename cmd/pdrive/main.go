@@ -52,8 +52,9 @@ func main() {
 	defaultConfigDir := filepath.Join(homeDir, ".pdrive")
 
 	configDir := flag.String("config-dir", defaultConfigDir, "Configuration directory")
+	syncDir := flag.String("sync-dir", filepath.Join(homeDir, "pdrive"), "Local folder to sync (like Dropbox); empty disables sync")
 	rcloneAddr := flag.String("rclone-addr", "127.0.0.1:5572", "rclone RC address")
-	webdavAddr := flag.String("webdav-addr", "127.0.0.1:8765", "WebDAV server address")
+	webdavAddr := flag.String("webdav-addr", "127.0.0.1:8765", "HTTP API/WebDAV address")
 	rcloneBinFlag := flag.String("rclone-bin", "", "Absolute path to rclone binary (auto-detected if empty)")
 	encKeyHex := flag.String("enc-key", "", "Encryption key (64-char hex string for AES-256). If empty, uses a test key.")
 	brokerPolicy := flag.String("broker-policy", "pfrd", "Chunk placement policy: pfrd (weighted random by free space) or mfs (most free space)")
@@ -116,7 +117,7 @@ func main() {
 
 	// --install: copy binary to ~/.pdrive/bin/ and register a launchd agent.
 	if *install {
-		if err := installLaunchAgent(homeDir, *configDir, *webdavAddr, *rcloneAddr, *encKeyHex, *brokerPolicy, *minFreeSpace, *debug, rcloneBin); err != nil {
+		if err := installLaunchAgent(homeDir, *configDir, *syncDir, *webdavAddr, *rcloneAddr, *encKeyHex, *brokerPolicy, *minFreeSpace, *debug, rcloneBin); err != nil {
 			fmt.Fprintf(os.Stderr, "install failed: %v\n", err)
 			os.Exit(1)
 		}
@@ -132,6 +133,7 @@ func main() {
 		RcloneBin:    rcloneBin,
 		RcloneAddr:   *rcloneAddr,
 		WebDAVAddr:   *webdavAddr,
+		SyncDir:      *syncDir,
 		EncKey:       encKey,
 		BrokerPolicy: *brokerPolicy,
 		MinFreeSpace: *minFreeSpace,
@@ -163,7 +165,7 @@ func launchAgentPlistPath(homeDir string) string {
 
 // installLaunchAgent copies the current binary to ~/.pdrive/bin/pdrive,
 // writes a launchd plist, and loads the agent.
-func installLaunchAgent(homeDir, configDir, webdavAddr, rcloneAddr, encKeyHex, brokerPolicy string, minFreeSpace int64, debug bool, rcloneBin string) error {
+func installLaunchAgent(homeDir, configDir, syncDir, webdavAddr, rcloneAddr, encKeyHex, brokerPolicy string, minFreeSpace int64, debug bool, rcloneBin string) error {
 	// Copy current binary to a persistent location.
 	binDir := filepath.Join(homeDir, ".pdrive", "bin")
 	if err := os.MkdirAll(binDir, 0700); err != nil {
@@ -181,6 +183,7 @@ func installLaunchAgent(homeDir, configDir, webdavAddr, rcloneAddr, encKeyHex, b
 	// Build the argument list for the plist (omit flags that have default values).
 	args := []string{
 		"--config-dir", configDir,
+		"--sync-dir", syncDir,
 		"--webdav-addr", webdavAddr,
 		"--rclone-addr", rcloneAddr,
 		// Always bake in the resolved rclone path so launchd doesn't need PATH.
