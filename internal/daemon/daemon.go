@@ -181,7 +181,7 @@ func (d *Daemon) Start(ctx context.Context) error {
 
 	d.webdavServer = &http.Server{
 		Addr:    d.config.WebDAVAddr,
-		Handler: &browserHandler{davHandler: handler, engine: d.engine, syncDir: d.syncDir},
+		Handler: &browserHandler{davHandler: handler, engine: d.engine, syncDir: d.syncDir, startTime: time.Now()},
 	}
 
 	go func() {
@@ -330,6 +330,7 @@ type browserHandler struct {
 	davHandler http.Handler
 	engine     *engine.Engine
 	syncDir    *vfs.SyncDir // may be nil if sync is disabled
+	startTime  time.Time
 }
 
 func (h *browserHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -350,6 +351,9 @@ func (h *browserHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	case "/api/unpin":
 		h.serveAPIUnpin(w, r)
+		return
+	case "/api/health":
+		h.serveAPIHealth(w, r)
 		return
 	}
 
@@ -460,6 +464,34 @@ func (h *browserHandler) serveAPIUnpin(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	fmt.Fprintf(w, `{"status":"ok","path":%q,"state":"stub"}`, p)
+}
+
+func (h *browserHandler) serveAPIHealth(w http.ResponseWriter, _ *http.Request) {
+	dbOK := true
+	if err := h.engine.DB().Conn().Ping(); err != nil {
+		dbOK = false
+	}
+
+	inFlight := len(h.engine.UploadProgress())
+
+	status := "ok"
+	if !dbOK {
+		status = "degraded"
+	}
+
+	resp := struct {
+		Status          string  `json:"status"`
+		UptimeSeconds   float64 `json:"uptime_seconds"`
+		InFlightUploads int     `json:"in_flight_uploads"`
+		DBOK            bool    `json:"db_ok"`
+	}{
+		Status:          status,
+		UptimeSeconds:   time.Since(h.startTime).Seconds(),
+		InFlightUploads: inFlight,
+		DBOK:            dbOK,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp) //nolint:errcheck
 }
 
 func (h *browserHandler) serveBrowser(w http.ResponseWriter, r *http.Request) {
