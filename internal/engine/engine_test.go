@@ -1222,3 +1222,69 @@ func TestUploadProgress_TracksAsyncUpload(t *testing.T) {
 		t.Error("UploadProgress must include /progress.bin")
 	}
 }
+
+// TestContentHashDedup verifies that writing the same content to a different
+// path reuses chunks (no additional cloud uploads) via content-hash dedup.
+func TestContentHashDedup(t *testing.T) {
+	eng, cloud := newTestEngine(t)
+	content := []byte("dedup me - identical content across paths")
+
+	if err := eng.WriteFileStream("/original.txt", bytes.NewReader(content), int64(len(content))); err != nil {
+		t.Fatalf("WriteFileStream original: %v", err)
+	}
+
+	cloud.mu.Lock()
+	uploadsAfterFirst := len(cloud.objects)
+	cloud.mu.Unlock()
+
+	// Write same content to a different path — should dedup.
+	if err := eng.WriteFileStream("/copy.txt", bytes.NewReader(content), int64(len(content))); err != nil {
+		t.Fatalf("WriteFileStream copy: %v", err)
+	}
+
+	cloud.mu.Lock()
+	uploadsAfterSecond := len(cloud.objects)
+	cloud.mu.Unlock()
+
+	if uploadsAfterSecond != uploadsAfterFirst {
+		t.Errorf("content-hash dedup should not upload new chunks: before=%d after=%d",
+			uploadsAfterFirst, uploadsAfterSecond)
+	}
+
+	// Both paths must be readable with identical content.
+	got1, err := eng.ReadFile("/original.txt")
+	if err != nil {
+		t.Fatalf("ReadFile original: %v", err)
+	}
+	got2, err := eng.ReadFile("/copy.txt")
+	if err != nil {
+		t.Fatalf("ReadFile copy: %v", err)
+	}
+	if !bytes.Equal(got1, content) || !bytes.Equal(got2, content) {
+		t.Error("content mismatch after dedup")
+	}
+}
+
+// TestContentHashDedup_DifferentContentUploads verifies that different content
+// is still uploaded normally (dedup only triggers on hash match).
+func TestContentHashDedup_DifferentContentUploads(t *testing.T) {
+	eng, cloud := newTestEngine(t)
+
+	if err := eng.WriteFileStream("/a.txt", bytes.NewReader([]byte("aaa")), 3); err != nil {
+		t.Fatal(err)
+	}
+	cloud.mu.Lock()
+	after1 := len(cloud.objects)
+	cloud.mu.Unlock()
+
+	if err := eng.WriteFileStream("/b.txt", bytes.NewReader([]byte("bbb")), 3); err != nil {
+		t.Fatal(err)
+	}
+	cloud.mu.Lock()
+	after2 := len(cloud.objects)
+	cloud.mu.Unlock()
+
+	if after2 <= after1 {
+		t.Errorf("different content must upload new chunks: after_a=%d after_b=%d", after1, after2)
+	}
+}

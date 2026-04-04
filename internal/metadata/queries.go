@@ -159,6 +159,21 @@ func (db *DB) GetCompleteFileByPath(virtualPath string) (*File, error) {
 	return f, err
 }
 
+// GetCompleteFileByHash returns a completed file with the given content hash.
+// Used for content-hash deduplication: if another file has the same SHA256,
+// its chunks can be reused instead of re-uploading.
+func (db *DB) GetCompleteFileByHash(sha256Full string) (*File, error) {
+	f := &File{}
+	err := db.conn.QueryRow(
+		`SELECT id, virtual_path, size_bytes, created_at, modified_at, sha256_full, upload_state, tmp_path
+		 FROM files WHERE sha256_full = ? AND upload_state = 'complete' LIMIT 1`, sha256Full,
+	).Scan(&f.ID, &f.VirtualPath, &f.SizeBytes, &f.CreatedAt, &f.ModifiedAt, &f.SHA256Full, &f.UploadState, &f.TmpPath)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return f, err
+}
+
 // GetChunksForFile returns all chunks for a file, ordered by sequence.
 func (db *DB) GetChunksForFile(fileID string) ([]ChunkRecord, error) {
 	rows, err := db.conn.Query(

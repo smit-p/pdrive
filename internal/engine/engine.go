@@ -209,6 +209,13 @@ func (e *Engine) WriteFileStream(virtualPath string, r io.ReadSeeker, size int64
 	if _, err := r.Seek(0, io.SeekStart); err != nil {
 		return err
 	}
+
+	// Content-hash dedup: if a completed file with the same SHA256 already
+	// exists, clone its chunk metadata instead of re-uploading.
+	if donor, _ := e.db.GetCompleteFileByHash(fullHashStr); donor != nil {
+		return e.cloneFileFromDonor(donor, fileID, virtualPath, size, fullHashStr)
+	}
+
 	metas, err := e.uploadChunks(r, fileID, size, nil)
 	if err != nil {
 		return err
@@ -458,6 +465,64 @@ func (e *Engine) insertChunkMetadata(fileID string, metas []chunkMeta) error {
 			return fmt.Errorf("inserting chunk location: %w", err)
 		}
 	}
+	return nil
+}
+
+// cloneFileFromDonor creates a new file record that shares the same cloud
+// chunks as the donor file (content-hash dedup). No data is uploaded.
+func (e *Engine) cloneFileFromDonor(donor *metadata.File, fileID, virtualPath string, size int64, sha256Full string) error {
+	donorChunks, err := e.db.GetChunksForFile(donor.ID)
+	if err != nil {
+		return fmt.Errorf("getting donor chunks: %w", err)
+	}
+
+	now := time.Now().Unix()
+	if err := e.db.InsertFile(&metadata.File{
+		ID:          fileID,
+		VirtualPath: virtualPath,
+		SizeBytes:   size,
+		CreatedAt:   now,
+		ModifiedAt:  now,
+		SHA256Full:  sha256Full,
+		UploadState: "complete",
+	}); err != nil {
+		return err
+	}
+
+	for _, dc := range donorChunks {
+		newChunkID := uuid.New().String()
+		if err := e.db.InsertChunk(&metadata.ChunkRecord{
+			ID:            newChunkID,
+			FileID:        fileID,
+			Sequence:      dc.Sequence,
+			SizeBytes:     dc.SizeBytes,
+			SHA256:        dc.SHA256,
+			EncryptedSize: dc.EncryptedSize,
+		}); err != nil {
+			e.db.DeleteFile(fileID) //nolint:errcheck
+			return fmt.Errorf("cloning chunk record: %w", err)
+		}
+
+		locs, err := e.db.GetChunkLocations(dc.ID)
+		if err != nil {
+			e.db.DeleteFile(fileID) //nolint:errcheck
+			return fmt.Errorf("getting donor chunk locations: %w", err)
+		}
+		for _, loc := range locs {
+			if err := e.db.InsertChunkLocation(&metadata.ChunkLocation{
+				ChunkID:           newChunkID,
+				ProviderID:        loc.ProviderID,
+				RemotePath:        loc.RemotePath,
+				UploadConfirmedAt: loc.UploadConfirmedAt,
+			}); err != nil {
+				e.db.DeleteFile(fileID) //nolint:errcheck
+				return fmt.Errorf("cloning chunk location: %w", err)
+			}
+		}
+	}
+
+	slog.Info("file deduped (cloned from existing)", "path", virtualPath, "donor", donor.VirtualPath, "size", size)
+	e.scheduleBackup()
 	return nil
 }
 

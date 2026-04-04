@@ -2,6 +2,8 @@ package vfs
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"io/fs"
@@ -233,9 +235,11 @@ func (s *SyncDir) upload(absPath, vp string) {
 		return
 	}
 
-	// Skip if already uploaded with same size (cheap dedup).
+	// Skip if already uploaded with same content (hash-based dedup).
 	if existing, _ := s.engine.Stat(vp); existing != nil && existing.SizeBytes == size {
-		return
+		if localHash, err := hashLocalFile(absPath); err == nil && localHash == existing.SHA256Full {
+			return
+		}
 	}
 
 	if size > engine.AsyncWriteThreshold {
@@ -442,6 +446,20 @@ func shouldSkipDir(name string) bool {
 		return true
 	}
 	return false
+}
+
+// hashLocalFile computes the SHA256 hash of a local file.
+func hashLocalFile(absPath string) (string, error) {
+	f, err := os.Open(absPath)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // ListFiles returns all complete files (used for reconciliation/testing).
