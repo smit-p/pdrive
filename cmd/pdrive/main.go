@@ -22,6 +22,11 @@ import (
 
 const launchAgentLabel = "com.smit.pdrive"
 
+const (
+	qaWorkflowPinName   = "pdrive Pin to Local"
+	qaWorkflowUnpinName = "pdrive Free Up Space"
+)
+
 // launchAgentPlist is the launchd plist template for auto-restart on macOS.
 var launchAgentPlist = template.Must(template.New("plist").Parse(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -125,9 +130,10 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Println("pdrive installed as launchd service. It will start now and restart automatically on crash or reboot.")
-		fmt.Printf("  Binary: %s\n", filepath.Join(homeDir, ".pdrive", "bin", "pdrive"))
-		fmt.Printf("  Plist:  %s\n", launchAgentPlistPath(homeDir))
-		fmt.Printf("  Logs:   %s\n", filepath.Join(homeDir, ".pdrive", "daemon.log"))
+		fmt.Printf("  Binary:        %s\n", filepath.Join(homeDir, ".pdrive", "bin", "pdrive"))
+		fmt.Printf("  Plist:         %s\n", launchAgentPlistPath(homeDir))
+		fmt.Printf("  Logs:          %s\n", filepath.Join(homeDir, ".pdrive", "daemon.log"))
+		fmt.Printf("  Quick Actions: right-click a file in ~/pdrive → Services → 'Pin to Local' or 'Free Up Space'\n")
 		return
 	}
 
@@ -256,6 +262,11 @@ func installLaunchAgent(homeDir, configDir, syncDir, webdavAddr, rcloneAddr, enc
 	if out, err := exec.Command("launchctl", "load", plistPath).CombinedOutput(); err != nil {
 		return fmt.Errorf("launchctl load: %w: %s", err, out)
 	}
+
+	// Install Finder Quick Actions for pin/unpin (non-fatal if it fails).
+	if err := installQuickActions(homeDir, syncDir); err != nil {
+		slog.Warn("could not install Finder Quick Actions", "error", err)
+	}
 	return nil
 }
 
@@ -267,6 +278,7 @@ func uninstallLaunchAgent(homeDir string) error {
 	if err := os.Remove(plistPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("removing plist: %w", err)
 	}
+	uninstallQuickActions(homeDir) //nolint:errcheck
 	return nil
 }
 
@@ -293,6 +305,240 @@ func copyFile(src, dst string, perm os.FileMode) error {
 		return err
 	}
 	return os.Rename(tmp, dst)
+}
+
+// installQuickActions writes two Automator Service workflow bundles to
+// ~/Library/Services/ so they appear in Finder's right-click Services menu.
+func installQuickActions(homeDir, syncDir string) error {
+	servicesDir := filepath.Join(homeDir, "Library", "Services")
+	if err := os.MkdirAll(servicesDir, 0755); err != nil {
+		return fmt.Errorf("creating Services dir: %w", err)
+	}
+
+	pdriveBin := filepath.Join(homeDir, ".pdrive", "bin", "pdrive")
+
+	pinScript := fmt.Sprintf(`PDRIVE=%q
+SYNC=%q
+while IFS= read -r f; do
+    vpath="${f#$SYNC}"
+    [ -n "$vpath" ] && "$PDRIVE" pin "$vpath"
+done`, pdriveBin, syncDir)
+
+	unpinScript := fmt.Sprintf(`PDRIVE=%q
+SYNC=%q
+while IFS= read -r f; do
+    vpath="${f#$SYNC}"
+    [ -n "$vpath" ] && "$PDRIVE" unpin "$vpath"
+done`, pdriveBin, syncDir)
+
+	workflows := []struct {
+		name   string
+		title  string
+		script string
+		uuid   string
+	}{
+		{qaWorkflowPinName, "pdrive: Pin to Local", pinScript, "A1B2C3D4-0001-0001-0001-000000000001"},
+		{qaWorkflowUnpinName, "pdrive: Free Up Space", unpinScript, "A1B2C3D4-0001-0001-0001-000000000002"},
+	}
+
+	for _, wf := range workflows {
+		contentsDir := filepath.Join(servicesDir, wf.name+".workflow", "Contents")
+		if err := os.MkdirAll(contentsDir, 0755); err != nil {
+			return fmt.Errorf("creating workflow dir: %w", err)
+		}
+		if err := writeWorkflowDoc(contentsDir, wf.script, wf.uuid); err != nil {
+			return err
+		}
+		if err := writeWorkflowInfo(contentsDir, wf.title); err != nil {
+			return err
+		}
+	}
+
+	// Restart the Pasteboard Server so macOS reloads the Services menu.
+	exec.Command("killall", "pbs").Run() //nolint:errcheck
+	return nil
+}
+
+// uninstallQuickActions removes the workflow bundles from ~/Library/Services/.
+func uninstallQuickActions(homeDir string) error {
+	servicesDir := filepath.Join(homeDir, "Library", "Services")
+	for _, name := range []string{qaWorkflowPinName, qaWorkflowUnpinName} {
+		p := filepath.Join(servicesDir, name+".workflow")
+		if err := os.RemoveAll(p); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	exec.Command("killall", "pbs").Run() //nolint:errcheck
+	return nil
+}
+
+// writeWorkflowDoc writes the Automator document.wflow XML for a Run Shell Script service.
+func writeWorkflowDoc(contentsDir, script, uuid string) error {
+	// %q-formatted paths in the script may contain backslashes on Windows but
+	// are always clean on macOS. We escape & and < for XML safety.
+	xmlScript := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(script)
+
+	content := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>AMApplicationBuild</key>
+	<string>521.1</string>
+	<key>AMApplicationVersion</key>
+	<string>2.10</string>
+	<key>AMDocumentVersion</key>
+	<string>2</string>
+	<key>actions</key>
+	<array>
+		<dict>
+			<key>action</key>
+			<dict>
+				<key>AMAccepts</key>
+				<dict>
+					<key>Container</key>
+					<string>List</string>
+					<key>Optional</key>
+					<true/>
+					<key>Types</key>
+					<array>
+						<string>com.apple.cocoa.path</string>
+					</array>
+				</dict>
+				<key>AMActionVersion</key>
+				<string>2.0.3</string>
+				<key>AMApplication</key>
+				<array>
+					<string>Finder</string>
+				</array>
+				<key>AMParameterProperties</key>
+				<dict>
+					<key>COMMAND_STRING</key>
+					<dict/>
+					<key>shell</key>
+					<dict/>
+					<key>source</key>
+					<dict/>
+				</dict>
+				<key>AMProvides</key>
+				<dict>
+					<key>Container</key>
+					<string>List</string>
+					<key>Types</key>
+					<array>
+						<string>com.apple.cocoa.path</string>
+					</array>
+				</dict>
+				<key>ActionBundlePath</key>
+				<string>/System/Library/Automator/Run Shell Script.action</string>
+				<key>ActionName</key>
+				<string>Run Shell Script</string>
+				<key>ActionParameters</key>
+				<dict>
+					<key>COMMAND_STRING</key>
+					<string>%s</string>
+					<key>CheckedForDefaults</key>
+					<true/>
+					<key>shell</key>
+					<string>/bin/bash</string>
+					<key>source</key>
+					<string>pass_input</string>
+				</dict>
+				<key>BundleIdentifier</key>
+				<string>com.apple.RunShellScript</string>
+				<key>CFBundleVersion</key>
+				<string>2.0.3</string>
+				<key>CanShowSelectedItemsWhenRun</key>
+				<false/>
+				<key>CanShowWhenRun</key>
+				<true/>
+				<key>Category</key>
+				<array>
+					<string>AMCategoryUtilities</string>
+				</array>
+				<key>Class Name</key>
+				<string>RunShellScriptAction</string>
+				<key>InputUUID</key>
+				<string>77D5CEF2-9A51-4B27-A0C0-000000000001</string>
+				<key>Keywords</key>
+				<array>
+					<string>Shell</string>
+					<string>Script</string>
+					<string>Command</string>
+					<string>Run</string>
+					<string>Unix</string>
+				</array>
+				<key>OutputUUID</key>
+				<string>77D5CEF2-9A51-4B27-A0C0-000000000002</string>
+				<key>UUID</key>
+				<string>%s</string>
+				<key>UnlocalizedApplications</key>
+				<array>
+					<string>Automator</string>
+				</array>
+				<key>arguments</key>
+				<dict>
+					<key>0</key>
+					<dict>
+						<key>default value</key>
+						<string>do shell script ""</string>
+						<key>name</key>
+						<string>COMMAND_STRING</string>
+						<key>required</key>
+						<string>0</string>
+						<key>type</key>
+						<string>0</string>
+						<key>uuid</key>
+						<string>77D5CEF2-9A51-4B27-A0C0-000000000003</string>
+					</dict>
+				</dict>
+				<key>isViewVisible</key>
+				<integer>1</integer>
+				<key>location</key>
+				<string>309.000000:253.000000</string>
+			</dict>
+			<key>isViewVisible</key>
+			<integer>1</integer>
+		</dict>
+	</array>
+	<key>connectors</key>
+	<dict/>
+	<key>workflowMetaData</key>
+	<dict>
+		<key>workflowTypeIdentifier</key>
+		<string>com.apple.Automator.servicesMenu</string>
+	</dict>
+</dict>
+</plist>`, xmlScript, uuid)
+
+	return os.WriteFile(filepath.Join(contentsDir, "document.wflow"), []byte(content), 0644)
+}
+
+// writeWorkflowInfo writes the Info.plist that names the item in the Services menu.
+func writeWorkflowInfo(contentsDir, menuTitle string) error {
+	content := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSServices</key>
+	<array>
+		<dict>
+			<key>NSMenuItem</key>
+			<dict>
+				<key>default</key>
+				<string>%s</string>
+			</dict>
+			<key>NSMessage</key>
+			<string>runWorkflowAsService</string>
+			<key>NSSendFileTypes</key>
+			<array>
+				<string>public.item</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>`, menuTitle)
+
+	return os.WriteFile(filepath.Join(contentsDir, "Info.plist"), []byte(content), 0644)
 }
 
 // runPinUnpin calls the running daemon's /api/pin or /api/unpin endpoint.
