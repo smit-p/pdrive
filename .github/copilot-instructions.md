@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-pdrive is a Go daemon that aggregates multiple cloud storage accounts (Google Drive, Dropbox, etc.) into a single unified virtual drive. Files are split into 4 MB chunks, encrypted with AES-256-GCM, and distributed across cloud providers via rclone's RC API. A local SQLite database tracks all metadata. Users interact through a WebDAV server (mountable in Finder/Explorer), a browser UI, or a local sync folder (`~/pdrive/`) with Finder integration (stub files, Finder tags, right-click Quick Actions).
+pdrive is a Go daemon that aggregates multiple cloud storage accounts (Google Drive, Dropbox, etc.) into a single unified virtual drive. Files are split into dynamically-sized chunks (32–128 MB based on file size), encrypted with AES-256-GCM, and distributed across cloud providers via rclone's RC API. A local SQLite database tracks all metadata. Users interact through a WebDAV server (mountable in Finder/Explorer), a browser UI, or a local sync folder (`~/pdrive/`) with Finder integration (stub files, Finder tags, right-click Quick Actions).
 
 ## Architecture
 
@@ -24,12 +24,23 @@ scripts/                      — E2E test scripts (Python), rclone download hel
 
 - **Directories are hybrid**: Explicit records in a `directories` table + implicit from file paths. Both must be considered in `IsDir`/`ListDir`/`ListSubdirectories`.
 - **Chunks live on cloud, metadata lives locally**: `metadata.db` is the source of truth. It's auto-backed-up to cloud (`pdrive-meta/metadata.db`) and auto-restored on fresh installs.
+- **Content-hash dedup**: Files with identical SHA-256 share cloud chunks (cloned via `cloneFileFromDonor`). `deleteCloudChunks` checks `RemotePathRefCount` before deleting shared objects.
+- **Dynamic chunk sizing**: `ChunkSizeForFile` targets ~25 chunks per file (32 MB min, 128 MB max). Overridable via `--chunk-size` flag or `SetChunkSize()`.
 - **rclone RC quirks**: `operations/uploadfile` takes `fs`/`remote` as query params (not multipart fields), and `remote` is the parent directory (not the full path). Use `operations/copyfile` for downloads (not `operations/cat`).
-- **Encryption key is user-managed**: 32-byte AES-256 key passed via `--enc-key` flag. Not stored anywhere by pdrive.
+- **Encryption key auto-generated**: If no `--enc-key` is provided, a random 32-byte key is generated on first run and persisted at `~/.pdrive/enc.key`. Users should back up this file.
+- **Streaming reads (OOM prevention)**: `ReadFileToTempFile` downloads chunks to a temp file sequentially. Peak memory stays bounded to one chunk (~32–128 MB) regardless of file size. WebDAV, browser, and pin operations all use this path.
+- **Transactional DB writes**: `insertChunkMetadata` and `cloneFileFromDonor` wrap all inserts in a single SQLite transaction for atomicity.
+- **Failed deletion persistence**: When `deleteCloudChunks` fails to delete a cloud chunk, the failure is persisted in a `failed_deletions` table. A background goroutine retries every hour (max 10 attempts).
+- **Upload progress cleanup**: The `uploads` map entry is cleaned up via `defer` when the async upload goroutine completes (success or failure), preventing memory leaks.
+- **Chunk sequence validation**: Both the assembler and `ReadFileToTempFile` validate that chunk sequences are contiguous (0, 1, 2, ..., n-1) before reassembly.
 - **Stub files**: Cloud-only files are represented locally as 0-byte files with xattrs (`com.pdrive.stub`, `com.pdrive.size`) and Finder tags (gray = cloud-only, green = local).
 - **Event suppression**: `suppressEvent(path)` must be called BEFORE any filesystem write that the fsnotify watcher should ignore. The watcher checks and clears the suppress map on each event.
 - **Engine lifecycle**: `NewEngine`/`NewEngineWithCloud` start a rate-limit refill goroutine. Always call `engine.Close()` to stop it (idempotent via `closeCh`).
-- **Token bucket rate limiting**: `uploadTokens` channel (burst=16 prod, 256 test), refilled at 8 tokens/sec. All cloud API calls must consume a token first.
+- **Token bucket rate limiting**: `uploadTokens` channel (burst=16 prod, 256 test), refilled at configurable rate (default 8 tokens/sec). All cloud API calls (including deletes) must consume a token first. Use `--rate-limit` flag to override.
+- **Retry with jitter**: Failed chunk uploads retry up to 5 times with exponential backoff (1s, 2s, 4s, ... capped at 30s) plus up to 50% random jitter. Rate-limited errors (HTTP 429) trigger triple backoff.
+- **Graceful shutdown**: `engine.Close()` waits up to 30s for in-flight async uploads via `asyncWG`.
+- **Telemetry counters**: Atomic counters for files/chunks/bytes uploaded/downloaded, dedup hits, and deletes. Exposed via `/api/metrics`.
+- **Upload progress tracking**: In-flight async uploads are tracked in `uploads` map and exposed via `/api/uploads`.
 
 ## CLI Subcommands & Flags
 
@@ -42,7 +53,7 @@ pdrive --uninstall            — Remove launchd service + Quick Actions
 ```
 
 Key flags: `--config-dir` (~/.pdrive), `--sync-dir` (~/pdrive), `--rclone-addr` (127.0.0.1:5572),
-`--webdav-addr` (127.0.0.1:8765), `--enc-key`, `--broker-policy` (pfrd|mfs), `--debug`
+`--webdav-addr` (127.0.0.1:8765), `--enc-key`, `--broker-policy` (pfrd|mfs), `--rate-limit` (default 8), `--debug`
 
 ## HTTP API Endpoints
 
@@ -53,6 +64,8 @@ Key flags: `--config-dir` (~/.pdrive), `--sync-dir` (~/pdrive), `--rclone-addr` 
 | `/api/ls?path=`    | GET    | Directory listing with `local_state` (local/stub/uploading) |
 | `/api/pin?path=`   | POST   | Pin (download) a cloud-only file                            |
 | `/api/unpin?path=` | POST   | Unpin (evict local data)                                    |
+| `/api/health`      | GET    | Uptime, DB status, in-flight uploads                        |
+| `/api/metrics`     | GET    | Engine telemetry counters (files/chunks/bytes/dedup)        |
 
 ## Build & Test
 
@@ -81,8 +94,10 @@ Start the daemon:
 
 ## Common Pitfalls
 
+- **Dedup + delete**: When deleting a file whose chunks are shared (dedup), `deleteCloudChunks` checks `RemotePathRefCount` to avoid breaking the clone. Always call this check before cloud deletion.
 - **rclone remote names** must end with `:` — use `ensureColon()` in `rclonerc/operations.go`.
 - **Foreign key order**: Insert `files` record before `chunks` (FK constraint).
+- **SQLite single-connection deadlock**: When using `db.Conn().Begin()`, pre-fetch all data you need from the DB BEFORE starting the transaction (the tx holds the single connection).
 - **SQLite WAL**: Checkpoint WAL before backing up the DB file (`PRAGMA wal_checkpoint(TRUNCATE)`).
 - **WebDAV + browsers**: The `browserHandler` wrapper intercepts GET/HEAD with `Accept: text/html` for HTML listings; all other methods pass through to the WebDAV handler.
 - **Path normalization**: Always use `cleanPath()` in the VFS layer. Paths must start with `/`.
@@ -90,13 +105,14 @@ Start the daemon:
 - **Sync folder skips**: `.DS_Store`, `._*` resource forks, `.pdrive*`, and system dirs (`.Trash`, `.Spotlight-V100`, etc.).
 - **Async writes**: Files > 4 MB (`AsyncWriteThreshold`) are spooled to `~/.pdrive/spool/` and uploaded in background. `ResumeUploads()` handles interrupted uploads on restart.
 
-## Database Schema (5 tables)
+## Database Schema (6 tables)
 
 - `providers` — Cloud account credentials and quota tracking
 - `files` — Virtual file entries keyed by `virtual_path`
-- `chunks` — 4 MB file pieces with SHA-256 hashes (FK to files, cascade delete)
+- `chunks` — File pieces (32–128 MB, dynamic) with SHA-256 hashes (FK to files, cascade delete)
 - `chunk_locations` — Maps chunks to cloud providers with upload confirmation timestamps
 - `directories` — Explicit directory records for empty dir support
+- `failed_deletions` — Tracks cloud chunk deletions that failed for background retry (max 10 attempts)
 
 ## Runtime Paths
 
@@ -116,6 +132,6 @@ Start the daemon:
 
 ## Daemon Lifecycle
 
-**Start**: open DB → start rclone RC → restore DB if empty → create spool dir → create Broker + Engine → start SyncDir → start HTTP server → resume uploads → start GC goroutine (60s initial, 24h recurring)
+**Start**: open DB → start rclone RC → restore DB if empty → create spool dir → create Broker + Engine → start SyncDir → start HTTP server → resume uploads → start GC goroutine (60s initial, 24h recurring) → start failed-deletion retry goroutine (1h recurring)
 
 **Stop**: SyncDir.Stop → webdavServer.Close → engine.FlushBackup → engine.Close → rclone.Stop → db.Close

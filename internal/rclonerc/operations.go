@@ -13,6 +13,22 @@ import (
 	"strings"
 )
 
+// IsRateLimited checks if an error from the rclone RC API indicates that the
+// cloud provider returned a rate-limit response (HTTP 429 or similar).
+// Since rclone wraps cloud errors opaquely, we check the error message text.
+func IsRateLimited(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "429") ||
+		strings.Contains(msg, "ratelimit") ||
+		strings.Contains(msg, "rate limit") ||
+		strings.Contains(msg, "too many requests") ||
+		strings.Contains(msg, "userratelimitexceeded") ||
+		strings.Contains(msg, "ratelimitexceeded")
+}
+
 // ensureColon normalizes a remote name to always end with a colon.
 func ensureColon(remote string) string {
 	return strings.TrimSuffix(remote, ":") + ":"

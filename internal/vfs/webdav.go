@@ -155,9 +155,9 @@ type webDAVFile struct {
 	tmpPath   string
 	writeSize int64
 
-	// Read state.
-	readData   []byte
-	readOffset int64
+	// Read state — streams from a temp file to avoid holding the entire
+	// file in memory. Lazily initialised on first Read or Seek.
+	readFile *os.File
 }
 
 func (f *webDAVFile) Close() error {
@@ -185,6 +185,12 @@ func (f *webDAVFile) Close() error {
 		f.cleanup()
 		return err
 	}
+	if f.readFile != nil {
+		name := f.readFile.Name()
+		f.readFile.Close()
+		os.Remove(name)
+		f.readFile = nil
+	}
 	return nil
 }
 
@@ -200,24 +206,26 @@ func (f *webDAVFile) Read(p []byte) (int, error) {
 	if f.isDir {
 		return 0, fmt.Errorf("cannot read a directory")
 	}
-
-	// Lazy load file data on first read.
-	if f.readData == nil {
-		data, err := f.fs.engine.ReadFile(f.name)
-		if err != nil {
-			return 0, err
-		}
-		f.readData = data
-		f.size = int64(len(data))
+	if err := f.ensureReadFile(); err != nil {
+		return 0, err
 	}
+	return f.readFile.Read(p)
+}
 
-	if f.readOffset >= int64(len(f.readData)) {
-		return 0, io.EOF
+// ensureReadFile lazily downloads the file to a temp file on first access.
+func (f *webDAVFile) ensureReadFile() error {
+	if f.readFile != nil {
+		return nil
 	}
-
-	n := copy(p, f.readData[f.readOffset:])
-	f.readOffset += int64(n)
-	return n, nil
+	tmp, err := f.fs.engine.ReadFileToTempFile(f.name)
+	if err != nil {
+		return err
+	}
+	f.readFile = tmp
+	if fi, err := tmp.Stat(); err == nil {
+		f.size = fi.Size()
+	}
+	return nil
 }
 
 func (f *webDAVFile) Write(p []byte) (int, error) {
@@ -240,31 +248,13 @@ func (f *webDAVFile) Write(p []byte) (int, error) {
 }
 
 func (f *webDAVFile) Seek(offset int64, whence int) (int64, error) {
-	// Lazy load for seeking.
-	if f.readData == nil && !f.isDir {
-		data, err := f.fs.engine.ReadFile(f.name)
-		if err != nil {
-			return 0, err
-		}
-		f.readData = data
-		f.size = int64(len(data))
+	if f.isDir {
+		return 0, fmt.Errorf("cannot seek a directory")
 	}
-
-	var newOffset int64
-	switch whence {
-	case io.SeekStart:
-		newOffset = offset
-	case io.SeekCurrent:
-		newOffset = f.readOffset + offset
-	case io.SeekEnd:
-		newOffset = int64(len(f.readData)) + offset
+	if err := f.ensureReadFile(); err != nil {
+		return 0, err
 	}
-
-	if newOffset < 0 {
-		return 0, fmt.Errorf("negative seek position")
-	}
-	f.readOffset = newOffset
-	return newOffset, nil
+	return f.readFile.Seek(offset, whence)
 }
 
 func (f *webDAVFile) Readdir(count int) ([]os.FileInfo, error) {

@@ -48,3 +48,13 @@ CREATE INDEX IF NOT EXISTS idx_files_sha256_full ON files(sha256_full);
 CREATE INDEX IF NOT EXISTS idx_chunks_file_id ON chunks(file_id);
 CREATE INDEX IF NOT EXISTS idx_chunks_file_id_seq ON chunks(file_id, sequence);
 CREATE INDEX IF NOT EXISTS idx_chunk_locations_chunk_id ON chunk_locations(chunk_id);
+CREATE INDEX IF NOT EXISTS idx_chunk_locations_remote_path ON chunk_locations(remote_path);
+
+CREATE TABLE IF NOT EXISTS failed_deletions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider_id TEXT NOT NULL,
+    remote_path TEXT NOT NULL,
+    failed_at INTEGER NOT NULL,
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT
+);

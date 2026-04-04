@@ -64,6 +64,7 @@ type Config struct {
 	MinFreeSpace int64  // bytes to keep free on each provider
 	SkipRestore  bool   // skip cloud DB restore on startup (useful after a manual wipe)
 	ChunkSize    int    // override chunk size (bytes); 0 uses dynamic sizing
+	RatePerSec   int    // API rate limit (tokens per second); 0 uses default (8/s)
 }
 
 // Daemon is the main pdrive daemon that ties everything together.
@@ -155,7 +156,11 @@ func (d *Daemon) Start(ctx context.Context) error {
 
 	// Create engine.
 	b := broker.NewBroker(d.db, broker.Policy(d.config.BrokerPolicy), d.config.MinFreeSpace)
-	d.engine = engine.NewEngine(d.db, dbPath, d.rclone.Client(), b, d.config.EncKey)
+	if d.config.RatePerSec > 0 {
+		d.engine = engine.NewEngineWithRate(d.db, dbPath, d.rclone.Client(), b, d.config.EncKey, d.config.RatePerSec)
+	} else {
+		d.engine = engine.NewEngine(d.db, dbPath, d.rclone.Client(), b, d.config.EncKey)
+	}
 	if d.config.ChunkSize > 0 {
 		d.engine.SetChunkSize(d.config.ChunkSize)
 	}
@@ -224,6 +229,20 @@ func (d *Daemon) Start(ctx context.Context) error {
 				return
 			case <-ticker.C:
 				d.engine.GCOrphanedChunks()
+			}
+		}
+	}()
+
+	// Retry failed chunk deletions every hour.
+	go func() {
+		ticker := time.NewTicker(1 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				d.engine.RetryFailedDeletions()
 			}
 		}
 	}()
@@ -413,7 +432,11 @@ func (h *browserHandler) serveAPILs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *browserHandler) serveAPIStatus(w http.ResponseWriter, r *http.Request) {
-	st := h.engine.StorageStatus()
+	st, err := h.engine.StorageStatus()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	resp := statusResponse{
 		TotalFiles: st.TotalFiles,
 		TotalBytes: st.TotalBytes,
@@ -508,15 +531,20 @@ func (h *browserHandler) serveBrowser(w http.ResponseWriter, r *http.Request) {
 		p = "/" + p
 	}
 
-	// Check if it's a file — serve the raw content.
+	// Check if it's a file — stream content from a temp file to avoid
+	// holding the entire file in memory.
 	file, err := h.engine.Stat(p)
 	if err == nil && file != nil {
-		data, err := h.engine.ReadFile(p)
+		tmp, err := h.engine.ReadFileToTempFile(p)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		http.ServeContent(w, r, path.Base(p), time.Unix(file.ModifiedAt, 0), strings.NewReader(string(data)))
+		defer func() {
+			tmp.Close()
+			os.Remove(tmp.Name())
+		}()
+		http.ServeContent(w, r, path.Base(p), time.Unix(file.ModifiedAt, 0), tmp)
 		return
 	}
 

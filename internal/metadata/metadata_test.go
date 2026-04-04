@@ -739,8 +739,8 @@ func TestListFiles_DirectChildrenOnly(t *testing.T) {
 	now := time.Now().Unix()
 
 	files := []struct {
-		id   string
-		vp   string
+		id string
+		vp string
 	}{
 		{"f1", "/docs/readme.txt"},
 		{"f2", "/docs/license.txt"},
@@ -766,5 +766,139 @@ func TestListFiles_DirectChildrenOnly(t *testing.T) {
 		if f.VirtualPath != "/docs/readme.txt" && f.VirtualPath != "/docs/license.txt" {
 			t.Errorf("unexpected file in ListFiles: %s", f.VirtualPath)
 		}
+	}
+}
+
+// TestRemotePathRefCount verifies the refcount query used by dedup-safe deletes.
+func TestRemotePathRefCount(t *testing.T) {
+	db := testDB(t)
+	seedProvider(t, db)
+
+	now := time.Now().Unix()
+	db.InsertFile(&File{ID: "f1", VirtualPath: "/a.txt", SizeBytes: 100, CreatedAt: now, ModifiedAt: now, SHA256Full: "h1"})
+	db.InsertFile(&File{ID: "f2", VirtualPath: "/b.txt", SizeBytes: 100, CreatedAt: now, ModifiedAt: now, SHA256Full: "h2"})
+	db.InsertChunk(&ChunkRecord{ID: "c1", FileID: "f1", Sequence: 0, SizeBytes: 100, SHA256: "ch", EncryptedSize: 128})
+	db.InsertChunk(&ChunkRecord{ID: "c2", FileID: "f2", Sequence: 0, SizeBytes: 100, SHA256: "ch", EncryptedSize: 128})
+
+	// Both chunks point to the same remote_path (dedup scenario).
+	db.InsertChunkLocation(&ChunkLocation{ChunkID: "c1", ProviderID: "p1", RemotePath: "pdrive-chunks/shared"})
+	db.InsertChunkLocation(&ChunkLocation{ChunkID: "c2", ProviderID: "p1", RemotePath: "pdrive-chunks/shared"})
+
+	count, err := db.RemotePathRefCount("pdrive-chunks/shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Errorf("expected refcount 2, got %d", count)
+	}
+
+	// Delete one file — CASCADE removes its chunk_location.
+	db.DeleteFile("f1")
+
+	count, err = db.RemotePathRefCount("pdrive-chunks/shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Errorf("expected refcount 1 after deleting one file, got %d", count)
+	}
+
+	// Non-existent path should return 0.
+	count, err = db.RemotePathRefCount("pdrive-chunks/nonexistent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Errorf("expected refcount 0 for non-existent path, got %d", count)
+	}
+}
+
+// TestFailedDeletions verifies insert, query, retry increment, and delete of
+// failed deletion records.
+func TestFailedDeletions(t *testing.T) {
+	db := testDB(t)
+
+	// Insert a failed deletion.
+	if err := db.InsertFailedDeletion("prov1", "pdrive-chunks/abc123", "timeout"); err != nil {
+		t.Fatalf("InsertFailedDeletion: %v", err)
+	}
+
+	// Fetch it.
+	items, err := db.GetFailedDeletions(10)
+	if err != nil {
+		t.Fatalf("GetFailedDeletions: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 failed deletion, got %d", len(items))
+	}
+	if items[0].ProviderID != "prov1" || items[0].RemotePath != "pdrive-chunks/abc123" {
+		t.Errorf("unexpected item: %+v", items[0])
+	}
+	if items[0].RetryCount != 0 {
+		t.Errorf("expected retry_count=0, got %d", items[0].RetryCount)
+	}
+
+	// Increment retry.
+	if err := db.IncrementFailedDeletionRetry(items[0].ID, "retry error"); err != nil {
+		t.Fatalf("IncrementFailedDeletionRetry: %v", err)
+	}
+	items, _ = db.GetFailedDeletions(10)
+	if items[0].RetryCount != 1 {
+		t.Errorf("expected retry_count=1 after increment, got %d", items[0].RetryCount)
+	}
+	if items[0].LastError != "retry error" {
+		t.Errorf("expected last_error='retry error', got %q", items[0].LastError)
+	}
+
+	// Delete it.
+	if err := db.DeleteFailedDeletion(items[0].ID); err != nil {
+		t.Fatalf("DeleteFailedDeletion: %v", err)
+	}
+	items, _ = db.GetFailedDeletions(10)
+	if len(items) != 0 {
+		t.Errorf("expected 0 failed deletions after delete, got %d", len(items))
+	}
+}
+
+func TestGetChunkLocationsByProvider(t *testing.T) {
+	db := testDB(t)
+
+	// Create two providers.
+	db.UpsertProvider(&Provider{ID: "p1", Type: "gdrive", DisplayName: "GD1", RcloneRemote: "gd1"})
+	db.UpsertProvider(&Provider{ID: "p2", Type: "dropbox", DisplayName: "DB1", RcloneRemote: "db1"})
+
+	// Create a file with two chunks on different providers.
+	now := time.Now().Unix()
+	db.InsertFile(&File{ID: "f1", VirtualPath: "/test.txt", SizeBytes: 100, CreatedAt: now, ModifiedAt: now, SHA256Full: "abc", UploadState: "complete"})
+	db.InsertChunk(&ChunkRecord{ID: "c1", FileID: "f1", Sequence: 0, SizeBytes: 50, SHA256: "h1", EncryptedSize: 60})
+	db.InsertChunk(&ChunkRecord{ID: "c2", FileID: "f1", Sequence: 1, SizeBytes: 50, SHA256: "h2", EncryptedSize: 60})
+	conf := now
+	db.InsertChunkLocation(&ChunkLocation{ChunkID: "c1", ProviderID: "p1", RemotePath: "pdrive-chunks/c1", UploadConfirmedAt: &conf})
+	db.InsertChunkLocation(&ChunkLocation{ChunkID: "c2", ProviderID: "p2", RemotePath: "pdrive-chunks/c2", UploadConfirmedAt: &conf})
+
+	// Query by provider — should only get chunks for that provider.
+	locs, err := db.GetChunkLocationsByProvider("p1")
+	if err != nil {
+		t.Fatalf("GetChunkLocationsByProvider: %v", err)
+	}
+	if len(locs) != 1 || locs[0].ChunkID != "c1" {
+		t.Errorf("expected 1 location for p1 (chunk c1), got %d", len(locs))
+	}
+
+	locs, err = db.GetChunkLocationsByProvider("p2")
+	if err != nil {
+		t.Fatalf("GetChunkLocationsByProvider: %v", err)
+	}
+	if len(locs) != 1 || locs[0].ChunkID != "c2" {
+		t.Errorf("expected 1 location for p2 (chunk c2), got %d", len(locs))
+	}
+
+	// Non-existent provider returns empty.
+	locs, err = db.GetChunkLocationsByProvider("p999")
+	if err != nil {
+		t.Fatalf("GetChunkLocationsByProvider: %v", err)
+	}
+	if len(locs) != 0 {
+		t.Errorf("expected 0 locations for non-existent provider, got %d", len(locs))
 	}
 }

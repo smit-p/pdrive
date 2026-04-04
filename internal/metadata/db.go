@@ -59,6 +59,15 @@ func Open(dbPath string) (*DB, error) {
 		`CREATE INDEX IF NOT EXISTS idx_files_upload_state ON files(upload_state)`,
 		`CREATE INDEX IF NOT EXISTS idx_chunks_file_id_seq ON chunks(file_id, sequence)`,
 		`CREATE INDEX IF NOT EXISTS idx_files_sha256_full ON files(sha256_full)`,
+		`CREATE TABLE IF NOT EXISTS failed_deletions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			provider_id TEXT NOT NULL,
+			remote_path TEXT NOT NULL,
+			failed_at INTEGER NOT NULL,
+			retry_count INTEGER NOT NULL DEFAULT 0,
+			last_error TEXT
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_chunk_locations_remote_path ON chunk_locations(remote_path)`,
 	}
 	for _, m := range migrations {
 		// SQLite returns an error if the column already exists; ignore it.

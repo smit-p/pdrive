@@ -30,6 +30,8 @@ type fakeCloud struct {
 	// putFailN, if > 0, causes the first N PutFile calls to fail.
 	putFailN int
 	putCalls int // total PutFile invocations (for observability)
+	// deleteErr, if non-nil, is returned for every DeleteFile call.
+	deleteErr error
 }
 
 func newFakeCloud() *fakeCloud {
@@ -80,6 +82,9 @@ func (f *fakeCloud) GetFile(remote, path string) (io.ReadCloser, error) {
 func (f *fakeCloud) DeleteFile(remote, path string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
 	delete(f.objects, f.key(remote, path))
 	return nil
 }
@@ -941,7 +946,10 @@ func TestStorageStatus_Accurate(t *testing.T) {
 	eng.WriteFileStream("/a.txt", bytes.NewReader([]byte("aaaa")), 4)
 	eng.WriteFileStream("/b.txt", bytes.NewReader([]byte("bb")), 2)
 
-	st := eng.StorageStatus()
+	st, err := eng.StorageStatus()
+	if err != nil {
+		t.Fatalf("StorageStatus error: %v", err)
+	}
 	if st.TotalFiles != 2 {
 		t.Errorf("expected TotalFiles=2, got %d", st.TotalFiles)
 	}
@@ -1449,5 +1457,168 @@ func TestMetricsCounters(t *testing.T) {
 	m4 := eng.Metrics()
 	if m4.FilesDeleted != 1 {
 		t.Errorf("FilesDeleted: want 1, got %d", m4.FilesDeleted)
+	}
+}
+
+// TestContentHashDedup_DeleteOriginalKeepsClone verifies that deleting the
+// source file of a dedup clone does NOT delete the shared cloud chunks,
+// so the clone remains readable.
+func TestContentHashDedup_DeleteOriginalKeepsClone(t *testing.T) {
+	eng, cloud := newTestEngine(t)
+	content := []byte("shared content for dedup delete test")
+
+	// Write original.
+	if err := eng.WriteFileStream("/original.txt", bytes.NewReader(content), int64(len(content))); err != nil {
+		t.Fatal(err)
+	}
+	// Write clone (dedup should kick in).
+	if err := eng.WriteFileStream("/clone.txt", bytes.NewReader(content), int64(len(content))); err != nil {
+		t.Fatal(err)
+	}
+
+	cloud.mu.Lock()
+	chunksBeforeDelete := len(cloud.objects)
+	cloud.mu.Unlock()
+
+	// Delete the original — shared cloud chunks must NOT be removed.
+	if err := eng.DeleteFile("/original.txt"); err != nil {
+		t.Fatalf("DeleteFile original: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond) // allow async cleanup goroutine
+
+	cloud.mu.Lock()
+	chunksAfterDelete := len(cloud.objects)
+	cloud.mu.Unlock()
+
+	if chunksAfterDelete != chunksBeforeDelete {
+		t.Errorf("shared cloud chunks should NOT be deleted: before=%d after=%d",
+			chunksBeforeDelete, chunksAfterDelete)
+	}
+
+	// Clone must still be readable.
+	got, err := eng.ReadFile("/clone.txt")
+	if err != nil {
+		t.Fatalf("ReadFile clone after original deleted: %v", err)
+	}
+	if !bytes.Equal(got, content) {
+		t.Error("clone content mismatch after original deleted")
+	}
+}
+
+// TestReadFileToTempFile verifies streaming read returns a valid temp file.
+func TestReadFileToTempFile(t *testing.T) {
+	eng, _ := newTestEngine(t)
+	content := []byte("streaming read test content here")
+	if err := eng.WriteFile("/stream.txt", content); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	tmp, err := eng.ReadFileToTempFile("/stream.txt")
+	if err != nil {
+		t.Fatalf("ReadFileToTempFile: %v", err)
+	}
+	defer func() {
+		tmp.Close()
+		os.Remove(tmp.Name())
+	}()
+
+	got, err := io.ReadAll(tmp)
+	if err != nil {
+		t.Fatalf("reading temp file: %v", err)
+	}
+	if !bytes.Equal(got, content) {
+		t.Error("content mismatch from temp file")
+	}
+}
+
+// TestReadFileToTempFile_NotFound verifies that missing files return error.
+func TestReadFileToTempFile_NotFound(t *testing.T) {
+	eng, _ := newTestEngine(t)
+	_, err := eng.ReadFileToTempFile("/nonexistent.txt")
+	if err == nil {
+		t.Fatal("expected error for nonexistent file")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("expected 'not found' error, got: %v", err)
+	}
+}
+
+// TestFailedDeletionPersistence verifies that failed deletions are queued and retried.
+func TestFailedDeletionPersistence(t *testing.T) {
+	eng, cloud := newTestEngine(t)
+	content := []byte("file to delete with cloud failure")
+	if err := eng.WriteFile("/fail-del.txt", content); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	// Make cloud deletions fail.
+	cloud.mu.Lock()
+	cloud.putErr = fmt.Errorf("simulated cloud error")
+	cloud.mu.Unlock()
+
+	// Override DeleteFile behavior to fail.
+	origDelFunc := cloud.deleteErr
+	cloud.mu.Lock()
+	cloud.deleteErr = fmt.Errorf("simulated delete failure")
+	cloud.mu.Unlock()
+
+	if err := eng.DeleteFile("/fail-del.txt"); err != nil {
+		t.Fatalf("DeleteFile: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond) // allow async deletion goroutine
+
+	// Check that failed deletions were recorded.
+	items, err := eng.DB().GetFailedDeletions(10)
+	if err != nil {
+		t.Fatalf("GetFailedDeletions: %v", err)
+	}
+	if len(items) == 0 {
+		t.Fatal("expected failed deletions to be queued")
+	}
+
+	// Fix cloud, retry should succeed.
+	cloud.mu.Lock()
+	cloud.putErr = nil
+	cloud.deleteErr = origDelFunc
+	cloud.mu.Unlock()
+
+	eng.RetryFailedDeletions()
+
+	items, err = eng.DB().GetFailedDeletions(10)
+	if err != nil {
+		t.Fatalf("GetFailedDeletions after retry: %v", err)
+	}
+	if len(items) != 0 {
+		t.Errorf("expected 0 failed deletions after retry, got %d", len(items))
+	}
+}
+
+// TestUploadProgressCleanup verifies that completed uploads are removed from
+// the progress map, preventing a memory leak.
+func TestUploadProgressCleanup(t *testing.T) {
+	eng, _ := newTestEngine(t)
+	eng.SetMaxChunkRetries(1)
+
+	content := make([]byte, 128*1024) // 128 KB
+	for i := range content {
+		content[i] = byte(i % 256)
+	}
+	tmpFile, err := os.CreateTemp(t.TempDir(), "cleanup-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpFile.Write(content)
+	tmpFile.Seek(0, io.SeekStart)
+
+	if err := eng.WriteFileAsync("/cleanup.bin", tmpFile, tmpFile.Name(), int64(len(content))); err != nil {
+		t.Fatalf("WriteFileAsync: %v", err)
+	}
+
+	// Wait for upload to complete.
+	time.Sleep(2 * time.Second)
+
+	ups := eng.UploadProgress()
+	if len(ups) != 0 {
+		t.Errorf("expected 0 in-flight uploads after completion, got %d", len(ups))
 	}
 }

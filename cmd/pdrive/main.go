@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	crypto_rand "crypto/rand"
 	"encoding/hex"
 	"flag"
 	"fmt"
@@ -73,6 +74,7 @@ func main() {
 	minFreeSpace := flag.Int64("min-free-space", 256*1024*1024, "Minimum free space (bytes) to keep on each provider (default 256 MB)")
 	skipRestore := flag.Bool("skip-restore", false, "Skip restoring metadata DB from cloud on startup (use after a manual wipe)")
 	chunkSize := flag.Int("chunk-size", 0, "Override chunk size in bytes (e.g. 67108864 for 64 MB); 0 uses dynamic sizing")
+	rateLimit := flag.Int("rate-limit", 0, "API rate limit in requests per second (default 8)")
 	debug := flag.Bool("debug", false, "Enable debug logging")
 	install := flag.Bool("install", false, "Install pdrive as a launchd service (macOS) that auto-restarts on crash/reboot")
 	uninstall := flag.Bool("uninstall", false, "Remove the launchd service installed by --install")
@@ -124,9 +126,28 @@ func main() {
 			os.Exit(1)
 		}
 	} else {
-		// v0 hardcoded test key — replaced with PBKDF2 in v1.
-		encKey = []byte("pdrive-test-key-0123456789abcdef")
-		slog.Warn("using hardcoded test encryption key — do not use in production")
+		// Auto-generate and persist a random AES-256 key on first run.
+		keyPath := filepath.Join(*configDir, "enc.key")
+		if data, err := os.ReadFile(keyPath); err == nil && len(data) == 32 {
+			encKey = data
+		} else {
+			encKey = make([]byte, 32)
+			if _, err := crypto_rand.Read(encKey); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: failed to generate encryption key: %v\n", err)
+				os.Exit(1)
+			}
+			if err := os.MkdirAll(*configDir, 0700); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: failed to create config directory: %v\n", err)
+				os.Exit(1)
+			}
+			if err := os.WriteFile(keyPath, encKey, 0600); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: failed to save encryption key: %v\n", err)
+				os.Exit(1)
+			}
+			slog.Info("generated new encryption key", "path", keyPath)
+			fmt.Fprintf(os.Stderr, "Generated new AES-256 encryption key: %s\n", keyPath)
+			fmt.Fprintf(os.Stderr, "Back up this file! Without it, your data cannot be decrypted.\n")
+		}
 	}
 
 	// Find rclone binary — honor --rclone-bin if given.
@@ -172,6 +193,7 @@ func main() {
 		MinFreeSpace: *minFreeSpace,
 		SkipRestore:  *skipRestore,
 		ChunkSize:    *chunkSize,
+		RatePerSec:   *rateLimit,
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -567,10 +589,6 @@ func writeWorkflowInfo(contentsDir, menuTitle string) error {
 // runPinUnpin calls the running daemon's /api/pin or /api/unpin endpoint.
 func runPinUnpin(addr, action string, paths []string) {
 	for _, p := range paths {
-		// Normalize: allow relative paths from ~/pdrive or absolute virtual paths.
-		if !filepath.IsAbs(p) || !strings.HasPrefix(p, "/") {
-			// could be relative — just prefix with /
-		}
 		if !strings.HasPrefix(p, "/") {
 			p = "/" + p
 		}

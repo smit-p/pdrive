@@ -425,23 +425,37 @@ func (s *SyncDir) downloadMissing(dirPath string) {
 }
 
 // PinFile downloads a cloud-only file to the local folder, replacing the stub.
+// Uses streaming to avoid holding the entire file in memory.
 func (s *SyncDir) PinFile(virtualPath string) error {
 	localPath := filepath.Join(s.root, virtualPath)
 
-	// Download from cloud.
-	data, err := s.engine.ReadFile(virtualPath)
+	// Stream from cloud to a temp file.
+	tmp, err := s.engine.ReadFileToTempFile(virtualPath)
 	if err != nil {
 		return fmt.Errorf("downloading %s: %w", virtualPath, err)
 	}
+	defer func() {
+		tmp.Close()
+		os.Remove(tmp.Name())
+	}()
 
 	os.MkdirAll(filepath.Dir(localPath), 0755)
 	s.suppressEvent(localPath)
-	if err := os.WriteFile(localPath, data, 0644); err != nil {
-		return fmt.Errorf("writing %s: %w", virtualPath, err)
+
+	dst, err := os.Create(localPath)
+	if err != nil {
+		return fmt.Errorf("creating %s: %w", virtualPath, err)
+	}
+	n, copyErr := io.Copy(dst, tmp)
+	if closeErr := dst.Close(); closeErr != nil && copyErr == nil {
+		copyErr = closeErr
+	}
+	if copyErr != nil {
+		return fmt.Errorf("writing %s: %w", virtualPath, copyErr)
 	}
 
 	clearStubMarker(localPath)
-	slog.Info("sync: pinned (downloaded)", "path", virtualPath, "size", len(data))
+	slog.Info("sync: pinned (downloaded)", "path", virtualPath, "size", n)
 	return nil
 }
 

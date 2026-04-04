@@ -430,6 +430,17 @@ func (db *DB) GetAllChunkLocations() ([]ChunkLocation, error) {
 	return locs, rows.Err()
 }
 
+// RemotePathRefCount returns the number of chunk_location rows that reference
+// the given remote_path. Used to avoid deleting shared cloud objects when a
+// dedup-cloned file is removed.
+func (db *DB) RemotePathRefCount(remotePath string) (int, error) {
+	var count int
+	err := db.conn.QueryRow(
+		`SELECT COUNT(*) FROM chunk_locations WHERE remote_path = ?`, remotePath,
+	).Scan(&count)
+	return count, err
+}
+
 // FileExists checks if a virtual path exists in the database.
 func (db *DB) FileExists(virtualPath string) (bool, error) {
 	var count int
@@ -568,4 +579,83 @@ func (db *DB) RenameDirectoriesUnder(oldDir, newDir string) error {
 		newDir, len(oldDir)+1, oldDir+"/%",
 	)
 	return err
+}
+
+// FailedDeletion represents a cloud chunk deletion that failed and must be retried.
+type FailedDeletion struct {
+	ID         int64
+	ProviderID string
+	RemotePath string
+	FailedAt   int64
+	RetryCount int
+	LastError  string
+}
+
+// InsertFailedDeletion records a chunk deletion that failed for later retry.
+func (db *DB) InsertFailedDeletion(providerID, remotePath, lastError string) error {
+	_, err := db.conn.Exec(
+		`INSERT INTO failed_deletions (provider_id, remote_path, failed_at, retry_count, last_error)
+		 VALUES (?, ?, ?, 0, ?)`,
+		providerID, remotePath, time.Now().Unix(), lastError,
+	)
+	return err
+}
+
+// GetFailedDeletions returns up to limit failed deletions ordered oldest first.
+func (db *DB) GetFailedDeletions(limit int) ([]FailedDeletion, error) {
+	rows, err := db.conn.Query(
+		`SELECT id, provider_id, remote_path, failed_at, retry_count, last_error
+		 FROM failed_deletions ORDER BY failed_at ASC LIMIT ?`, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var items []FailedDeletion
+	for rows.Next() {
+		var d FailedDeletion
+		if err := rows.Scan(&d.ID, &d.ProviderID, &d.RemotePath, &d.FailedAt, &d.RetryCount, &d.LastError); err != nil {
+			return nil, err
+		}
+		items = append(items, d)
+	}
+	return items, rows.Err()
+}
+
+// DeleteFailedDeletion removes a failed deletion record (after successful retry).
+func (db *DB) DeleteFailedDeletion(id int64) error {
+	_, err := db.conn.Exec(`DELETE FROM failed_deletions WHERE id = ?`, id)
+	return err
+}
+
+// IncrementFailedDeletionRetry bumps the retry count and updates the error.
+func (db *DB) IncrementFailedDeletionRetry(id int64, lastError string) error {
+	_, err := db.conn.Exec(
+		`UPDATE failed_deletions SET retry_count = retry_count + 1, last_error = ? WHERE id = ?`,
+		lastError, id,
+	)
+	return err
+}
+
+// GetChunkLocationsByProvider returns all chunk_location records for a given provider.
+// Used by GC to avoid loading the entire chunk_locations table into memory at once.
+func (db *DB) GetChunkLocationsByProvider(providerID string) ([]ChunkLocation, error) {
+	rows, err := db.conn.Query(
+		`SELECT chunk_id, provider_id, remote_path, upload_confirmed_at
+		 FROM chunk_locations WHERE provider_id = ?`, providerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var locs []ChunkLocation
+	for rows.Next() {
+		var cl ChunkLocation
+		if err := rows.Scan(&cl.ChunkID, &cl.ProviderID, &cl.RemotePath, &cl.UploadConfirmedAt); err != nil {
+			return nil, err
+		}
+		locs = append(locs, cl)
+	}
+	return locs, rows.Err()
 }

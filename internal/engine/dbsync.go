@@ -88,25 +88,23 @@ func (e *Engine) GCOrphanedChunks() {
 		return
 	}
 
-	// Build set of all remote_paths the DB knows about, keyed by provider.
-	allLocs, err := e.db.GetAllChunkLocations()
-	if err != nil {
-		slog.Warn("gc: failed to load chunk locations", "error", err)
-		return
-	}
-	// known[providerID][remotePath] = true
-	known := make(map[string]map[string]bool, len(providers))
-	for _, loc := range allLocs {
-		if known[loc.ProviderID] == nil {
-			known[loc.ProviderID] = make(map[string]bool)
-		}
-		known[loc.ProviderID][loc.RemotePath] = true
-	}
-
 	var orphansDeleted, brokenRecords int
 	brokenFileIDs := make(map[string]bool)
 
 	for _, p := range providers {
+		// Query chunk locations only for this provider instead of loading the
+		// full table at once. This keeps memory bounded for large databases.
+		provLocs, err := e.db.GetChunkLocationsByProvider(p.ID)
+		if err != nil {
+			slog.Warn("gc: failed to load chunk locations for provider",
+				"provider", p.DisplayName, "error", err)
+			continue
+		}
+		known := make(map[string]bool, len(provLocs))
+		for _, loc := range provLocs {
+			known[loc.RemotePath] = true
+		}
+
 		items, err := e.rc.ListDir(p.RcloneRemote, chunkRemoteDir)
 		if err != nil {
 			// Folder may not exist yet (fresh install) — not an error.
@@ -114,7 +112,6 @@ func (e *Engine) GCOrphanedChunks() {
 			continue
 		}
 
-		provKnown := known[p.ID]
 		for _, item := range items {
 			if item.IsDir {
 				continue
@@ -128,11 +125,9 @@ func (e *Engine) GCOrphanedChunks() {
 				remotePath = item.Path
 			}
 
-			if !provKnown[remotePath] {
+			if !known[remotePath] {
 				slog.Info("gc: deleting orphaned chunk",
 					"provider", p.DisplayName, "path", remotePath)
-				// Consume a rate-limit token before each cloud API call so GC
-				// doesn't burst through the provider quota and starve uploads.
 				<-e.uploadTokens
 				if err := e.rc.DeleteFile(p.RcloneRemote, remotePath); err != nil {
 					slog.Warn("gc: failed to delete orphaned chunk",
@@ -144,18 +139,14 @@ func (e *Engine) GCOrphanedChunks() {
 		}
 
 		// Inverse check: DB records for this provider with no matching cloud object.
-		// Collect the file IDs so we can purge them from the DB entirely — leaving
-		// them in place means they show up in the WebDAV listing as readable files
-		// but every read attempt fails, which can crash macOS Finder.
 		cloudPaths := make(map[string]bool, len(items))
 		for _, item := range items {
 			cloudPaths[item.Path] = true
 			cloudPaths[path.Join(chunkRemoteDir, item.Name)] = true
 		}
-		for remotePath := range provKnown {
+		for remotePath := range known {
 			if !cloudPaths[remotePath] && !cloudPaths[path.Base(remotePath)] {
 				brokenRecords++
-				// Look up the file_id that owns this chunk location.
 				var fileID string
 				err := e.db.Conn().QueryRow(`
 					SELECT c.file_id FROM chunk_locations cl

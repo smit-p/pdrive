@@ -129,9 +129,10 @@ func buildTagPlist(name string, color int) []byte {
 	if len(tagBytes) < 15 {
 		strObj = append([]byte{0x50 | byte(len(tagBytes))}, tagBytes...)
 	} else {
-		// For longer strings: 0x5F, then int object encoding the length.
-		// Our tags are always short, so this shouldn't happen.
-		strObj = append([]byte{0x50 | byte(len(tagBytes))}, tagBytes...)
+		// For longer strings (≥15 bytes): use 0x5F marker, then an int
+		// object encoding the length, then the string data. In practice
+		// our tag names are always short so this path is defensive only.
+		strObj = append([]byte{0x5F, 0x10, byte(len(tagBytes))}, tagBytes...)
 	}
 
 	// Build the file
