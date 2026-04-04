@@ -65,6 +65,13 @@ type Engine struct {
 
 	uploadsMu sync.RWMutex
 	uploads   map[string]*uploadProgress // fileID → progress
+
+	// closeCh is closed by Close() to stop the rate-limit refill goroutine.
+	closeCh chan struct{}
+
+	// backupTimer/backupMu handle debounced metadata DB backups.
+	backupTimer *time.Timer
+	backupMu    sync.Mutex
 }
 
 const (
@@ -79,30 +86,7 @@ const (
 // Uses a conservative burst (16) to avoid overwhelming provider rate limits.
 func NewEngine(db *metadata.DB, dbPath string, rc *rclonerc.Client, b *broker.Broker, encKey []byte) *Engine {
 	const burst = 16
-	e := &Engine{
-		db:           db,
-		dbPath:       dbPath,
-		rc:           rc,
-		broker:       b,
-		encKey:       encKey,
-		uploadTokens: make(chan struct{}, burst),
-		fileGate:     make(chan struct{}, 1), // only 1 file uploading at a time
-		uploads:      make(map[string]*uploadProgress),
-	}
-	// Pre-fill the burst quota.
-	for i := 0; i < burst; i++ {
-		e.uploadTokens <- struct{}{}
-	}
-	// Refill one token every 1/uploadRatePerSec seconds.
-	go func() {
-		ticker := time.NewTicker(time.Second / uploadRatePerSec)
-		for range ticker.C {
-			select {
-			case e.uploadTokens <- struct{}{}:
-			default: // bucket full, discard
-			}
-		}
-	}()
+	e := newEngine(db, dbPath, rc, b, encKey, burst)
 	return e
 }
 
@@ -112,6 +96,10 @@ func NewEngine(db *metadata.DB, dbPath string, rc *rclonerc.Client, b *broker.Br
 // token-starved.
 func NewEngineWithCloud(db *metadata.DB, dbPath string, rc CloudStorage, b *broker.Broker, encKey []byte) *Engine {
 	const burst = 256
+	return newEngine(db, dbPath, rc, b, encKey, burst)
+}
+
+func newEngine(db *metadata.DB, dbPath string, rc CloudStorage, b *broker.Broker, encKey []byte, burst int) *Engine {
 	e := &Engine{
 		db:           db,
 		dbPath:       dbPath,
@@ -119,24 +107,39 @@ func NewEngineWithCloud(db *metadata.DB, dbPath string, rc CloudStorage, b *brok
 		broker:       b,
 		encKey:       encKey,
 		uploadTokens: make(chan struct{}, burst),
-		fileGate:     make(chan struct{}, 1), // serialize file uploads in tests too
+		fileGate:     make(chan struct{}, 1),
 		uploads:      make(map[string]*uploadProgress),
+		closeCh:      make(chan struct{}),
 	}
-	// Pre-fill the burst quota.
 	for i := 0; i < burst; i++ {
 		e.uploadTokens <- struct{}{}
 	}
-	// Refill one token every 1/uploadRatePerSec seconds.
 	go func() {
 		ticker := time.NewTicker(time.Second / uploadRatePerSec)
-		for range ticker.C {
+		defer ticker.Stop()
+		for {
 			select {
-			case e.uploadTokens <- struct{}{}:
-			default: // bucket full, discard
+			case <-e.closeCh:
+				return
+			case <-ticker.C:
+				select {
+				case e.uploadTokens <- struct{}{}:
+				default:
+				}
 			}
 		}
 	}()
 	return e
+}
+
+// Close stops the rate-limit refill goroutine. Safe to call multiple times.
+func (e *Engine) Close() {
+	select {
+	case <-e.closeCh:
+		return // already closed
+	default:
+		close(e.closeCh)
+	}
 }
 
 // DB returns the underlying metadata database. Exposed for test helpers that
@@ -313,60 +316,6 @@ func (e *Engine) WriteFileAsync(virtualPath string, tmpFile *os.File, tmpPath st
 		e.scheduleBackup()
 	}()
 	return nil
-}
-
-// prepareFileWrite hashes the data, deletes any existing file, and inserts the
-// new file record. It returns the fileID and hash. The reader is rewound to the
-// start, ready for chunk reading. tmpPath, if non-empty, is stored in the DB so
-// the upload can be resumed after a daemon restart.
-func (e *Engine) prepareFileWrite(virtualPath string, r io.ReadSeeker, size int64, tmpPath string) (string, string, error) {
-	hasher := sha256.New()
-	if _, err := io.Copy(hasher, r); err != nil {
-		return "", "", fmt.Errorf("hashing file: %w", err)
-	}
-	fullHashStr := hex.EncodeToString(hasher.Sum(nil))
-
-	if _, err := r.Seek(0, io.SeekStart); err != nil {
-		return "", "", fmt.Errorf("rewinding reader: %w", err)
-	}
-
-	existing, err := e.db.GetFileByPath(virtualPath)
-	if err != nil {
-		return "", "", fmt.Errorf("checking existing file: %w", err)
-	}
-	if existing != nil {
-		// Collect cloud locations before deleting DB record, clean up in background.
-		locs, _ := e.db.GetChunkLocationsForFile(existing.ID)
-		if err := e.db.DeleteFile(existing.ID); err != nil {
-			return "", "", fmt.Errorf("deleting old file: %w", err)
-		}
-		if len(locs) > 0 {
-			go e.deleteCloudChunks(locs)
-		}
-	}
-
-	fileID := uuid.New().String()
-	now := time.Now().Unix()
-	uploadState := "complete"
-	var dbTmpPath *string
-	if tmpPath != "" {
-		uploadState = "pending"
-		dbTmpPath = &tmpPath
-	}
-	if err := e.db.InsertFile(&metadata.File{
-		ID:          fileID,
-		VirtualPath: virtualPath,
-		SizeBytes:   size,
-		CreatedAt:   now,
-		ModifiedAt:  now,
-		SHA256Full:  fullHashStr,
-		UploadState: uploadState,
-		TmpPath:     dbTmpPath,
-	}); err != nil {
-		return "", "", fmt.Errorf("inserting file record: %w", err)
-	}
-
-	return fileID, fullHashStr, nil
 }
 
 // uploadChunks reads, encrypts, and uploads chunks concurrently with retry.

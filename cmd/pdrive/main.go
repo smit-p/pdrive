@@ -56,7 +56,11 @@ var launchAgentPlist = template.Must(template.New("plist").Parse(`<?xml version=
 `))
 
 func main() {
-	homeDir, _ := os.UserHomeDir()
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: could not determine home directory: %v\n", err)
+		os.Exit(1)
+	}
 	defaultConfigDir := filepath.Join(homeDir, ".pdrive")
 
 	configDir := flag.String("config-dir", defaultConfigDir, "Configuration directory")

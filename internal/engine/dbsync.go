@@ -6,28 +6,22 @@ import (
 	"os"
 	"path"
 	"strings"
-	"sync"
 	"time"
 )
 
 const dbSyncRemotePath = "pdrive-meta/metadata.db"
-
-var (
-	backupTimer *time.Timer
-	backupMu    sync.Mutex
-)
 
 // scheduleBackup debounces metadata DB backup: waits 30s after the last mutation.
 func (e *Engine) scheduleBackup() {
 	if e.dbPath == "" {
 		return
 	}
-	backupMu.Lock()
-	defer backupMu.Unlock()
-	if backupTimer != nil {
-		backupTimer.Stop()
+	e.backupMu.Lock()
+	defer e.backupMu.Unlock()
+	if e.backupTimer != nil {
+		e.backupTimer.Stop()
 	}
-	backupTimer = time.AfterFunc(30*time.Second, func() {
+	e.backupTimer = time.AfterFunc(30*time.Second, func() {
 		if err := e.BackupDB(); err != nil {
 			slog.Warn("metadata backup failed", "error", err)
 		}
@@ -36,12 +30,12 @@ func (e *Engine) scheduleBackup() {
 
 // FlushBackup performs an immediate backup (called on shutdown).
 func (e *Engine) FlushBackup() {
-	backupMu.Lock()
-	if backupTimer != nil {
-		backupTimer.Stop()
-		backupTimer = nil
+	e.backupMu.Lock()
+	if e.backupTimer != nil {
+		e.backupTimer.Stop()
+		e.backupTimer = nil
 	}
-	backupMu.Unlock()
+	e.backupMu.Unlock()
 
 	if err := e.BackupDB(); err != nil {
 		slog.Warn("final metadata backup failed", "error", err)

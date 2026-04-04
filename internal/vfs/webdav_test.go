@@ -106,6 +106,7 @@ func newTestServer(t *testing.T) (*httptest.Server, *engine.Engine, *fakeCloud) 
 	b := broker.NewBroker(db, broker.PolicyPFRD, 0)
 	encKey := make([]byte, 32)
 	eng := engine.NewEngineWithCloud(db, dbPath, cloud, b, encKey)
+	t.Cleanup(eng.Close)
 	fs := vfs.NewWebDAVFS(eng, "") // empty spoolDir falls back to os.TempDir in tests
 	handler := &webdav.Handler{FileSystem: fs, LockSystem: webdav.NewMemLS()}
 	srv := httptest.NewServer(handler)

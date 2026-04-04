@@ -114,9 +114,13 @@ func (d *Daemon) Start(ctx context.Context) error {
 
 	// If local DB is empty and restore is not disabled, try to restore from a cloud backup.
 	var fileCount int
-	d.db.Conn().QueryRow("SELECT COUNT(*) FROM files").Scan(&fileCount)
+	if err := d.db.Conn().QueryRow("SELECT COUNT(*) FROM files").Scan(&fileCount); err != nil {
+		slog.Warn("could not count files", "error", err)
+	}
 	var provCount int
-	d.db.Conn().QueryRow("SELECT COUNT(*) FROM providers").Scan(&provCount)
+	if err := d.db.Conn().QueryRow("SELECT COUNT(*) FROM providers").Scan(&provCount); err != nil {
+		slog.Warn("could not count providers", "error", err)
+	}
 	if !d.config.SkipRestore && fileCount == 0 && provCount == 0 {
 		if restored := d.tryRestoreDB(dbPath); restored {
 			// Reopen the DB after restore.
@@ -199,12 +203,23 @@ func (d *Daemon) Start(ctx context.Context) error {
 	// Run orphan GC: first pass after 60s (let any in-progress uploads settle),
 	// then every 24h. Runs entirely in the background.
 	go func() {
-		time.Sleep(60 * time.Second)
+		timer := time.NewTimer(60 * time.Second)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		}
 		d.engine.GCOrphanedChunks()
 		ticker := time.NewTicker(24 * time.Hour)
 		defer ticker.Stop()
-		for range ticker.C {
-			d.engine.GCOrphanedChunks()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				d.engine.GCOrphanedChunks()
+			}
 		}
 	}()
 
@@ -223,6 +238,7 @@ func (d *Daemon) Stop() {
 	}
 	if d.engine != nil {
 		d.engine.FlushBackup()
+		d.engine.Close()
 	}
 	if d.rclone != nil {
 		d.rclone.Stop()
