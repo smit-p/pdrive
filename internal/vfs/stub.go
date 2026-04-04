@@ -10,8 +10,8 @@ import (
 
 // xattr keys used to mark stub (cloud-only) files.
 const (
-	xattrStub = "com.pdrive.stub"          // "1" if file is a cloud-only stub
-	xattrSize = "com.pdrive.size"          // real file size as decimal string
+	xattrStub = "com.pdrive.stub"                     // "1" if file is a cloud-only stub
+	xattrSize = "com.pdrive.size"                     // real file size as decimal string
 	xattrTags = "com.apple.metadata:_kMDItemUserTags" // Finder tags
 )
 
@@ -109,11 +109,12 @@ func formatInt(n int64) string {
 // a single-element NSArray with one NSString: "Name\nColor".
 //
 // Binary plist00 layout for ["Green\n2"]:
-//   Header:       "bplist00" (8 bytes)
-//   Object 0:     Array (1 element, ref to obj 1)
-//   Object 1:     ASCII string "Green\n2"
-//   Offset table: offsets to object 0 and 1
-//   Trailer:      32 bytes of metadata
+//
+//	Header:       "bplist00" (8 bytes)
+//	Object 0:     Array (1 element, ref to obj 1)
+//	Object 1:     ASCII string "Green\n2"
+//	Offset table: offsets to object 0 and 1
+//	Trailer:      32 bytes of metadata
 func buildTagPlist(name string, color int) []byte {
 	// The tag string is "Name\n<digit>" where \n is a literal newline.
 	tagStr := name + "\n" + string(rune('0'+color))
@@ -145,11 +146,11 @@ func buildTagPlist(name string, color int) []byte {
 
 	// Trailer: 32 bytes
 	trailer := make([]byte, 32)
-	trailer[6] = 1 // offset int size = 1 byte
-	trailer[7] = 1 // object ref size = 1 byte
-	binary.BigEndian.PutUint64(trailer[8:16], 2)                           // number of objects
-	binary.BigEndian.PutUint64(trailer[16:24], 0)                          // root object = 0
-	binary.BigEndian.PutUint64(trailer[24:32], uint64(offsetTableOffset))  // offset table start
+	trailer[6] = 1                                                        // offset int size = 1 byte
+	trailer[7] = 1                                                        // object ref size = 1 byte
+	binary.BigEndian.PutUint64(trailer[8:16], 2)                          // number of objects
+	binary.BigEndian.PutUint64(trailer[16:24], 0)                         // root object = 0
+	binary.BigEndian.PutUint64(trailer[24:32], uint64(offsetTableOffset)) // offset table start
 
 	result := make([]byte, 0, len(header)+len(arrayObj)+len(strObj)+len(offsetTable)+len(trailer))
 	result = append(result, header...)

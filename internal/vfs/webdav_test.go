@@ -85,6 +85,8 @@ func (f *fakeCloud) ListDir(remote, p string) ([]rclonerc.ListItem, error) {
 	return items, nil
 }
 
+func (f *fakeCloud) Cleanup(remote string) error { return nil }
+
 // newTestServer creates a fully wired WebDAV HTTP test server.
 func newTestServer(t *testing.T) (*httptest.Server, *engine.Engine, *fakeCloud) {
 	t.Helper()

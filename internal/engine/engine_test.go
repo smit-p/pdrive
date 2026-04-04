@@ -89,6 +89,8 @@ func (f *fakeCloud) ListDir(remote, path string) ([]rclonerc.ListItem, error) {
 	return items, nil
 }
 
+func (f *fakeCloud) Cleanup(remote string) error { return nil }
+
 // ── test helpers ─────────────────────────────────────────────────────────────
 
 // newTestEngine creates a fully wired Engine backed by a temp-dir SQLite DB

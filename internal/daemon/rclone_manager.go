@@ -85,6 +85,7 @@ func (rm *RcloneManager) spawn(ctx context.Context) error {
 		"--rc-addr", rm.addr,
 		"--rc-no-auth",
 		"--config", rm.configPath,
+		"--drive-use-trash=false",
 	)
 	rm.cmd.Stdout = os.Stdout
 	rm.cmd.Stderr = os.Stderr

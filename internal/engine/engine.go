@@ -25,6 +25,7 @@ type CloudStorage interface {
 	GetFile(remote, remotePath string) ([]byte, error)
 	DeleteFile(remote, remotePath string) error
 	ListDir(remote, remotePath string) ([]rclonerc.ListItem, error)
+	Cleanup(remote string) error
 }
 
 const chunkRemoteDir = "pdrive-chunks"

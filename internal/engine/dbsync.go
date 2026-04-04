@@ -209,4 +209,13 @@ func (e *Engine) GCOrphanedChunks() {
 		"orphans_deleted", orphansDeleted,
 		"broken_db_records", brokenRecords,
 		"broken_files_removed", len(brokenFileIDs))
+
+	// Empty provider trash so deleted chunks don't keep consuming quota.
+	if orphansDeleted > 0 {
+		for _, p := range providers {
+			if err := e.rc.Cleanup(p.RcloneRemote); err != nil {
+				slog.Debug("gc: cleanup (empty trash) failed", "provider", p.DisplayName, "error", err)
+			}
+		}
+	}
 }

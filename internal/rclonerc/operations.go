@@ -106,6 +106,17 @@ func (c *Client) DeleteFile(remote, remotePath string) error {
 	return nil
 }
 
+// Cleanup empties the trash on the given remote (e.g. Google Drive).
+func (c *Client) Cleanup(remote string) error {
+	_, err := c.call("operations/cleanup", map[string]interface{}{
+		"fs": ensureColon(remote),
+	})
+	if err != nil {
+		return fmt.Errorf("cleanup: %w", err)
+	}
+	return nil
+}
+
 // ListItem represents a file/directory entry from rclone RC.
 type ListItem struct {
 	Path    string `json:"Path"`
