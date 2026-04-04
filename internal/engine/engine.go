@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/rand/v2"
 	"os"
 	"sync"
 	"time"
@@ -169,6 +170,9 @@ func (e *Engine) DB() *metadata.DB { return e.db }
 // SetChunkSize overrides the dynamic chunk-size calculation with a fixed value.
 // Pass 0 to revert to the default dynamic behaviour.
 func (e *Engine) SetChunkSize(bytes int) { e.overrideChunkSize = bytes }
+
+// SetMaxChunkRetries overrides the default retry count for chunk uploads.
+func (e *Engine) SetMaxChunkRetries(n int) { e.maxChunkRetries = n }
 
 // chunkSize returns the chunk size to use for a file of the given size.
 func (e *Engine) chunkSize(fileSize int64) int {
@@ -440,6 +444,9 @@ func (e *Engine) uploadChunks(r io.ReadSeeker, fileID string, fileSize int64, on
 					if backoff > 30*time.Second {
 						backoff = 30 * time.Second
 					}
+					// Add up to 50% jitter to prevent thundering-herd retries.
+					jitter := time.Duration(rand.Int64N(int64(backoff) / 2))
+					backoff += jitter
 					slog.Warn("retrying chunk upload",
 						"seq", seq, "attempt", attempt+1, "backoff", backoff)
 					time.Sleep(backoff)

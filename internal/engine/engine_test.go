@@ -27,6 +27,9 @@ type fakeCloud struct {
 	putErr error
 	// putDelay, if > 0, causes each PutFile to sleep before returning.
 	putDelay time.Duration
+	// putFailN, if > 0, causes the first N PutFile calls to fail.
+	putFailN int
+	putCalls int // total PutFile invocations (for observability)
 }
 
 func newFakeCloud() *fakeCloud {
@@ -39,6 +42,12 @@ func (f *fakeCloud) PutFile(remote, path string, r io.Reader) error {
 	f.mu.Lock()
 	err := f.putErr
 	delay := f.putDelay
+	f.putCalls++
+	if f.putFailN > 0 {
+		f.putFailN--
+		f.mu.Unlock()
+		return fmt.Errorf("fake transient error")
+	}
 	f.mu.Unlock()
 	if delay > 0 {
 		time.Sleep(delay)
@@ -1350,5 +1359,37 @@ func TestConfigurableChunkSize(t *testing.T) {
 	newChunks := smallChunkTotal - defaultChunks
 	if newChunks < 4 {
 		t.Errorf("expected at least 4 chunks with 512-byte chunk size, got %d", newChunks)
+	}
+}
+
+// TestRetryWithJitter verifies that transient upload failures are retried and
+// eventually succeed, exercising the exponential-backoff + jitter code path.
+func TestRetryWithJitter(t *testing.T) {
+	eng, cloud := newTestEngine(t)
+	// Allow more retries so the first failure is recoverable.
+	eng.SetMaxChunkRetries(3)
+
+	// Make the first PutFile call fail, then succeed on retry.
+	cloud.mu.Lock()
+	cloud.putFailN = 1
+	cloud.mu.Unlock()
+
+	data := []byte("retry-jitter-test-data")
+	err := eng.WriteFileStream("/retry.txt", bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		t.Fatalf("upload should have succeeded after retry: %v", err)
+	}
+
+	// Verify the file was committed.
+	f, _ := eng.db.GetCompleteFileByPath("/retry.txt")
+	if f == nil {
+		t.Error("file should be complete after retry")
+	}
+
+	cloud.mu.Lock()
+	calls := cloud.putCalls
+	cloud.mu.Unlock()
+	if calls < 2 {
+		t.Errorf("expected at least 2 PutFile calls (1 fail + 1 success), got %d", calls)
 	}
 }
