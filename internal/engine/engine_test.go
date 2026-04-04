@@ -1083,3 +1083,140 @@ func TestListDir_ShowsNestedSubdirs(t *testing.T) {
 		t.Errorf("expected 'albums' as subdir of /music, got %v", musicDirs)
 	}
 }
+
+// ── GC, BackupDB, workers, progress tests ────────────────────────────────────
+
+// TestGCOrphanedChunks_DeletesOrphan ensures cloud objects without a DB record
+// are cleaned up.
+func TestGCOrphanedChunks_DeletesOrphan(t *testing.T) {
+	eng, cloud := newTestEngine(t)
+
+	// Write a real file so valid chunks exist in cloud.
+	eng.WriteFileStream("/keep.txt", bytes.NewReader([]byte("keep")), 4)
+
+	// Inject an orphan directly into fakeCloud — no corresponding DB record.
+	cloud.mu.Lock()
+	cloud.objects[cloud.key("fake:", "pdrive-chunks/orphan-uuid")] = []byte("garbage")
+	cloud.mu.Unlock()
+
+	eng.GCOrphanedChunks()
+
+	// Orphan must be gone.
+	cloud.mu.Lock()
+	_, orphanExists := cloud.objects[cloud.key("fake:", "pdrive-chunks/orphan-uuid")]
+	validCount := len(cloud.objects)
+	cloud.mu.Unlock()
+
+	if orphanExists {
+		t.Error("orphaned chunk should have been deleted by GC")
+	}
+	if validCount == 0 {
+		t.Error("valid chunks for /keep.txt should still exist")
+	}
+}
+
+// TestGCOrphanedChunks_RemovesBrokenDBRecord ensures files whose cloud chunks
+// are missing get removed from the DB.
+func TestGCOrphanedChunks_RemovesBrokenDBRecord(t *testing.T) {
+	eng, cloud := newTestEngine(t)
+
+	eng.WriteFileStream("/doomed.txt", bytes.NewReader([]byte("doomed")), 6)
+
+	// Nuke all cloud objects but leave DB records intact.
+	cloud.mu.Lock()
+	clear(cloud.objects)
+	cloud.mu.Unlock()
+
+	eng.GCOrphanedChunks()
+
+	// DB record for the broken file must be gone.
+	f, _ := eng.db.GetFileByPath("/doomed.txt")
+	if f != nil {
+		t.Error("file with missing cloud chunks should have been removed from DB")
+	}
+}
+
+// TestGCOrphanedChunks_NoOp verifies GC doesn't crash on an empty system.
+func TestGCOrphanedChunks_NoOp(t *testing.T) {
+	eng, _ := newTestEngine(t)
+	eng.GCOrphanedChunks() // should not panic
+}
+
+// TestBackupDB_UploadsToCloud verifies that BackupDB uploads the metadata
+// database to the configured provider.
+func TestBackupDB_UploadsToCloud(t *testing.T) {
+	eng, cloud := newTestEngine(t)
+
+	// Write a file so the DB has some content.
+	eng.WriteFileStream("/hello.txt", bytes.NewReader([]byte("hi")), 2)
+
+	if err := eng.BackupDB(); err != nil {
+		t.Fatalf("BackupDB: %v", err)
+	}
+
+	cloud.mu.Lock()
+	data, ok := cloud.objects[cloud.key("fake:", "pdrive-meta/metadata.db")]
+	cloud.mu.Unlock()
+
+	if !ok {
+		t.Fatal("BackupDB must upload metadata.db to cloud")
+	}
+	if len(data) == 0 {
+		t.Error("uploaded DB backup is empty")
+	}
+}
+
+// TestWorkersForChunkSize verifies the concurrency levels for different chunk sizes.
+func TestWorkersForChunkSize(t *testing.T) {
+	cases := []struct {
+		chunkSize int
+		want      int
+	}{
+		{128 * 1024 * 1024, 1}, // 128 MB → 1 worker
+		{32 * 1024 * 1024, 1},  // 32 MB → 1 worker
+		{16 * 1024 * 1024, 2},  // 16 MB → 2 workers
+		{8 * 1024 * 1024, 2},   // 8 MB → 2 workers
+		{4 * 1024 * 1024, 3},   // 4 MB → 3 workers (max)
+		{1 * 1024 * 1024, 3},   // 1 MB → 3 workers
+	}
+	for _, tc := range cases {
+		got := workersForChunkSize(tc.chunkSize)
+		if got != tc.want {
+			t.Errorf("workersForChunkSize(%d MB) = %d, want %d",
+				tc.chunkSize/(1024*1024), got, tc.want)
+		}
+	}
+}
+
+// TestUploadProgress_TracksAsyncUpload verifies that in-progress async uploads
+// appear in UploadProgress output.
+func TestUploadProgress_TracksAsyncUpload(t *testing.T) {
+	eng, cloud := newTestEngine(t)
+	cloud.putDelay = 200 * time.Millisecond
+
+	content := make([]byte, 512)
+	tmpFile, tmpPath := writeTmpFile(t, content)
+
+	if err := eng.WriteFileAsync("/progress.bin", tmpFile, tmpPath, int64(len(content))); err != nil {
+		t.Fatalf("WriteFileAsync: %v", err)
+	}
+
+	// Give the goroutine a moment to start.
+	time.Sleep(50 * time.Millisecond)
+	progress := eng.UploadProgress()
+	if len(progress) == 0 {
+		t.Error("expected at least 1 in-progress upload")
+	}
+	found := false
+	for _, p := range progress {
+		if p.VirtualPath == "/progress.bin" {
+			found = true
+			if p.SizeBytes != int64(len(content)) {
+				t.Errorf("expected SizeBytes=%d, got %d", len(content), p.SizeBytes)
+			}
+		}
+	}
+	if !found {
+		t.Error("UploadProgress must include /progress.bin")
+	}
+}

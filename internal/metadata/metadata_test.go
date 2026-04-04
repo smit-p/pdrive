@@ -556,3 +556,178 @@ func TestPathIsDir_CountsPendingFiles(t *testing.T) {
 		t.Error("listing must be empty while file is pending")
 	}
 }
+
+// ── Directory CRUD tests ────────────────────────────────────────────────────
+
+func TestCreateDirectory_AndExists(t *testing.T) {
+	db := testDB(t)
+
+	if err := db.CreateDirectory("/movies"); err != nil {
+		t.Fatalf("CreateDirectory: %v", err)
+	}
+	exists, err := db.DirectoryExists("/movies")
+	if err != nil {
+		t.Fatalf("DirectoryExists: %v", err)
+	}
+	if !exists {
+		t.Error("directory should exist after creation")
+	}
+}
+
+func TestDirectoryExists_NonExistent(t *testing.T) {
+	db := testDB(t)
+	exists, err := db.DirectoryExists("/nope")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exists {
+		t.Error("non-existent directory should not exist")
+	}
+}
+
+func TestDirectoryExists_RootAlwaysTrue(t *testing.T) {
+	db := testDB(t)
+	exists, err := db.DirectoryExists("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !exists {
+		t.Error("root directory must always exist")
+	}
+}
+
+func TestDeleteDirectory(t *testing.T) {
+	db := testDB(t)
+	db.CreateDirectory("/movies")
+	db.DeleteDirectory("/movies")
+
+	exists, _ := db.DirectoryExists("/movies")
+	if exists {
+		t.Error("directory should be gone after deletion")
+	}
+}
+
+func TestDeleteDirectoriesUnder(t *testing.T) {
+	db := testDB(t)
+	db.CreateDirectory("/movies")
+	db.CreateDirectory("/movies/action")
+	db.CreateDirectory("/movies/comedy")
+	db.CreateDirectory("/other")
+
+	if err := db.DeleteDirectoriesUnder("/movies"); err != nil {
+		t.Fatalf("DeleteDirectoriesUnder: %v", err)
+	}
+
+	exists, _ := db.DirectoryExists("/movies")
+	if exists {
+		t.Error("/movies should be deleted")
+	}
+	exists, _ = db.DirectoryExists("/movies/action")
+	if exists {
+		t.Error("/movies/action should be deleted")
+	}
+	exists, _ = db.DirectoryExists("/other")
+	if !exists {
+		t.Error("/other should NOT be deleted")
+	}
+}
+
+func TestGetFilesUnderDir(t *testing.T) {
+	db := testDB(t)
+	seedProvider(t, db)
+	db.InsertFile(newCompleteFile("f1", "/docs/a.txt"))
+	db.InsertFile(newCompleteFile("f2", "/docs/sub/b.txt"))
+	db.InsertFile(newCompleteFile("f3", "/other/c.txt"))
+
+	files, err := db.GetFilesUnderDir("/docs")
+	if err != nil {
+		t.Fatalf("GetFilesUnderDir: %v", err)
+	}
+	if len(files) != 2 {
+		t.Fatalf("expected 2 files under /docs, got %d", len(files))
+	}
+	paths := map[string]bool{}
+	for _, f := range files {
+		paths[f.VirtualPath] = true
+	}
+	if !paths["/docs/a.txt"] || !paths["/docs/sub/b.txt"] {
+		t.Errorf("unexpected files: %v", paths)
+	}
+}
+
+// ── Rename tests ────────────────────────────────────────────────────────────
+
+func TestRenameFileByPath(t *testing.T) {
+	db := testDB(t)
+	seedProvider(t, db)
+	db.InsertFile(newCompleteFile("f1", "/old.txt"))
+
+	if err := db.RenameFileByPath("/old.txt", "/new.txt"); err != nil {
+		t.Fatalf("RenameFileByPath: %v", err)
+	}
+	f, _ := db.GetFileByPath("/new.txt")
+	if f == nil {
+		t.Fatal("file must exist at new path")
+	}
+	old, _ := db.GetFileByPath("/old.txt")
+	if old != nil {
+		t.Error("file must not exist at old path")
+	}
+}
+
+func TestRenameFilesUnderDir(t *testing.T) {
+	db := testDB(t)
+	seedProvider(t, db)
+	db.InsertFile(newCompleteFile("f1", "/docs/a.txt"))
+	db.InsertFile(newCompleteFile("f2", "/docs/sub/b.txt"))
+	db.InsertFile(newCompleteFile("f3", "/other/c.txt"))
+
+	if err := db.RenameFilesUnderDir("/docs", "/documents"); err != nil {
+		t.Fatalf("RenameFilesUnderDir: %v", err)
+	}
+
+	f1, _ := db.GetFileByPath("/documents/a.txt")
+	if f1 == nil {
+		t.Error("/documents/a.txt must exist after rename")
+	}
+	f2, _ := db.GetFileByPath("/documents/sub/b.txt")
+	if f2 == nil {
+		t.Error("/documents/sub/b.txt must exist after rename")
+	}
+	f3, _ := db.GetFileByPath("/other/c.txt")
+	if f3 == nil {
+		t.Error("/other/c.txt must be untouched")
+	}
+	old, _ := db.GetFileByPath("/docs/a.txt")
+	if old != nil {
+		t.Error("/docs/a.txt must be gone after rename")
+	}
+}
+
+func TestRenameDirectoriesUnder(t *testing.T) {
+	db := testDB(t)
+	db.CreateDirectory("/docs")
+	db.CreateDirectory("/docs/sub")
+	db.CreateDirectory("/other")
+
+	if err := db.RenameDirectoriesUnder("/docs", "/documents"); err != nil {
+		t.Fatalf("RenameDirectoriesUnder: %v", err)
+	}
+
+	exists, _ := db.DirectoryExists("/documents")
+	if !exists {
+		t.Error("/documents should exist")
+	}
+	exists, _ = db.DirectoryExists("/documents/sub")
+	if !exists {
+		t.Error("/documents/sub should exist")
+	}
+	exists, _ = db.DirectoryExists("/docs")
+	if exists {
+		t.Error("/docs should be gone")
+	}
+	exists, _ = db.DirectoryExists("/other")
+	if !exists {
+		t.Error("/other should be untouched")
+	}
+}

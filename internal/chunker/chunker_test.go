@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
+	"strings"
 	"testing"
 )
 
@@ -223,5 +224,160 @@ func TestChunkSizeForFile(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// ── ChunkReader tests ────────────────────────────────────────────────────────
+
+// TestChunkReader_MultiChunk verifies streaming chunking produces the same
+// result as buffered Split.
+func TestChunkReader_MultiChunk(t *testing.T) {
+	const chunkSize = 1024
+	data := make([]byte, 3*chunkSize+500) // 3 full chunks + 1 partial
+	rand.Read(data)
+
+	cr := NewChunkReader(bytes.NewReader(data), chunkSize)
+	var chunks []Chunk
+	for {
+		c, err := cr.Next()
+		if err != nil {
+			t.Fatalf("ChunkReader.Next: %v", err)
+		}
+		if c == nil {
+			break
+		}
+		chunks = append(chunks, *c)
+	}
+
+	if len(chunks) != 4 {
+		t.Fatalf("expected 4 chunks, got %d", len(chunks))
+	}
+	for i, c := range chunks {
+		if c.Sequence != i {
+			t.Errorf("chunk %d: sequence=%d, want %d", i, c.Sequence, i)
+		}
+	}
+	// Last chunk should be the partial.
+	if chunks[3].Size != 500 {
+		t.Errorf("last chunk size=%d, want 500", chunks[3].Size)
+	}
+
+	// Reassemble and compare.
+	var reassembled []byte
+	for _, c := range chunks {
+		reassembled = append(reassembled, c.Data...)
+	}
+	if !bytes.Equal(reassembled, data) {
+		t.Error("ChunkReader data mismatch after reassembly")
+	}
+}
+
+// TestChunkReader_Empty verifies an empty reader returns nil on first Next().
+func TestChunkReader_Empty(t *testing.T) {
+	cr := NewChunkReader(bytes.NewReader(nil), DefaultChunkSize)
+	c, err := cr.Next()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if c != nil {
+		t.Error("expected nil chunk for empty reader")
+	}
+}
+
+// TestChunkReader_SingleByte verifies a single byte produces one chunk.
+func TestChunkReader_SingleByte(t *testing.T) {
+	cr := NewChunkReader(bytes.NewReader([]byte{0x42}), DefaultChunkSize)
+	c, err := cr.Next()
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if c == nil {
+		t.Fatal("expected one chunk")
+	}
+	if c.Size != 1 || c.Data[0] != 0x42 {
+		t.Errorf("unexpected chunk: size=%d data=%x", c.Size, c.Data)
+	}
+	// Second call should be nil.
+	c2, _ := cr.Next()
+	if c2 != nil {
+		t.Error("expected nil after last chunk")
+	}
+}
+
+// TestChunkReader_ExactMultiple verifies a file exactly divisible by chunk size.
+func TestChunkReader_ExactMultiple(t *testing.T) {
+	const chunkSize = 256
+	data := make([]byte, chunkSize*3) // exactly 3 chunks
+	rand.Read(data)
+
+	cr := NewChunkReader(bytes.NewReader(data), chunkSize)
+	var count int
+	for {
+		c, err := cr.Next()
+		if err != nil {
+			t.Fatalf("Next: %v", err)
+		}
+		if c == nil {
+			break
+		}
+		count++
+	}
+	if count != 3 {
+		t.Errorf("expected 3 chunks, got %d", count)
+	}
+}
+
+// ── Assemble edge-case tests ────────────────────────────────────────────────
+
+// TestAssemble_OutOfOrder verifies chunks are reordered by sequence.
+func TestAssemble_OutOfOrder(t *testing.T) {
+	// Create 3 chunks in order 2, 0, 1.
+	parts := [][]byte{[]byte("AAAA"), []byte("BBBB"), []byte("CCCC")}
+	var dcs []DecryptedChunk
+	for i, p := range parts {
+		h := sha256.Sum256(p)
+		dcs = append(dcs, DecryptedChunk{
+			Sequence: i, Data: p, SHA256: hex.EncodeToString(h[:]),
+		})
+	}
+	// Shuffle: put in order 2, 0, 1.
+	shuffled := []DecryptedChunk{dcs[2], dcs[0], dcs[1]}
+
+	r, err := Assemble(shuffled)
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	got, _ := io.ReadAll(r)
+	want := []byte("AAAABBBBCCCC")
+	if !bytes.Equal(got, want) {
+		t.Errorf("out-of-order assemble: got %q, want %q", got, want)
+	}
+}
+
+// TestAssemble_HashMismatch verifies a corrupted chunk is detected.
+func TestAssemble_HashMismatch(t *testing.T) {
+	dcs := []DecryptedChunk{{
+		Sequence: 0,
+		Data:     []byte("data"),
+		SHA256:   "0000000000000000000000000000000000000000000000000000000000000000",
+	}}
+	_, err := Assemble(dcs)
+	if err == nil {
+		t.Fatal("expected hash mismatch error")
+	}
+	if !strings.Contains(err.Error(), "hash mismatch") {
+		t.Errorf("error should mention hash mismatch, got: %v", err)
+	}
+}
+
+// TestAssemble_Empty verifies empty input produces an empty reader.
+func TestAssemble_Empty(t *testing.T) {
+	r, err := Assemble(nil)
+	if err != nil {
+		t.Fatalf("Assemble(nil): %v", err)
+	}
+	got, _ := io.ReadAll(r)
+	if len(got) != 0 {
+		t.Errorf("expected empty output, got %d bytes", len(got))
 	}
 }

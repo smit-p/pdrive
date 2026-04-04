@@ -2,6 +2,7 @@ package broker
 
 import (
 	"testing"
+	"time"
 
 	"github.com/smit-p/pdrive/internal/metadata"
 )
@@ -119,5 +120,79 @@ func TestNoEligibleProviders(t *testing.T) {
 	_, err := b.AssignChunk(4 * 1024 * 1024)
 	if err != ErrNoSpace {
 		t.Fatalf("expected ErrNoSpace, got %v", err)
+	}
+}
+
+// ── Rate-limiting tests ─────────────────────────────────────────────────────
+
+func TestRateLimitedProviderExcluded(t *testing.T) {
+	db, _ := metadata.Open(":memory:")
+	defer db.Close()
+
+	future := time.Now().Unix() + 3600 // rate-limited for 1 hour
+	db.UpsertProvider(&metadata.Provider{
+		ID: "a", Type: "gdrive", DisplayName: "A", RcloneRemote: "a:",
+		QuotaTotalBytes: ptr(100e9), QuotaFreeBytes: ptr(90e9),
+		RateLimitedUntil: &future,
+	})
+	db.UpsertProvider(&metadata.Provider{
+		ID: "b", Type: "dropbox", DisplayName: "B", RcloneRemote: "b:",
+		QuotaTotalBytes: ptr(100e9), QuotaFreeBytes: ptr(10e9),
+	})
+
+	b := NewBroker(db, PolicyPFRD, 0)
+	// All assignments should go to b since a is rate-limited.
+	for i := 0; i < 100; i++ {
+		id, err := b.AssignChunk(4 * 1024 * 1024)
+		if err != nil {
+			t.Fatalf("AssignChunk failed: %v", err)
+		}
+		if id != "b" {
+			t.Fatalf("expected only b (a is rate-limited), got %s", id)
+		}
+	}
+}
+
+func TestExpiredRateLimitIncluded(t *testing.T) {
+	db, _ := metadata.Open(":memory:")
+	defer db.Close()
+
+	past := time.Now().Unix() - 3600 // rate limit expired 1 hour ago
+	db.UpsertProvider(&metadata.Provider{
+		ID: "a", Type: "gdrive", DisplayName: "A", RcloneRemote: "a:",
+		QuotaTotalBytes: ptr(100e9), QuotaFreeBytes: ptr(90e9),
+		RateLimitedUntil: &past,
+	})
+
+	b := NewBroker(db, PolicyPFRD, 0)
+	id, err := b.AssignChunk(4 * 1024 * 1024)
+	if err != nil {
+		t.Fatalf("AssignChunk: %v", err)
+	}
+	if id != "a" {
+		t.Fatalf("expected a (rate limit expired), got %s", id)
+	}
+}
+
+func TestAllProvidersRateLimited(t *testing.T) {
+	db, _ := metadata.Open(":memory:")
+	defer db.Close()
+
+	future := time.Now().Unix() + 3600
+	db.UpsertProvider(&metadata.Provider{
+		ID: "a", Type: "gdrive", DisplayName: "A", RcloneRemote: "a:",
+		QuotaTotalBytes: ptr(100e9), QuotaFreeBytes: ptr(90e9),
+		RateLimitedUntil: &future,
+	})
+	db.UpsertProvider(&metadata.Provider{
+		ID: "b", Type: "dropbox", DisplayName: "B", RcloneRemote: "b:",
+		QuotaTotalBytes: ptr(100e9), QuotaFreeBytes: ptr(90e9),
+		RateLimitedUntil: &future,
+	})
+
+	b := NewBroker(db, PolicyPFRD, 0)
+	_, err := b.AssignChunk(4 * 1024 * 1024)
+	if err != ErrNoSpace {
+		t.Fatalf("expected ErrNoSpace when all providers rate-limited, got %v", err)
 	}
 }
