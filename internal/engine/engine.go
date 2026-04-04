@@ -57,6 +57,7 @@ type Engine struct {
 	broker       *broker.Broker
 	encKey       []byte        // AES-256 key (32 bytes)
 	uploadTokens chan struct{} // token bucket: limits upload API calls per second
+	fileGate     chan struct{} // serializes file-level uploads (only 1 file at a time)
 	// maxChunkRetries overrides maxUploadRetries when > 0 (used by tests to
 	// avoid long exponential-backoff delays).
 	maxChunkRetries int
@@ -74,8 +75,34 @@ const (
 )
 
 // NewEngine creates a new engine backed by an rclone RC client.
+// Uses a conservative burst (16) to avoid overwhelming provider rate limits.
 func NewEngine(db *metadata.DB, dbPath string, rc *rclonerc.Client, b *broker.Broker, encKey []byte) *Engine {
-	return NewEngineWithCloud(db, dbPath, rc, b, encKey)
+	const burst = 16
+	e := &Engine{
+		db:           db,
+		dbPath:       dbPath,
+		rc:           rc,
+		broker:       b,
+		encKey:       encKey,
+		uploadTokens: make(chan struct{}, burst),
+		fileGate:     make(chan struct{}, 1), // only 1 file uploading at a time
+		uploads:      make(map[string]*uploadProgress),
+	}
+	// Pre-fill the burst quota.
+	for i := 0; i < burst; i++ {
+		e.uploadTokens <- struct{}{}
+	}
+	// Refill one token every 1/uploadRatePerSec seconds.
+	go func() {
+		ticker := time.NewTicker(time.Second / uploadRatePerSec)
+		for range ticker.C {
+			select {
+			case e.uploadTokens <- struct{}{}:
+			default: // bucket full, discard
+			}
+		}
+	}()
+	return e
 }
 
 // NewEngineWithCloud creates an Engine with any CloudStorage implementation.
@@ -91,6 +118,7 @@ func NewEngineWithCloud(db *metadata.DB, dbPath string, rc CloudStorage, b *brok
 		broker:       b,
 		encKey:       encKey,
 		uploadTokens: make(chan struct{}, burst),
+		fileGate:     make(chan struct{}, 1), // serialize file uploads in tests too
 		uploads:      make(map[string]*uploadProgress),
 	}
 	// Pre-fill the burst quota.
@@ -485,7 +513,12 @@ func (e *Engine) insertChunkMetadata(fileID string, metas []chunkMeta) error {
 
 // uploadChunksTracked registers upload progress for fileID, then delegates to
 // uploadChunks with a callback that increments the chunk counter.
+// Acquires the file-level gate so only one file uploads at a time.
 func (e *Engine) uploadChunksTracked(r io.ReadSeeker, fileID, virtualPath string, fileSize int64) ([]chunkMeta, error) {
+	// Serialize file-level uploads: wait for the previous file to finish.
+	e.fileGate <- struct{}{}
+	defer func() { <-e.fileGate }()
+
 	chunkSize := chunker.ChunkSizeForFile(fileSize)
 	estimated := int(fileSize/int64(chunkSize)) + 1
 
@@ -762,6 +795,10 @@ func (e *Engine) RenameDir(oldPath, newPath string) error {
 // Best-effort: errors are logged but never propagated.
 func (e *Engine) deleteCloudChunks(locs []metadata.ChunkLocation) {
 	for _, loc := range locs {
+		// Rate-limit delete calls through the same token bucket as uploads
+		// to avoid monopolizing the provider's API quota during GC.
+		<-e.uploadTokens
+
 		provider, err := e.db.GetProvider(loc.ProviderID)
 		if err != nil || provider == nil {
 			slog.Warn("could not get provider for chunk cleanup", "providerID", loc.ProviderID)

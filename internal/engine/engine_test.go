@@ -125,6 +125,7 @@ func newTestEngine(t *testing.T) (*Engine, *fakeCloud) {
 		encKey:          encKey,
 		maxChunkRetries: 1, // no retries in tests — avoids long backoff delays
 		uploadTokens:    make(chan struct{}, uploadRateBurst+100),
+		fileGate:        make(chan struct{}, 1),
 		uploads:         make(map[string]*uploadProgress),
 	}
 	// Pre-fill all tokens so uploads never block on the rate limiter in tests.

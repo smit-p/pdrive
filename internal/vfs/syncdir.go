@@ -3,6 +3,7 @@ package vfs
 import (
 	"context"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -150,6 +151,8 @@ func (s *SyncDir) handleEvent(ev fsnotify.Event) {
 			s.watcher.Add(absPath)
 			s.engine.MkDir(vp + "/")
 			slog.Info("sync: dir created", "path", vp)
+			// Scan for files that landed before the watcher was added.
+			s.scanDir(absPath)
 			return
 		}
 		s.debounce(absPath, vp)
@@ -173,6 +176,34 @@ func (s *SyncDir) handleEvent(ev fsnotify.Event) {
 			slog.Info("sync: file removed", "path", vp)
 		}
 	}
+}
+
+// scanDir walks a newly-created directory and debounces any files found.
+// This handles the race where Finder copies files into a directory before
+// fsnotify has started watching it.
+func (s *SyncDir) scanDir(dir string) {
+	filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || path == dir {
+			return nil
+		}
+		if d.IsDir() {
+			if shouldSkipDir(filepath.Base(path)) {
+				return fs.SkipDir
+			}
+			s.watcher.Add(path)
+			vp, _ := filepath.Rel(s.root, path)
+			vp = "/" + vp
+			s.engine.MkDir(vp + "/")
+			return nil
+		}
+		vp, _ := filepath.Rel(s.root, path)
+		vp = "/" + vp
+		if shouldSkipPath(vp) {
+			return nil
+		}
+		s.debounce(path, vp)
+		return nil
+	})
 }
 
 func (s *SyncDir) debounce(absPath, vp string) {
