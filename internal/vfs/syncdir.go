@@ -24,6 +24,19 @@ import (
 // reliably means the copy is done.
 const debounceDelay = 2 * time.Second
 
+// renameWindow is how long we hold a Remove event before treating it as a
+// real deletion. If a Create of a file with the same size arrives within this
+// window, we treat it as a rename (metadata-only, no re-upload).
+const renameWindow = 500 * time.Millisecond
+
+// recentRemoval holds info about a recently removed file for rename detection.
+type recentRemoval struct {
+	virtualPath string
+	size        int64
+	sha256Full  string
+	timer       *time.Timer
+}
+
 // SyncDir watches a local directory and syncs changes to the cloud, Dropbox-style.
 type SyncDir struct {
 	root     string
@@ -33,6 +46,9 @@ type SyncDir struct {
 
 	pending map[string]*time.Timer
 	mu      sync.Mutex
+
+	// removals tracks recently removed files for rename detection.
+	removals map[string]*recentRemoval // keyed by sha256+size
 
 	// suppress watcher events caused by our own writes (downloads).
 	suppress map[string]struct{}
@@ -49,6 +65,7 @@ func NewSyncDir(root string, eng *engine.Engine, spoolDir string) *SyncDir {
 		engine:   eng,
 		spoolDir: spoolDir,
 		pending:  make(map[string]*time.Timer),
+		removals: make(map[string]*recentRemoval),
 		suppress: make(map[string]struct{}),
 	}
 }
@@ -84,6 +101,9 @@ func (s *SyncDir) Stop() {
 	s.mu.Lock()
 	for _, t := range s.pending {
 		t.Stop()
+	}
+	for _, r := range s.removals {
+		r.timer.Stop()
 	}
 	s.mu.Unlock()
 }
@@ -158,7 +178,33 @@ func (s *SyncDir) handleEvent(ev fsnotify.Event) {
 			s.scanDir(absPath)
 			return
 		}
-		s.debounce(absPath, vp)
+
+		// Rename detection: check if a recent removal matches this file's size.
+		s.mu.Lock()
+		matched := false
+		for key, rem := range s.removals {
+			if rem.size == info.Size() {
+				rem.timer.Stop()
+				delete(s.removals, key)
+				s.mu.Unlock()
+				// Perform metadata-only rename instead of delete + re-upload.
+				if err := s.engine.RenameFile(rem.virtualPath, vp); err != nil {
+					slog.Warn("sync: rename failed, falling back to upload",
+						"old", rem.virtualPath, "new", vp, "error", err)
+					s.debounce(absPath, vp)
+				} else {
+					slog.Info("sync: renamed (metadata-only)", "old", rem.virtualPath, "new", vp)
+				}
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			s.mu.Unlock()
+		}
+		if !matched {
+			s.debounce(absPath, vp)
+		}
 
 	case ev.Has(fsnotify.Write):
 		s.debounce(absPath, vp)
@@ -171,12 +217,28 @@ func (s *SyncDir) handleEvent(ev fsnotify.Event) {
 		}
 		s.mu.Unlock()
 
+		// For files, defer the delete to allow rename detection.
 		if isDir, _ := s.engine.IsDir(vp + "/"); isDir {
 			s.engine.DeleteDir(vp + "/")
 			slog.Info("sync: dir removed", "path", vp)
+		} else if existing, _ := s.engine.Stat(vp); existing != nil {
+			key := existing.SHA256Full + fmt.Sprintf(":%d", existing.SizeBytes)
+			s.mu.Lock()
+			s.removals[key] = &recentRemoval{
+				virtualPath: vp,
+				size:        existing.SizeBytes,
+				sha256Full:  existing.SHA256Full,
+				timer: time.AfterFunc(renameWindow, func() {
+					s.mu.Lock()
+					delete(s.removals, key)
+					s.mu.Unlock()
+					s.engine.DeleteFile(vp)
+					slog.Info("sync: file removed", "path", vp)
+				}),
+			}
+			s.mu.Unlock()
 		} else {
-			s.engine.DeleteFile(vp)
-			slog.Info("sync: file removed", "path", vp)
+			slog.Info("sync: file removed (not in db)", "path", vp)
 		}
 	}
 }
