@@ -52,14 +52,16 @@ func (f *fakeCloud) PutFile(remote, p string, r io.Reader) error {
 	return nil
 }
 
-func (f *fakeCloud) GetFile(remote, p string) ([]byte, error) {
+func (f *fakeCloud) GetFile(remote, p string) (io.ReadCloser, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	data, ok := f.objects[f.key(remote, p)]
 	if !ok {
 		return nil, fmt.Errorf("not found: %s/%s", remote, p)
 	}
-	return data, nil
+	cp := make([]byte, len(data))
+	copy(cp, data)
+	return io.NopCloser(bytes.NewReader(cp)), nil
 }
 
 func (f *fakeCloud) DeleteFile(remote, p string) error {

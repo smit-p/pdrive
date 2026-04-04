@@ -65,14 +65,28 @@ func (c *Client) PutFile(remote, remotePath string, data io.Reader) error {
 	return nil
 }
 
+// tempFileReadCloser wraps an os.File and removes its parent temp directory
+// when Close is called. This avoids reading the entire downloaded file into
+// memory — the caller streams from the file handle and cleanup happens on Close.
+type tempFileReadCloser struct {
+	*os.File
+	tmpDir string
+}
+
+func (t *tempFileReadCloser) Close() error {
+	err := t.File.Close()
+	os.RemoveAll(t.tmpDir)
+	return err
+}
+
 // GetFile downloads a file from remote:remotePath using rclone RC operations/copyfile
-// to a local temp directory, reads the content, and cleans up.
-func (c *Client) GetFile(remote, remotePath string) ([]byte, error) {
+// to a local temp directory and returns a streaming reader. The caller must Close
+// the returned ReadCloser to release the temp file.
+func (c *Client) GetFile(remote, remotePath string) (io.ReadCloser, error) {
 	tmpDir, err := os.MkdirTemp("", "pdrive-dl-")
 	if err != nil {
 		return nil, fmt.Errorf("creating temp dir: %w", err)
 	}
-	defer os.RemoveAll(tmpDir)
 
 	dstRemote := filepath.Base(remotePath)
 
@@ -83,15 +97,17 @@ func (c *Client) GetFile(remote, remotePath string) ([]byte, error) {
 		"dstRemote": dstRemote,
 	})
 	if err != nil {
+		os.RemoveAll(tmpDir)
 		return nil, fmt.Errorf("downloading file: %w", err)
 	}
 
-	data, err := os.ReadFile(filepath.Join(tmpDir, dstRemote))
+	f, err := os.Open(filepath.Join(tmpDir, dstRemote))
 	if err != nil {
-		return nil, fmt.Errorf("reading downloaded file: %w", err)
+		os.RemoveAll(tmpDir)
+		return nil, fmt.Errorf("opening downloaded file: %w", err)
 	}
 
-	return data, nil
+	return &tempFileReadCloser{File: f, tmpDir: tmpDir}, nil
 }
 
 // DeleteFile deletes a file at remote:remotePath using rclone RC operations/deletefile.

@@ -5,6 +5,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -304,8 +305,13 @@ func (d *Daemon) tryRestoreDB(dbPath string) bool {
 		return false
 	}
 	for _, remote := range remotes {
-		data, err := d.rclone.Client().GetFile(remote, "pdrive-meta/metadata.db")
-		if err != nil || len(data) == 0 {
+		rc, err := d.rclone.Client().GetFile(remote, "pdrive-meta/metadata.db")
+		if err != nil {
+			continue
+		}
+		data, readErr := io.ReadAll(rc)
+		rc.Close()
+		if readErr != nil || len(data) == 0 {
 			continue
 		}
 		if err := os.WriteFile(dbPath, data, 0600); err != nil {

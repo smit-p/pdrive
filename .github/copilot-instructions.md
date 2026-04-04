@@ -46,13 +46,13 @@ Key flags: `--config-dir` (~/.pdrive), `--sync-dir` (~/pdrive), `--rclone-addr` 
 
 ## HTTP API Endpoints
 
-| Endpoint | Method | Description |
-|---|---|---|
-| `/api/status` | GET | Total files, bytes, provider quotas |
-| `/api/uploads` | GET | In-flight upload progress |
-| `/api/ls?path=` | GET | Directory listing with `local_state` (local/stub/uploading) |
-| `/api/pin?path=` | POST | Pin (download) a cloud-only file |
-| `/api/unpin?path=` | POST | Unpin (evict local data) |
+| Endpoint           | Method | Description                                                 |
+| ------------------ | ------ | ----------------------------------------------------------- |
+| `/api/status`      | GET    | Total files, bytes, provider quotas                         |
+| `/api/uploads`     | GET    | In-flight upload progress                                   |
+| `/api/ls?path=`    | GET    | Directory listing with `local_state` (local/stub/uploading) |
+| `/api/pin?path=`   | POST   | Pin (download) a cloud-only file                            |
+| `/api/unpin?path=` | POST   | Unpin (evict local data)                                    |
 
 ## Build & Test
 
@@ -100,19 +100,19 @@ Start the daemon:
 
 ## Runtime Paths
 
-| Path | Purpose |
-|---|---|
-| `~/.pdrive/` | Config dir: DB, spool, rclone conf |
-| `~/.pdrive/metadata.db` | SQLite metadata database |
-| `~/.pdrive/spool/` | Temp files for in-progress uploads |
-| `~/.pdrive/bin/pdrive` | Installed binary (by `--install`) |
-| `~/.pdrive/daemon.log` | Daemon log output (launchd) |
-| `~/pdrive/` | Local sync folder (configurable) |
-| `~/Library/LaunchAgents/com.smit.pdrive.plist` | launchd agent plist |
-| `~/Library/Services/pdrive Pin to Local.workflow/` | Finder Quick Action: pin |
-| `~/Library/Services/pdrive Free Up Space.workflow/` | Finder Quick Action: unpin |
-| Cloud: `pdrive-chunks/<uuid>` | Encrypted chunk storage |
-| Cloud: `pdrive-meta/metadata.db` | Metadata backup |
+| Path                                                | Purpose                            |
+| --------------------------------------------------- | ---------------------------------- |
+| `~/.pdrive/`                                        | Config dir: DB, spool, rclone conf |
+| `~/.pdrive/metadata.db`                             | SQLite metadata database           |
+| `~/.pdrive/spool/`                                  | Temp files for in-progress uploads |
+| `~/.pdrive/bin/pdrive`                              | Installed binary (by `--install`)  |
+| `~/.pdrive/daemon.log`                              | Daemon log output (launchd)        |
+| `~/pdrive/`                                         | Local sync folder (configurable)   |
+| `~/Library/LaunchAgents/com.smit.pdrive.plist`      | launchd agent plist                |
+| `~/Library/Services/pdrive Pin to Local.workflow/`  | Finder Quick Action: pin           |
+| `~/Library/Services/pdrive Free Up Space.workflow/` | Finder Quick Action: unpin         |
+| Cloud: `pdrive-chunks/<uuid>`                       | Encrypted chunk storage            |
+| Cloud: `pdrive-meta/metadata.db`                    | Metadata backup                    |
 
 ## Daemon Lifecycle
 

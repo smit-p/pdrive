@@ -22,7 +22,7 @@ import (
 // *rclonerc.Client satisfies this interface in production; tests inject a fake.
 type CloudStorage interface {
 	PutFile(remote, remotePath string, data io.Reader) error
-	GetFile(remote, remotePath string) ([]byte, error)
+	GetFile(remote, remotePath string) (io.ReadCloser, error)
 	DeleteFile(remote, remotePath string) error
 	ListDir(remote, remotePath string) ([]rclonerc.ListItem, error)
 	Cleanup(remote string) error
@@ -565,6 +565,7 @@ func (e *Engine) ResumeUploads() {
 
 // ReadFile reads a file from the virtual filesystem, downloading and decrypting chunks.
 // Returns an error if the file is still uploading (upload_state='pending').
+// Chunks are processed one at a time to bound peak memory usage.
 func (e *Engine) ReadFile(virtualPath string) ([]byte, error) {
 	file, err := e.db.GetCompleteFileByPath(virtualPath)
 	if err != nil {
@@ -583,7 +584,8 @@ func (e *Engine) ReadFile(virtualPath string) ([]byte, error) {
 		return nil, fmt.Errorf("getting chunks: %w", err)
 	}
 
-	var decryptedChunks []chunker.DecryptedChunk
+	var buf bytes.Buffer
+	fullHasher := sha256.New()
 
 	for _, chunk := range chunks {
 		locs, err := e.db.GetChunkLocations(chunk.ID)
@@ -600,36 +602,36 @@ func (e *Engine) ReadFile(virtualPath string) ([]byte, error) {
 			return nil, fmt.Errorf("getting provider for chunk %s: %w", chunk.ID, err)
 		}
 
-		encrypted, err := e.rc.GetFile(provider.RcloneRemote, loc.RemotePath)
+		rc, err := e.rc.GetFile(provider.RcloneRemote, loc.RemotePath)
 		if err != nil {
 			return nil, fmt.Errorf("downloading chunk %d from %s: %w", chunk.Sequence, provider.DisplayName, err)
+		}
+		encrypted, readErr := io.ReadAll(rc)
+		rc.Close()
+		if readErr != nil {
+			return nil, fmt.Errorf("reading chunk %d: %w", chunk.Sequence, readErr)
 		}
 
 		decrypted, err := chunker.Decrypt(e.encKey, encrypted)
 		if err != nil {
 			return nil, fmt.Errorf("decrypting chunk %d: %w", chunk.Sequence, err)
 		}
+		encrypted = nil // allow GC of encrypted bytes
 
-		decryptedChunks = append(decryptedChunks, chunker.DecryptedChunk{
-			Sequence: chunk.Sequence,
-			Data:     decrypted,
-			SHA256:   chunk.SHA256,
-		})
+		// Verify per-chunk hash.
+		chunkHash := sha256.Sum256(decrypted)
+		if hex.EncodeToString(chunkHash[:]) != chunk.SHA256 {
+			return nil, fmt.Errorf("chunk %d hash mismatch for %s", chunk.Sequence, virtualPath)
+		}
+
+		fullHasher.Write(decrypted)
+		buf.Write(decrypted)
 	}
 
-	reader, err := chunker.Assemble(decryptedChunks)
-	if err != nil {
-		return nil, fmt.Errorf("assembling file: %w", err)
-	}
-
-	result, err := io.ReadAll(reader)
-	if err != nil {
-		return nil, fmt.Errorf("reading assembled file: %w", err)
-	}
+	result := buf.Bytes()
 
 	// Verify full file hash.
-	fullHash := sha256.Sum256(result)
-	if hex.EncodeToString(fullHash[:]) != file.SHA256Full {
+	if hex.EncodeToString(fullHasher.Sum(nil)) != file.SHA256Full {
 		return nil, fmt.Errorf("file hash mismatch for %s", virtualPath)
 	}
 
