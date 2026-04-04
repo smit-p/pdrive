@@ -441,7 +441,7 @@ func writeWorkflowDoc(contentsDir, script, uuid string) error {
 					<key>shell</key>
 					<string>/bin/bash</string>
 					<key>source</key>
-					<string>pass_input</string>
+					<string>0</string>
 				</dict>
 				<key>BundleIdentifier</key>
 				<string>com.apple.RunShellScript</string>
