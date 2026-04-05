@@ -81,6 +81,16 @@ func (e *Engine) BackupDB() error {
 	if e.dbPath == "" || len(e.encKey) == 0 || e.rc == nil {
 		return nil
 	}
+
+	// Defer the backup if a file upload is in progress — the backup PutFile
+	// calls would compete for the same provider API quota and trigger 403
+	// rate-limit errors that stall uploads with exponential backoff.
+	if e.uploading.Load() > 0 {
+		slog.Debug("deferring metadata backup while upload is active")
+		e.scheduleBackup() // re-arm the timer so it runs after upload finishes
+		return nil
+	}
+
 	providers, err := e.db.GetAllProviders()
 	if err != nil || len(providers) == 0 {
 		return nil

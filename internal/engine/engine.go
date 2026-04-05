@@ -81,6 +81,10 @@ type Engine struct {
 	backupTimer *time.Timer
 	backupMu    sync.Mutex
 
+	// uploading is nonzero while a file upload is in progress.
+	// BackupDB defers work while uploading to avoid competing for provider quota.
+	uploading atomic.Int32
+
 	// saltPath is the local path to the Argon2id salt file (enc.salt).
 	// When set, BackupDB uploads the salt alongside the encrypted DB.
 	saltPath string
@@ -97,16 +101,15 @@ type Engine struct {
 
 const (
 	// uploadRatePerSec is the maximum number of chunk-upload API calls per second
-	// across all providers. Google Drive's per-user quota is ~10 req/100s; 8/s
-	// gives comfortable headroom without stalling uploads.
-	uploadRatePerSec = 8
+	// across all providers. Google Drive's per-user quota is ~10 req/100s;
+	// 2/s provides margin and avoids quota exhaustion during sustained uploads.
+	uploadRatePerSec = 2
 	uploadRateBurst  = 4 // initial burst before the ticker kicks in
 )
 
 // NewEngine creates a new engine backed by an rclone RC client.
-// Uses a conservative burst (16) to avoid overwhelming provider rate limits.
 func NewEngine(db *metadata.DB, dbPath string, rc *rclonerc.Client, b *broker.Broker, encKey []byte) *Engine {
-	const burst = 16
+	const burst = 4
 	e := newEngine(db, dbPath, rc, b, encKey, burst, uploadRatePerSec)
 	return e
 }
@@ -114,7 +117,7 @@ func NewEngine(db *metadata.DB, dbPath string, rc *rclonerc.Client, b *broker.Br
 // NewEngineWithRate creates an Engine with a custom API rate limit (tokens per second).
 // A ratePerSec of 0 or less uses the default (8/s).
 func NewEngineWithRate(db *metadata.DB, dbPath string, rc *rclonerc.Client, b *broker.Broker, encKey []byte, ratePerSec int) *Engine {
-	const burst = 16
+	const burst = 4
 	if ratePerSec <= 0 {
 		ratePerSec = uploadRatePerSec
 	}
@@ -235,14 +238,14 @@ func (e *Engine) chunkSize(fileSize int64) int {
 }
 
 // workersForChunkSize returns an appropriate concurrency level for the given
-// chunk size so that peak in-flight memory is bounded to roughly 256 MB.
+// chunk size so that peak in-flight memory is bounded to roughly 512 MB.
 func workersForChunkSize(chunkSize int) int {
 	switch {
-	case chunkSize >= 32*1024*1024: // ≥ 32 MB → 1 worker (≤64 MB in-flight)
-		return 1
-	case chunkSize >= 8*1024*1024: // ≥ 8 MB → 2 workers (≤32 MB in-flight)
+	case chunkSize >= 32*1024*1024: // ≥ 32 MB → 2 workers (≤512 MB in-flight)
 		return 2
-	default: // < 8 MB → 3 workers (≤24 MB in-flight)
+	case chunkSize >= 8*1024*1024: // ≥ 8 MB → 3 workers (≤48 MB in-flight)
+		return 3
+	default: // < 8 MB → 4 workers (≤32 MB in-flight)
 		return maxUploadWorkers
 	}
 }
@@ -256,7 +259,7 @@ func (e *Engine) WriteFile(virtualPath string, data []byte) error {
 const (
 	// maxUploadWorkers is the default (small-chunk) concurrency limit; see
 	// workersForChunkSize for how this scales down for larger chunks.
-	maxUploadWorkers = 3
+	maxUploadWorkers = 4
 	// maxUploadRetries is the number of retry attempts for a failed chunk upload.
 	maxUploadRetries = 5
 	// AsyncWriteThreshold: files larger than this are uploaded in the background
@@ -649,6 +652,11 @@ func (e *Engine) uploadChunksTracked(r io.ReadSeeker, fileID, virtualPath string
 	// Serialize file-level uploads: wait for the previous file to finish.
 	e.fileGate <- struct{}{}
 	defer func() { <-e.fileGate }()
+
+	// Signal that an upload is active so BackupDB defers to avoid
+	// competing for the same provider API quota.
+	e.uploading.Add(1)
+	defer e.uploading.Add(-1)
 
 	chunkSize := e.chunkSize(fileSize)
 	estimated := int(fileSize/int64(chunkSize)) + 1
