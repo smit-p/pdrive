@@ -2505,3 +2505,72 @@ func TestGetProviderByRemote(t *testing.T) {
 		t.Fatal("expected nil for non-existent remote")
 	}
 }
+
+// ── Tests for GetFilesUnderDir returning all columns ──
+
+func TestGetFilesUnderDir_ReturnsUploadState(t *testing.T) {
+	db := testDB(t)
+	db.InsertFile(newCompleteFile("f1", "/dir/a.txt"))
+	tmp := "/tmp/pending"
+	db.InsertFile(&File{
+		ID: "f2", VirtualPath: "/dir/b.txt", SizeBytes: 100,
+		CreatedAt: 1, ModifiedAt: 1, SHA256Full: "h",
+		UploadState: "pending", TmpPath: &tmp,
+	})
+
+	files, err := db.GetFilesUnderDir("/dir")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 2 {
+		t.Fatalf("expected 2, got %d", len(files))
+	}
+	for _, f := range files {
+		if f.VirtualPath == "/dir/a.txt" {
+			if f.UploadState != "complete" {
+				t.Errorf("expected complete, got %q", f.UploadState)
+			}
+			if f.TmpPath != nil {
+				t.Errorf("expected nil TmpPath for complete file")
+			}
+		}
+		if f.VirtualPath == "/dir/b.txt" {
+			if f.UploadState != "pending" {
+				t.Errorf("expected pending, got %q", f.UploadState)
+			}
+			if f.TmpPath == nil || *f.TmpPath != "/tmp/pending" {
+				t.Errorf("expected TmpPath /tmp/pending, got %v", f.TmpPath)
+			}
+		}
+	}
+}
+
+// ── Tests for SearchFiles LIKE escape ──
+
+func TestSearchFiles_EscapesLIKEWildcards(t *testing.T) {
+	db := testDB(t)
+	db.InsertFile(newCompleteFile("f1", "/data/100%_done.txt"))
+	db.InsertFile(newCompleteFile("f2", "/data/regular.txt"))
+
+	// Searching for literal "100%" should only find the file with that name,
+	// not treat % as a wildcard matching everything.
+	files, err := db.SearchFiles("/", "100%")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("expected 1 match for literal '100%%', got %d", len(files))
+	}
+	if files[0].VirtualPath != "/data/100%_done.txt" {
+		t.Errorf("unexpected match: %s", files[0].VirtualPath)
+	}
+
+	// Searching for literal "_done" should match exactly, not treat _ as single-char wildcard.
+	files, err = db.SearchFiles("/", "_done")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("expected 1 match for literal '_done', got %d", len(files))
+	}
+}

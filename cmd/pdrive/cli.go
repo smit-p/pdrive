@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"sort"
@@ -283,8 +284,25 @@ func runLs(addr, configDir string, args []string) {
 
 // --- status ---
 
+// fmtProviderDetail returns a parenthesized identity/type label for a provider.
+// Examples: "(alice@gmail.com, drive)", "(drive)", "".
+func fmtProviderDetail(p cliStatusProvider) string {
+	switch {
+	case p.AccountIdentity != "" && p.Type != "":
+		return "(" + p.AccountIdentity + ", " + p.Type + ")"
+	case p.AccountIdentity != "":
+		return "(" + p.AccountIdentity + ")"
+	case p.Type != "":
+		return "(" + p.Type + ")"
+	default:
+		return ""
+	}
+}
+
 type cliStatusProvider struct {
 	Name              string `json:"name"`
+	Type              string `json:"type"`
+	AccountIdentity   string `json:"account_identity"`
 	QuotaTotalBytes   *int64 `json:"quota_total_bytes"`
 	QuotaFreeBytes    *int64 `json:"quota_free_bytes"`
 	QuotaUsedByPdrive *int64 `json:"quota_used_by_pdrive"`
@@ -328,10 +346,249 @@ func runStatus(addr string) {
 			if p.QuotaUsedByPdrive != nil {
 				used = fmtSize(*p.QuotaUsedByPdrive)
 			}
-			fmt.Fprintf(w, "  %s\t%s used by pdrive\t%s free / %s total\n", p.Name, used, free, total)
+			fmt.Fprintf(w, "  %s\t%s\t%s used by pdrive\t%s free / %s total\n", p.Name, fmtProviderDetail(p), used, free, total)
 		}
 		w.Flush()
 	}
+}
+
+// --- remotes ---
+
+// remotesConfigPath returns the path to the persistent remotes selection file.
+func remotesConfigPath(configDir string) string {
+	return filepath.Join(configDir, "remotes.json")
+}
+
+// loadRemotesConfig reads the enabled remotes from remotes.json.
+// Returns nil (meaning "all") if the file doesn't exist.
+func loadRemotesConfig(configDir string) ([]string, error) {
+	data, err := os.ReadFile(remotesConfigPath(configDir))
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var remotes []string
+	if err := json.Unmarshal(data, &remotes); err != nil {
+		return nil, fmt.Errorf("invalid remotes.json: %w", err)
+	}
+	return remotes, nil
+}
+
+// saveRemotesConfig writes the enabled remotes to remotes.json.
+func saveRemotesConfig(configDir string, remotes []string) error {
+	if err := os.MkdirAll(configDir, 0700); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(remotes, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(remotesConfigPath(configDir), data, 0600)
+}
+
+// listRcloneRemotes calls `rclone listremotes` directly (no daemon needed).
+func listRcloneRemotes() ([]string, error) {
+	out, err := exec.Command("rclone", "listremotes").Output()
+	if err != nil {
+		return nil, fmt.Errorf("failed to run rclone listremotes: %w", err)
+	}
+	var remotes []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		name := strings.TrimSuffix(strings.TrimSpace(line), ":")
+		if name != "" {
+			remotes = append(remotes, name)
+		}
+	}
+	return remotes, nil
+}
+
+func runRemotes(configDir string, args []string) {
+	if len(args) == 0 {
+		// pdrive remotes — list all remotes and show enabled ones.
+		runRemotesList(configDir)
+		return
+	}
+
+	switch args[0] {
+	case "add":
+		if len(args) < 2 {
+			fmt.Fprintf(os.Stderr, "Usage: pdrive remotes add <name> [name...]\n")
+			os.Exit(1)
+		}
+		runRemotesAdd(configDir, args[1:])
+	case "remove":
+		if len(args) < 2 {
+			fmt.Fprintf(os.Stderr, "Usage: pdrive remotes remove <name> [name...]\n")
+			os.Exit(1)
+		}
+		runRemotesRemove(configDir, args[1:])
+	case "reset":
+		runRemotesReset(configDir)
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown remotes subcommand: %s\n", args[0])
+		fmt.Fprintf(os.Stderr, "Usage: pdrive remotes [add|remove|reset]\n")
+		os.Exit(1)
+	}
+}
+
+func runRemotesList(configDir string) {
+	allRemotes, err := listRcloneRemotes()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	if len(allRemotes) == 0 {
+		fmt.Println("No rclone remotes configured. Run: rclone config")
+		return
+	}
+
+	enabled, err := loadRemotesConfig(configDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not read remotes config: %v\n", err)
+	}
+
+	// Build enabled set. nil/empty means all are enabled.
+	allEnabled := len(enabled) == 0
+	enabledSet := make(map[string]bool, len(enabled))
+	for _, r := range enabled {
+		enabledSet[r] = true
+	}
+
+	fmt.Println("Rclone remotes:")
+	for _, name := range allRemotes {
+		active := allEnabled || enabledSet[name]
+		marker := "  "
+		if active {
+			marker = "* "
+		}
+		fmt.Printf("  %s%s\n", marker, name)
+	}
+	fmt.Println()
+	if allEnabled {
+		fmt.Println("* = enabled (all remotes are used — no selection configured)")
+	} else {
+		fmt.Println("* = enabled")
+	}
+	fmt.Println()
+	fmt.Println("Manage remotes:")
+	fmt.Println("  pdrive remotes add <name>       Enable a remote")
+	fmt.Println("  pdrive remotes remove <name>    Disable a remote")
+	fmt.Println("  pdrive remotes reset            Use all remotes (clear selection)")
+}
+
+func runRemotesAdd(configDir string, names []string) {
+	// Validate names against actual rclone remotes.
+	allRemotes, err := listRcloneRemotes()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	available := make(map[string]bool, len(allRemotes))
+	for _, r := range allRemotes {
+		available[r] = true
+	}
+	for _, name := range names {
+		if !available[name] {
+			fmt.Fprintf(os.Stderr, "Error: %q is not a configured rclone remote\n", name)
+			fmt.Fprintf(os.Stderr, "Available remotes: %s\n", strings.Join(allRemotes, ", "))
+			os.Exit(1)
+		}
+	}
+
+	// Load existing config.
+	enabled, _ := loadRemotesConfig(configDir)
+
+	// If no config yet, start from empty (not all) — user is explicitly choosing.
+	enabledSet := make(map[string]bool, len(enabled))
+	for _, r := range enabled {
+		enabledSet[r] = true
+	}
+
+	for _, name := range names {
+		if enabledSet[name] {
+			fmt.Printf("%s is already enabled\n", name)
+		} else {
+			enabled = append(enabled, name)
+			enabledSet[name] = true
+			fmt.Printf("Enabled %s\n", name)
+		}
+	}
+
+	if err := saveRemotesConfig(configDir, enabled); err != nil {
+		fmt.Fprintf(os.Stderr, "Error saving config: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("\nRestart pdrive for changes to take effect.")
+}
+
+func runRemotesRemove(configDir string, names []string) {
+	enabled, err := loadRemotesConfig(configDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	// If no config exists, we need to populate from all remotes first.
+	if len(enabled) == 0 {
+		allRemotes, err := listRcloneRemotes()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		enabled = allRemotes
+	}
+
+	// Validate that all names are in the enabled set.
+	enabledSet := make(map[string]bool, len(enabled))
+	for _, r := range enabled {
+		enabledSet[r] = true
+	}
+	for _, name := range names {
+		if !enabledSet[name] {
+			fmt.Fprintf(os.Stderr, "Error: %q is not an enabled remote\n", name)
+			fmt.Fprintf(os.Stderr, "Enabled remotes: %s\n", strings.Join(enabled, ", "))
+			os.Exit(1)
+		}
+	}
+
+	removeSet := make(map[string]bool, len(names))
+	for _, name := range names {
+		removeSet[name] = true
+	}
+
+	var remaining []string
+	for _, r := range enabled {
+		if !removeSet[r] {
+			remaining = append(remaining, r)
+		}
+	}
+
+	if len(remaining) == 0 {
+		fmt.Fprintf(os.Stderr, "Error: cannot remove all remotes — at least one must be enabled\n")
+		os.Exit(1)
+	}
+
+	for _, name := range names {
+		fmt.Printf("Disabled %s\n", name)
+	}
+
+	if err := saveRemotesConfig(configDir, remaining); err != nil {
+		fmt.Fprintf(os.Stderr, "Error saving config: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("\nRestart pdrive for changes to take effect.")
+}
+
+func runRemotesReset(configDir string) {
+	p := remotesConfigPath(configDir)
+	if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("Remote selection cleared — pdrive will use all rclone remotes.")
+	fmt.Println("\nRestart pdrive for changes to take effect.")
 }
 
 // --- uploads ---
@@ -988,6 +1245,10 @@ Info:
   pdrive info <path|number>       Show detailed file metadata and chunks
   pdrive du [path]                Show disk usage summary
   pdrive status                   Show storage summary and provider quotas
+  pdrive remotes                  List rclone remotes and which are enabled
+  pdrive remotes add <name>       Enable a remote for pdrive
+  pdrive remotes remove <name>    Disable a remote from pdrive
+  pdrive remotes reset            Use all remotes (clear selection)
   pdrive uploads                  Show in-flight upload progress
   pdrive health                   Check daemon health
   pdrive metrics                  Show telemetry counters
@@ -1003,6 +1264,7 @@ Hints:
 
 Flags:
   --password      Encryption password (derives AES-256 key via Argon2id)
+  --remotes       Override remote selection (comma-separated; prefer remotes add/remove)
   --webdav-addr   Daemon address (default 127.0.0.1:8765)
   --foreground    Run in foreground (for systemd/debugging)
   --debug         Enable debug logging

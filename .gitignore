@@ -15,6 +15,12 @@
 # Test / coverage artifacts
 *.out
 coverage*.html
+test-results/
+playwright-report/
+
+# Node (Playwright E2E tests)
+node_modules/
+package-lock.json
 
 # OS
 .DS_Store

@@ -2752,13 +2752,16 @@ func TestCheckMissingProviders_SomeMissing(t *testing.T) {
 	if len(missing) != 2 {
 		t.Fatalf("expected 2 missing, got %v", missing)
 	}
-	// Should contain mybox and aws.
-	found := map[string]bool{}
-	for _, m := range missing {
-		found[m] = true
+	// Labels now include provider type.
+	joined := strings.Join(missing, " | ")
+	if !strings.Contains(joined, "mybox") {
+		t.Errorf("expected mybox in missing, got %v", missing)
 	}
-	if !found["mybox"] || !found["aws"] {
-		t.Errorf("expected mybox and aws in missing, got %v", missing)
+	if !strings.Contains(joined, "aws") {
+		t.Errorf("expected aws in missing, got %v", missing)
+	}
+	if !strings.Contains(joined, "dropbox") {
+		t.Errorf("expected type info in missing label, got %v", missing)
 	}
 }
 
@@ -2772,5 +2775,30 @@ func TestCheckMissingProviders_EmptyDB(t *testing.T) {
 	missing := d.checkMissingProviders()
 	if len(missing) != 0 {
 		t.Errorf("expected 0 missing for empty DB, got %v", missing)
+	}
+}
+
+func TestCheckMissingProviders_WithIdentity(t *testing.T) {
+	remotes := map[string]string{"gdrive1": "drive"}
+	quotas := map[string][2]int64{}
+	srv := fakeRCServer(t, remotes, quotas)
+	defer srv.Close()
+
+	d, db := newDaemonWithFakeRC(t, srv)
+
+	total, free := int64(15e9), int64(10e9)
+	db.UpsertProvider(&metadata.Provider{ID: "p1", Type: "drive", DisplayName: "gdrive1", RcloneRemote: "gdrive1", QuotaTotalBytes: &total, QuotaFreeBytes: &free})
+	db.UpsertProvider(&metadata.Provider{ID: "p2", Type: "drive", DisplayName: "gdrive2", RcloneRemote: "gdrive2", AccountIdentity: "alice@gmail.com", QuotaTotalBytes: &total, QuotaFreeBytes: &free})
+
+	missing := d.checkMissingProviders()
+	if len(missing) != 1 {
+		t.Fatalf("expected 1 missing, got %v", missing)
+	}
+	// Missing label should include identity and type.
+	if !strings.Contains(missing[0], "alice@gmail.com") {
+		t.Errorf("expected identity in label, got %q", missing[0])
+	}
+	if !strings.Contains(missing[0], "drive") {
+		t.Errorf("expected type in label, got %q", missing[0])
 	}
 }

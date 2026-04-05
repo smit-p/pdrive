@@ -35,7 +35,7 @@ pdrive uses rclone in RC daemon mode as the transport layer — any rclone-suppo
 - **Stub files** — Cloud-only files appear as 0-byte stubs with xattrs marking them as cloud-only. Use `pdrive pin` to download on demand.
 - **Full CLI** — List, download, pin/unpin, and inspect storage from the terminal. No GUI needed.
 - **Interactive TUI** — `pdrive browse` launches a full-screen file browser with keyboard navigation.
-- **Browser UI** — Navigate files at `http://localhost:8765` with a clean dark/light mode interface. Click to download.
+- **Browser UI** — Full-featured file manager at `http://localhost:8765` with dark/light mode. Browse directories, pin/unpin/delete/move/download files, create folders, search by pattern, view tree structure, monitor uploads, and inspect storage metrics — all from the browser.
 - **WebDAV** — Mount as a network drive in Finder, Explorer, or any WebDAV client.
 - **Auto-restart** — Run as a background daemon that auto-starts on login.
 - **Metadata backup** — SQLite DB is encrypted (AES-256-GCM) and auto-backed up to every cloud provider. The Argon2id salt is stored alongside the backup so the same password works on any machine. On a fresh install, the newest backup is auto-restored — just connect the same cloud accounts and enter your password.
@@ -46,24 +46,54 @@ pdrive uses rclone in RC daemon mode as the transport layer — any rclone-suppo
 
 ## Quick Start
 
-### Prerequisites
+### Install
 
-- **Go 1.21+**
-- **rclone** with at least one configured remote (`rclone config`)
-
-### Build & Run
+**Homebrew (macOS):**
 
 ```bash
+brew install smit-p/tap/pdrive
+```
+
+**Shell script (macOS / Linux):**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/smit-p/pdrive/main/install.sh | bash
+```
+
+**Go install:**
+
+```bash
+go install github.com/smit-p/pdrive/cmd/pdrive@latest
+```
+
+**From source:**
+
+```bash
+git clone https://github.com/smit-p/pdrive.git && cd pdrive
 go build -o pdrive ./cmd/pdrive
-./pdrive --debug
+```
+
+Or download a pre-built binary from [GitHub Releases](https://github.com/smit-p/pdrive/releases).
+
+> **Note:** rclone is required but will be **downloaded automatically** on first run if not already installed. To install it manually: `brew install rclone` or see [rclone.org/install](https://rclone.org/install/).
+
+### Prerequisites
+
+- **rclone** with at least one configured remote (`rclone config`) — auto-downloaded if missing
+
+### Run
+
+```bash
+pdrive --debug
 ```
 
 That's it. On first run, pdrive will:
 
-1. Prompt you to set an encryption password (Argon2id → AES-256)
-2. Start rclone RC in the background
-3. Create `~/pdrive` as the sync folder
-4. Start the HTTP/WebDAV server at `localhost:8765`
+1. Download rclone if not found on your system
+2. Prompt you to set an encryption password (Argon2id → AES-256)
+3. Start rclone RC in the background
+4. Create `~/pdrive` as the sync folder
+5. Start the HTTP/WebDAV server at `localhost:8765`
 
 ### Install as a Service
 
@@ -107,7 +137,19 @@ pdrive unpin /movie.mp4
 
 ### Browser UI
 
-Open `http://localhost:8765` in any browser. Navigate directories, click files to download, and view storage status — all with dark mode support.
+Open `http://localhost:8765` in any browser. The web UI is a single-page app with full feature parity to the CLI:
+
+- **Files** — Browse directories, sort by name/size/state/date, multi-select with bulk actions
+- **File Info** — Click any file to see metadata, chunk locations, SHA-256 hash, and image previews
+- **Actions** — Pin, unpin, delete, move/rename, download, create folders — all from the browser
+- **Dashboard** — Health status, total file count, per-provider storage quotas with visual bars
+- **Uploads** — Live upload progress with file name, speed, and percentage
+- **Search** — Glob pattern search across all files (`*.pdf`, `report*`, etc.)
+- **Tree** — Recursive directory tree view from any root
+- **Metrics** — Upload/download/delete counters, chunk stats, dedup hits
+- **Keyboard shortcuts** — `j`/`k` navigation, `/` search, `~` home, `i` info, `Space` select, `Escape` close
+- **Responsive** — Works on mobile with collapsible sidebar
+- **Dark/light mode** — Follows system `prefers-color-scheme`
 
 ### WebDAV Mount
 
@@ -121,15 +163,24 @@ mount -t davfs http://localhost:8765 /mnt/pdrive
 
 ### HTTP API
 
-| Endpoint                | Method | Description                                                 |
-| ----------------------- | ------ | ----------------------------------------------------------- |
-| `/api/status`           | GET    | Total files, bytes, per-provider quotas                     |
-| `/api/uploads`          | GET    | In-flight upload progress                                   |
-| `/api/ls?path=/`        | GET    | Directory listing with `local_state` (local/stub/uploading) |
-| `/api/pin?path=/file`   | POST   | Download cloud file to local                                |
-| `/api/unpin?path=/file` | POST   | Evict local data, replace with stub                         |
-| `/api/health`           | GET    | Uptime, DB status, in-flight uploads                        |
-| `/api/metrics`          | GET    | Telemetry counters (files/chunks/bytes)                     |
+| Endpoint                     | Method | Description                                                 |
+| ---------------------------- | ------ | ----------------------------------------------------------- |
+| `/api/ls?path=/`             | GET    | Directory listing with `local_state` (local/stub/uploading) |
+| `/api/status`                | GET    | Total files, bytes, per-provider quotas                     |
+| `/api/health`                | GET    | Uptime, DB status, in-flight uploads                        |
+| `/api/uploads`               | GET    | In-flight upload progress                                   |
+| `/api/metrics`               | GET    | Telemetry counters (files/chunks/bytes)                     |
+| `/api/remotes`               | GET    | List configured remotes with enabled status                 |
+| `/api/info?path=/file`       | GET    | File metadata, chunks, provider locations                   |
+| `/api/tree?path=/`           | GET    | Recursive directory tree                                    |
+| `/api/find?pattern=*.pdf`    | GET    | Glob search across all files                                |
+| `/api/du?path=/`             | GET    | Disk usage summary for a directory                          |
+| `/api/download?path=/file`   | GET    | Download decrypted file content                             |
+| `/api/pin?path=/file`        | POST   | Download cloud file to local                                |
+| `/api/unpin?path=/file`      | POST   | Evict local data, replace with stub                         |
+| `/api/delete?path=/file`     | POST   | Delete file from cloud and local                            |
+| `/api/mv?from=/a&to=/b`      | POST   | Move or rename a file                                       |
+| `/api/mkdir?path=/dir`       | POST   | Create a new directory                                      |
 
 ## CLI Reference
 
@@ -148,10 +199,27 @@ pdrive unpin <path> [path...]   Evict local data, replace with stub
 pdrive cat <path>               Print file contents to stdout
 pdrive get <path> [dest]        Download file to local filesystem
 pdrive stop                     Stop the daemon
+pdrive remotes                  List remotes and enabled status
+pdrive remotes add <name>       Enable a remote
+pdrive remotes remove <name>    Disable a remote
+pdrive remotes reset            Reset selection to all remotes
 pdrive help                     Show CLI usage
 ```
 
 All subcommands talk to the running daemon over HTTP — you need the daemon running first (`pdrive` to start).
+
+### Remote Management
+
+By default pdrive uses **all** configured rclone remotes. To limit which remotes are active, use the `remotes` subcommand — no daemon required:
+
+```bash
+pdrive remotes              # list all remotes and their enabled/disabled status
+pdrive remotes add gdrive   # enable a remote
+pdrive remotes remove gdrive # disable a remote
+pdrive remotes reset        # reset to "use all remotes"
+```
+
+Selection is saved to `~/.pdrive/remotes.json` and loaded automatically on daemon start. You can also pass `--remotes gdrive,dropbox` on the command line for a one-off override.
 
 #### Examples
 
@@ -194,6 +262,7 @@ pdrive unpin /video.mp4       # evict local copy, keep in cloud
 | `--chunk-size`     | `0` (dynamic)    | Override chunk size in bytes; 0 = dynamic (32–128 MB)                 |
 | `--rate-limit`     | `8`              | Cloud API calls per second                                            |
 | `--skip-restore`   | `false`          | Skip restoring DB from cloud on startup                               |
+| `--remotes`        | (all)            | Comma-separated rclone remote names to use                            |
 | `--debug`          | `false`          | Enable debug logging                                                  |
 
 ## Architecture
@@ -229,6 +298,7 @@ scripts/              E2E test scripts
 | `~/.pdrive/metadata.db`              | SQLite metadata database                      |
 | `~/.pdrive/enc.salt`                 | Argon2id salt for password-derived key        |
 | `~/.pdrive/enc.key`                  | Legacy AES-256 key (raw 32 bytes)             |
+| `~/.pdrive/remotes.json`             | Persistent remote selection                   |
 | `~/.pdrive/spool/`                   | Temp files for in-progress uploads            |
 | `~/pdrive/`                          | Local sync folder                             |
 | Cloud: `pdrive-chunks/*`             | Encrypted chunk storage                       |
@@ -238,12 +308,21 @@ scripts/              E2E test scripts
 ## Tests
 
 ```bash
-go test ./...              # 136 unit tests
-python3 scripts/test_e2e.py    # E2E: upload, download, delete
+# Unit tests
+go test ./...
+
+# Browser UI E2E tests (requires running daemon)
+npm install
+npx playwright install chromium
+npx playwright test
+
+# Python E2E tests
+python3 scripts/test_e2e.py    # upload, download, delete
 python3 scripts/test_dirs.py   # directory operations
-python3 scripts/test_browser.py # browser UI
 python3 scripts/test_large.py  # large file chunking
 ```
+
+The Playwright suite covers 69 tests across the web UI: layout, file browser, info panel, file actions (download/pin/unpin/delete/move/mkdir), dashboard, uploads, search, tree, metrics, keyboard shortcuts, navigation, toasts, and responsive layout.
 
 ## Dependencies
 

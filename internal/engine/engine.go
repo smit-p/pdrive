@@ -1053,7 +1053,7 @@ type StorageStatus struct {
 // StorageStatus returns total file count, total bytes stored, and per-provider quota info.
 func (e *Engine) StorageStatus() (StorageStatus, error) {
 	var totalFiles, totalBytes int64
-	if err := e.db.Conn().QueryRow(`SELECT COUNT(*), COALESCE(SUM(size_bytes),0) FROM files`).Scan(&totalFiles, &totalBytes); err != nil {
+	if err := e.db.Conn().QueryRow(`SELECT COUNT(*), COALESCE(SUM(size_bytes),0) FROM files WHERE upload_state = 'complete'`).Scan(&totalFiles, &totalBytes); err != nil {
 		return StorageStatus{}, fmt.Errorf("querying storage stats: %w", err)
 	}
 	providers, err := e.db.GetAllProviders()

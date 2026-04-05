@@ -1,0 +1,84 @@
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: pdrive
+    main: ./cmd/pdrive
+    binary: pdrive
+    env:
+      - CGO_ENABLED=1
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.ShortCommit}}
+      - -X main.date={{.Date}}
+    # CGO is needed for modernc.org/sqlite — use zig for cross-compilation.
+    overrides:
+      - goos: linux
+        goarch: amd64
+        env:
+          - CGO_ENABLED=1
+          - CC=zig cc -target x86_64-linux-gnu
+      - goos: linux
+        goarch: arm64
+        env:
+          - CGO_ENABLED=1
+          - CC=zig cc -target aarch64-linux-gnu
+
+archives:
+  - id: default
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    name_template: "pdrive_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+brews:
+  - repository:
+      owner: smit-p
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    directory: Formula
+    name: pdrive
+    homepage: "https://github.com/smit-p/pdrive"
+    description: "Aggregate multiple cloud storage accounts into a single unified drive"
+    license: "MIT"
+    dependencies:
+      - name: rclone
+    install: |
+      bin.install "pdrive"
+    test: |
+      system bin/"pdrive", "--help"
+
+release:
+  github:
+    owner: smit-p
+    name: pdrive
+  draft: false
+  prerelease: auto
+  name_template: "v{{ .Version }}"

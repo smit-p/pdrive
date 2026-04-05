@@ -1,0 +1,27 @@
+{
+  "name": "pdrive",
+  "version": "1.0.0",
+  "description": "Aggregate multiple cloud storage accounts into a single unified drive. Drop files into `~/pdrive` and they upload automatically — encrypted, chunked, and distributed across Google Drive, Dropbox, OneDrive, or any provider [rclone](https://rclone.org) supports.",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/smit-p/pdrive.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/smit-p/pdrive/issues"
+  },
+  "homepage": "https://github.com/smit-p/pdrive#readme",
+  "devDependencies": {
+    "@playwright/test": "^1.59.1"
+  }
+}

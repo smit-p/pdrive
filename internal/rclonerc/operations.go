@@ -208,16 +208,26 @@ func (c *Client) About(remote string) (QuotaInfo, error) {
 	return info, nil
 }
 
-// GetRemoteType returns the backend type (e.g., "drive", "s3", "dropbox")
-// for the named remote via the config/get RC endpoint.
-func (c *Client) GetRemoteType(remote string) (string, error) {
+// GetRemoteConfig returns the full configuration map for the named remote
+// via the config/get RC endpoint.
+func (c *Client) GetRemoteConfig(remote string) (map[string]interface{}, error) {
 	result, err := c.call("config/get", map[string]interface{}{"name": remote})
 	if err != nil {
-		return "", fmt.Errorf("getting remote config for %s: %w", remote, err)
+		return nil, fmt.Errorf("getting remote config for %s: %w", remote, err)
 	}
 	var cfg map[string]interface{}
 	if err := json.Unmarshal(result, &cfg); err != nil {
-		return "", fmt.Errorf("parsing config response: %w", err)
+		return nil, fmt.Errorf("parsing config response: %w", err)
+	}
+	return cfg, nil
+}
+
+// GetRemoteType returns the backend type (e.g., "drive", "s3", "dropbox")
+// for the named remote via the config/get RC endpoint.
+func (c *Client) GetRemoteType(remote string) (string, error) {
+	cfg, err := c.GetRemoteConfig(remote)
+	if err != nil {
+		return "", err
 	}
 	if t, ok := cfg["type"].(string); ok {
 		return t, nil

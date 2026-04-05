@@ -43,6 +43,8 @@ type lsResponse struct {
 
 type statusProvider struct {
 	Name              string `json:"name"`
+	Type              string `json:"type,omitempty"`
+	AccountIdentity   string `json:"account_identity,omitempty"`
 	QuotaTotalBytes   *int64 `json:"quota_total_bytes"`
 	QuotaFreeBytes    *int64 `json:"quota_free_bytes"`
 	QuotaUsedByPdrive *int64 `json:"quota_used_by_pdrive"`
@@ -56,18 +58,19 @@ type statusResponse struct {
 
 // Config holds daemon configuration.
 type Config struct {
-	ConfigDir    string // ~/.pdrive/
-	RcloneBin    string // path to rclone binary
-	RcloneAddr   string // e.g., "127.0.0.1:5572"
-	WebDAVAddr   string // e.g., "127.0.0.1:8765"
-	SyncDir      string // local folder to sync (e.g. ~/pdrive); empty disables sync
-	EncKey       []byte // 32-byte AES-256 key (set when salt is available locally)
-	Password     string // raw password — when set and EncKey is nil, daemon derives key after cloud salt lookup
-	BrokerPolicy string // "pfrd" or "mfs"
-	MinFreeSpace int64  // bytes to keep free on each provider
-	SkipRestore  bool   // skip cloud DB restore on startup (useful after a manual wipe)
-	ChunkSize    int    // override chunk size (bytes); 0 uses dynamic sizing
-	RatePerSec   int    // API rate limit (tokens per second); 0 uses default (8/s)
+	ConfigDir    string   // ~/.pdrive/
+	RcloneBin    string   // path to rclone binary
+	RcloneAddr   string   // e.g., "127.0.0.1:5572"
+	WebDAVAddr   string   // e.g., "127.0.0.1:8765"
+	SyncDir      string   // local folder to sync (e.g. ~/pdrive); empty disables sync
+	EncKey       []byte   // 32-byte AES-256 key (set when salt is available locally)
+	Password     string   // raw password — when set and EncKey is nil, daemon derives key after cloud salt lookup
+	BrokerPolicy string   // "pfrd" or "mfs"
+	MinFreeSpace int64    // bytes to keep free on each provider
+	SkipRestore  bool     // skip cloud DB restore on startup (useful after a manual wipe)
+	ChunkSize    int      // override chunk size (bytes); 0 uses dynamic sizing
+	RatePerSec   int      // API rate limit (tokens per second); 0 uses default (8/s)
+	Remotes      []string // rclone remote names to use; empty means all
 }
 
 // Daemon is the main pdrive daemon that ties everything together.
@@ -222,8 +225,16 @@ func (d *Daemon) Start(ctx context.Context) error {
 	}
 
 	d.webdavServer = &http.Server{
-		Addr:    d.config.WebDAVAddr,
-		Handler: &browserHandler{davHandler: handler, engine: d.engine, syncDir: d.syncDir, startTime: time.Now()},
+		Addr: d.config.WebDAVAddr,
+		Handler: &browserHandler{
+			davHandler:    handler,
+			engine:        d.engine,
+			syncDir:       d.syncDir,
+			startTime:     time.Now(),
+			configDir:     d.config.ConfigDir,
+			rcloneClient:  d.rclone.Client(),
+			activeRemotes: d.config.Remotes,
+		},
 	}
 
 	go func() {
@@ -504,6 +515,39 @@ func (d *Daemon) syncProviders() {
 		return
 	}
 
+	// If the user specified --remotes, use that. Otherwise load remotes.json.
+	allowedRemotes := d.config.Remotes
+	if len(allowedRemotes) == 0 {
+		remotesFile := filepath.Join(d.config.ConfigDir, "remotes.json")
+		if data, err := os.ReadFile(remotesFile); err == nil {
+			var saved []string
+			if err := json.Unmarshal(data, &saved); err == nil && len(saved) > 0 {
+				allowedRemotes = saved
+				slog.Info("loaded remote selection from remotes.json", "remotes", saved)
+			}
+		}
+	}
+
+	if len(allowedRemotes) > 0 {
+		allowed := make(map[string]bool, len(allowedRemotes))
+		for _, r := range allowedRemotes {
+			allowed[r] = true
+		}
+		filtered := make([]string, 0, len(remotes))
+		for _, r := range remotes {
+			if allowed[r] {
+				filtered = append(filtered, r)
+			} else {
+				slog.Debug("skipping remote (not in selection)", "remote", r)
+			}
+		}
+		remotes = filtered
+		if len(remotes) == 0 {
+			slog.Warn("none of the selected remotes match configured rclone remotes")
+			return
+		}
+	}
+
 	now := time.Now().Unix()
 	for _, remote := range remotes {
 		remoteType, err := d.rclone.Client().GetRemoteType(remote)
@@ -552,6 +596,19 @@ func (d *Daemon) syncProviders() {
 			p.RateLimitedUntil = existing.RateLimitedUntil
 		}
 
+		// Fetch account identity (email/username). The About() call above
+		// forces rclone to refresh any expired OAuth tokens, so the
+		// config/get call inside FetchAccountIdentity gets a fresh token.
+		if existing != nil && existing.AccountIdentity != "" {
+			p.AccountIdentity = existing.AccountIdentity
+		} else {
+			identity, err := d.rclone.Client().FetchAccountIdentity(remote)
+			if err != nil {
+				slog.Debug("could not fetch account identity", "remote", remote, "error", err)
+			}
+			p.AccountIdentity = identity
+		}
+
 		if err := d.db.UpsertProvider(p); err != nil {
 			slog.Warn("failed to register provider", "remote", remote, "error", err)
 			continue
@@ -585,7 +642,13 @@ func (d *Daemon) checkMissingProviders() []string {
 	var missing []string
 	for _, p := range dbProviders {
 		if !available[p.RcloneRemote] {
-			missing = append(missing, p.RcloneRemote)
+			label := p.RcloneRemote
+			if p.AccountIdentity != "" {
+				label += " (" + p.AccountIdentity + ", " + p.Type + ")"
+			} else if p.Type != "" {
+				label += " (" + p.Type + ")"
+			}
+			missing = append(missing, label)
 		}
 	}
 
@@ -606,10 +669,16 @@ func (d *Daemon) checkMissingProviders() []string {
 // browserHandler wraps the WebDAV handler to serve HTML directory listings
 // for browser GET requests, while passing WebDAV methods through normally.
 type browserHandler struct {
-	davHandler http.Handler
-	engine     *engine.Engine
-	syncDir    *vfs.SyncDir // may be nil if sync is disabled
-	startTime  time.Time
+	davHandler   http.Handler
+	engine       *engine.Engine
+	syncDir      *vfs.SyncDir // may be nil if sync is disabled
+	startTime    time.Time
+	configDir    string
+	rcloneClient interface {
+		ListRemotes() ([]string, error)
+		GetRemoteType(string) (string, error)
+	}
+	activeRemotes []string // from --remotes flag; empty = all
 }
 
 func (h *browserHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -624,6 +693,9 @@ func (h *browserHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	case "/api/status":
 		h.serveAPIStatus(w, r)
+		return
+	case "/api/remotes":
+		h.serveAPIRemotes(w, r)
 		return
 	case "/api/pin":
 		h.serveAPIPin(w, r)
@@ -728,6 +800,8 @@ func (h *browserHandler) serveAPIStatus(w http.ResponseWriter, r *http.Request) 
 		usedBytes := st.ProviderBytes[p.ID]
 		resp.Providers = append(resp.Providers, statusProvider{
 			Name:              p.DisplayName,
+			Type:              p.Type,
+			AccountIdentity:   p.AccountIdentity,
 			QuotaTotalBytes:   p.QuotaTotalBytes,
 			QuotaFreeBytes:    p.QuotaFreeBytes,
 			QuotaUsedByPdrive: &usedBytes,
@@ -735,6 +809,53 @@ func (h *browserHandler) serveAPIStatus(w http.ResponseWriter, r *http.Request) 
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp) //nolint:errcheck
+}
+
+func (h *browserHandler) serveAPIRemotes(w http.ResponseWriter, r *http.Request) {
+	allRemotes, err := h.rcloneClient.ListRemotes()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Determine active set: from config + remotes.json.
+	activeRemotes := h.activeRemotes
+	if len(activeRemotes) == 0 {
+		remotesFile := filepath.Join(h.configDir, "remotes.json")
+		if data, err := os.ReadFile(remotesFile); err == nil {
+			var saved []string
+			if err := json.Unmarshal(data, &saved); err == nil && len(saved) > 0 {
+				activeRemotes = saved
+			}
+		}
+	}
+
+	activeSet := make(map[string]bool, len(activeRemotes))
+	if len(activeRemotes) > 0 {
+		for _, r := range activeRemotes {
+			activeSet[r] = true
+		}
+	}
+
+	type remoteInfo struct {
+		Name   string `json:"name"`
+		Type   string `json:"type"`
+		Active bool   `json:"active"`
+	}
+
+	result := make([]remoteInfo, 0, len(allRemotes))
+	for _, name := range allRemotes {
+		active := len(activeRemotes) == 0 || activeSet[name]
+		remoteType, _ := h.rcloneClient.GetRemoteType(name)
+		result = append(result, remoteInfo{
+			Name:   name,
+			Type:   remoteType,
+			Active: active,
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"remotes": result}) //nolint:errcheck
 }
 
 func (h *browserHandler) serveAPIPin(w http.ResponseWriter, r *http.Request) {

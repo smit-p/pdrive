@@ -3,6 +3,7 @@ CREATE TABLE IF NOT EXISTS providers (
     type                TEXT NOT NULL,
     display_name        TEXT NOT NULL,
     rclone_remote       TEXT NOT NULL,
+    account_identity    TEXT NOT NULL DEFAULT '',
     quota_total_bytes   INTEGER,
     quota_free_bytes    INTEGER,
     quota_polled_at     INTEGER,

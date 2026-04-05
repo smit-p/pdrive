@@ -20,7 +20,15 @@ import (
 
 	"github.com/smit-p/pdrive/internal/chunker"
 	"github.com/smit-p/pdrive/internal/daemon"
+	"github.com/smit-p/pdrive/internal/rclonebin"
 	"golang.org/x/term"
+)
+
+// Set by goreleaser ldflags.
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
 )
 
 func main() {
@@ -45,6 +53,7 @@ func main() {
 	skipRestore := flag.Bool("skip-restore", false, "Skip restoring metadata DB from cloud on startup (use after a manual wipe)")
 	chunkSize := flag.Int("chunk-size", 0, "Override chunk size in bytes (e.g. 67108864 for 64 MB); 0 uses dynamic sizing")
 	rateLimit := flag.Int("rate-limit", 0, "API rate limit in requests per second (default 8)")
+	remotesFlag := flag.String("remotes", "", "Comma-separated list of rclone remote names to use (default: all)")
 	debug := flag.Bool("debug", false, "Enable debug logging")
 	foreground := flag.Bool("foreground", false, "Run daemon in the foreground instead of backgrounding (useful with systemd or for debugging)")
 	flag.Parse()
@@ -134,6 +143,12 @@ func main() {
 			return
 		case "stop":
 			stopDaemon(*configDir)
+			return
+		case "version":
+			fmt.Printf("pdrive %s (commit %s, built %s)\n", version, commit, date)
+			return
+		case "remotes":
+			runRemotes(*configDir, args[1:])
 			return
 		case "help":
 			printCLIUsage()
@@ -277,8 +292,13 @@ func main() {
 			if _, err := os.Stat(bundled); err == nil {
 				rcloneBin = bundled
 			} else {
-				fmt.Fprintf(os.Stderr, "Error: rclone not found in PATH. Install it from https://rclone.org/install/\n")
-				os.Exit(1)
+				// Auto-download rclone into ~/.pdrive/bin/rclone.
+				rcloneBin, err = rclonebin.EnsureRclone(*configDir)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error: rclone not found and auto-download failed: %v\n", err)
+					fmt.Fprintf(os.Stderr, "Install rclone manually from https://rclone.org/install/\n")
+					os.Exit(1)
+				}
 			}
 		}
 	}
@@ -289,6 +309,17 @@ func main() {
 		slog.Warn("could not write PID file", "error", err)
 	} else {
 		defer os.Remove(pidFile)
+	}
+
+	// Parse --remotes flag into a slice.
+	var remotes []string
+	if *remotesFlag != "" {
+		for _, r := range strings.Split(*remotesFlag, ",") {
+			r = strings.TrimSpace(r)
+			if r != "" {
+				remotes = append(remotes, r)
+			}
+		}
 	}
 
 	cfg := daemon.Config{
@@ -304,6 +335,7 @@ func main() {
 		SkipRestore:  *skipRestore,
 		ChunkSize:    *chunkSize,
 		RatePerSec:   *rateLimit,
+		Remotes:      remotes,
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

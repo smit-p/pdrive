@@ -4357,3 +4357,31 @@ func TestBackupDB_DBPathEmpty(t *testing.T) {
 		t.Fatalf("BackupDB with empty dbPath should return nil, got: %v", err)
 	}
 }
+
+// TestStorageStatus_ExcludesPendingFiles verifies that files with
+// upload_state = 'pending' are NOT counted in StorageStatus totals.
+func TestStorageStatus_ExcludesPendingFiles(t *testing.T) {
+	eng, _ := newTestEngine(t)
+
+	// Write one complete file.
+	eng.WriteFileStream("/complete.txt", bytes.NewReader([]byte("done")), 4)
+
+	// Insert a pending file directly into the DB.
+	tmp := "/tmp/fake"
+	eng.db.InsertFile(&metadata.File{
+		ID: "pending1", VirtualPath: "/pending.bin", SizeBytes: 9999,
+		CreatedAt: 1, ModifiedAt: 1, SHA256Full: "h",
+		UploadState: "pending", TmpPath: &tmp,
+	})
+
+	st, err := eng.StorageStatus()
+	if err != nil {
+		t.Fatalf("StorageStatus error: %v", err)
+	}
+	if st.TotalFiles != 1 {
+		t.Errorf("expected TotalFiles=1 (pending excluded), got %d", st.TotalFiles)
+	}
+	if st.TotalBytes != 4 {
+		t.Errorf("expected TotalBytes=4 (pending excluded), got %d", st.TotalBytes)
+	}
+}

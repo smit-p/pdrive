@@ -44,6 +44,7 @@ type Provider struct {
 	Type             string
 	DisplayName      string
 	RcloneRemote     string
+	AccountIdentity  string
 	QuotaTotalBytes  *int64
 	QuotaFreeBytes   *int64
 	QuotaPolledAt    *int64
@@ -358,17 +359,18 @@ func (db *DB) ListSubdirectories(dirPath string) ([]string, error) {
 // UpsertProvider inserts or updates a provider record.
 func (db *DB) UpsertProvider(p *Provider) error {
 	_, err := db.conn.Exec(
-		`INSERT INTO providers (id, type, display_name, rclone_remote, quota_total_bytes, quota_free_bytes, quota_polled_at, rate_limited_until)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO providers (id, type, display_name, rclone_remote, account_identity, quota_total_bytes, quota_free_bytes, quota_polled_at, rate_limited_until)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(id) DO UPDATE SET
 		   type = excluded.type,
 		   display_name = excluded.display_name,
 		   rclone_remote = excluded.rclone_remote,
+		   account_identity = excluded.account_identity,
 		   quota_total_bytes = excluded.quota_total_bytes,
 		   quota_free_bytes = excluded.quota_free_bytes,
 		   quota_polled_at = excluded.quota_polled_at,
 		   rate_limited_until = excluded.rate_limited_until`,
-		p.ID, p.Type, p.DisplayName, p.RcloneRemote, p.QuotaTotalBytes, p.QuotaFreeBytes, p.QuotaPolledAt, p.RateLimitedUntil,
+		p.ID, p.Type, p.DisplayName, p.RcloneRemote, p.AccountIdentity, p.QuotaTotalBytes, p.QuotaFreeBytes, p.QuotaPolledAt, p.RateLimitedUntil,
 	)
 	return err
 }
@@ -377,9 +379,9 @@ func (db *DB) UpsertProvider(p *Provider) error {
 func (db *DB) GetProvider(id string) (*Provider, error) {
 	p := &Provider{}
 	err := db.conn.QueryRow(
-		`SELECT id, type, display_name, rclone_remote, quota_total_bytes, quota_free_bytes, quota_polled_at, rate_limited_until
+		`SELECT id, type, display_name, rclone_remote, account_identity, quota_total_bytes, quota_free_bytes, quota_polled_at, rate_limited_until
 		 FROM providers WHERE id = ?`, id,
-	).Scan(&p.ID, &p.Type, &p.DisplayName, &p.RcloneRemote, &p.QuotaTotalBytes, &p.QuotaFreeBytes, &p.QuotaPolledAt, &p.RateLimitedUntil)
+	).Scan(&p.ID, &p.Type, &p.DisplayName, &p.RcloneRemote, &p.AccountIdentity, &p.QuotaTotalBytes, &p.QuotaFreeBytes, &p.QuotaPolledAt, &p.RateLimitedUntil)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -389,7 +391,7 @@ func (db *DB) GetProvider(id string) (*Provider, error) {
 // GetAllProviders returns all registered providers.
 func (db *DB) GetAllProviders() ([]Provider, error) {
 	rows, err := db.conn.Query(
-		`SELECT id, type, display_name, rclone_remote, quota_total_bytes, quota_free_bytes, quota_polled_at, rate_limited_until
+		`SELECT id, type, display_name, rclone_remote, account_identity, quota_total_bytes, quota_free_bytes, quota_polled_at, rate_limited_until
 		 FROM providers ORDER BY display_name`,
 	)
 	if err != nil {
@@ -400,7 +402,7 @@ func (db *DB) GetAllProviders() ([]Provider, error) {
 	var providers []Provider
 	for rows.Next() {
 		var p Provider
-		if err := rows.Scan(&p.ID, &p.Type, &p.DisplayName, &p.RcloneRemote, &p.QuotaTotalBytes, &p.QuotaFreeBytes, &p.QuotaPolledAt, &p.RateLimitedUntil); err != nil {
+		if err := rows.Scan(&p.ID, &p.Type, &p.DisplayName, &p.RcloneRemote, &p.AccountIdentity, &p.QuotaTotalBytes, &p.QuotaFreeBytes, &p.QuotaPolledAt, &p.RateLimitedUntil); err != nil {
 			return nil, err
 		}
 		providers = append(providers, p)
@@ -412,9 +414,9 @@ func (db *DB) GetAllProviders() ([]Provider, error) {
 func (db *DB) GetProviderByRemote(rcloneRemote string) (*Provider, error) {
 	p := &Provider{}
 	err := db.conn.QueryRow(
-		`SELECT id, type, display_name, rclone_remote, quota_total_bytes, quota_free_bytes, quota_polled_at, rate_limited_until
+		`SELECT id, type, display_name, rclone_remote, account_identity, quota_total_bytes, quota_free_bytes, quota_polled_at, rate_limited_until
 		 FROM providers WHERE rclone_remote = ?`, rcloneRemote,
-	).Scan(&p.ID, &p.Type, &p.DisplayName, &p.RcloneRemote, &p.QuotaTotalBytes, &p.QuotaFreeBytes, &p.QuotaPolledAt, &p.RateLimitedUntil)
+	).Scan(&p.ID, &p.Type, &p.DisplayName, &p.RcloneRemote, &p.AccountIdentity, &p.QuotaTotalBytes, &p.QuotaFreeBytes, &p.QuotaPolledAt, &p.RateLimitedUntil)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -561,7 +563,7 @@ func (db *DB) DeleteDirectoriesUnder(dirPath string) error {
 func (db *DB) GetFilesUnderDir(dirPath string) ([]File, error) {
 	prefix := strings.TrimSuffix(dirPath, "/") + "/"
 	rows, err := db.conn.Query(
-		`SELECT id, virtual_path, size_bytes, created_at, modified_at, sha256_full
+		`SELECT id, virtual_path, size_bytes, created_at, modified_at, sha256_full, upload_state, tmp_path
 		 FROM files WHERE virtual_path LIKE ?`, prefix+"%",
 	)
 	if err != nil {
@@ -571,7 +573,7 @@ func (db *DB) GetFilesUnderDir(dirPath string) ([]File, error) {
 	var files []File
 	for rows.Next() {
 		var f File
-		if err := rows.Scan(&f.ID, &f.VirtualPath, &f.SizeBytes, &f.CreatedAt, &f.ModifiedAt, &f.SHA256Full); err != nil {
+		if err := rows.Scan(&f.ID, &f.VirtualPath, &f.SizeBytes, &f.CreatedAt, &f.ModifiedAt, &f.SHA256Full, &f.UploadState, &f.TmpPath); err != nil {
 			return nil, err
 		}
 		files = append(files, f)
@@ -703,13 +705,16 @@ func (db *DB) SearchFiles(root, pattern string) ([]File, error) {
 	if !strings.HasSuffix(root, "/") {
 		root += "/"
 	}
-	likePattern := "%" + pattern + "%"
+	// Escape LIKE special characters in the user-provided pattern so that
+	// literal '%' and '_' in the search term are not treated as wildcards.
+	escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(pattern)
+	likePattern := "%" + escaped + "%"
 	rows, err := db.conn.Query(
 		`SELECT id, virtual_path, size_bytes, created_at, modified_at, sha256_full, upload_state, tmp_path
 		 FROM files
 		 WHERE virtual_path LIKE ? || '%'
 		   AND upload_state = 'complete'
-		   AND virtual_path LIKE ?`, root, likePattern,
+		   AND virtual_path LIKE ? ESCAPE '\'`, root, likePattern,
 	)
 	if err != nil {
 		return nil, err
