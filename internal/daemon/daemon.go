@@ -3,7 +3,6 @@ package daemon
 import (
 	"context"
 	_ "embed"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -153,7 +152,10 @@ func (d *Daemon) Start(ctx context.Context) error {
 				slog.Warn("restored DB failed cloud validation — discarding and starting fresh")
 				d.db.Close()
 				if err := os.Remove(dbPath); err == nil {
-					db, _ = metadata.Open(dbPath)
+					db, err = metadata.Open(dbPath)
+					if err != nil {
+						return fmt.Errorf("reopening DB after discard: %w", err)
+					}
 					d.db = db
 				}
 			}
@@ -390,8 +392,7 @@ func (d *Daemon) resolveCloudSalt() error {
 	return nil
 }
 
-// backupMagic must match the header written by engine.makeBackupPayload.
-var backupMagic = [8]byte{'p', 'd', 'r', 'i', 'v', 'e', 'D', 'B'}
+
 
 // tryRestoreDB downloads metadata DB backups from ALL configured rclone remotes,
 // decrypts them, and writes the newest one (by embedded timestamp) to dbPath.
@@ -459,16 +460,11 @@ func (d *Daemon) tryDownloadEncrypted(remote string) (dbData []byte, timestamp i
 	}
 
 	// Parse header.
-	if len(plain) < 16 {
+	ts, dbData, ok := engine.ParseBackupPayload(plain)
+	if !ok {
 		return nil, 0, false
 	}
-	for i := 0; i < 8; i++ {
-		if plain[i] != backupMagic[i] {
-			return nil, 0, false
-		}
-	}
-	ts := int64(binary.BigEndian.Uint64(plain[8:16]))
-	return plain[16:], ts, true
+	return dbData, ts, true
 }
 
 // tryDownloadLegacy downloads a legacy unencrypted backup for backward compatibility.

@@ -2,7 +2,7 @@ package vfs
 
 import (
 	"os"
-	"strings"
+	"strconv"
 
 	"golang.org/x/sys/unix"
 )
@@ -25,12 +25,7 @@ func createStubFile(path string, realSize int64) error {
 	if err := unix.Setxattr(path, xattrStub, []byte("1"), 0); err != nil {
 		return err
 	}
-	sizeStr := strings.TrimSpace(strings.Replace(
-		strings.Replace(
-			strings.Replace(
-				formatInt(realSize), ",", "", -1),
-			" ", "", -1),
-		"\n", "", -1))
+	sizeStr := strconv.FormatInt(realSize, 10)
 	if err := unix.Setxattr(path, xattrSize, []byte(sizeStr), 0); err != nil {
 		return err
 	}
@@ -53,26 +48,4 @@ func clearStubMarker(path string) {
 	unix.Removexattr(path, xattrSize) //nolint:errcheck
 }
 
-// formatInt converts an int64 to its decimal string representation without
-// importing strconv (to keep the dependency graph small).
-func formatInt(n int64) string {
-	if n == 0 {
-		return "0"
-	}
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	var buf [20]byte
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		i--
-		buf[i] = '-'
-	}
-	return string(buf[i:])
-}
+

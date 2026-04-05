@@ -2525,3 +2525,67 @@ func TestRunTree_MultipleFilesInDir(t *testing.T) {
 		t.Errorf("tree missing files:\n%s", output)
 	}
 }
+
+// TestRunLs_FileSelection_TriggersInfo verifies that selecting a file (not dir)
+// by numeric index redirects to runInfo (line 175: if res.IsFile).
+func TestRunLs_FileSelection_TriggersInfo(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/info", func(w http.ResponseWriter, r *http.Request) {
+		p := r.URL.Query().Get("path")
+		json.NewEncoder(w).Encode(cliFileInfo{
+			Path: p, SizeBytes: 2048, CreatedAt: 1700000000, ModifiedAt: 1700001000,
+			SHA256: "abc123", UploadState: "complete",
+			Chunks: []cliChunkInfo{{Sequence: 0, SizeBytes: 2048, EncryptedSize: 2064, Providers: []string{"gdrive"}}},
+		})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	addr := strings.TrimPrefix(srv.URL, "http://")
+
+	configDir := t.TempDir()
+	// Cache has 2 dirs + 1 file; index 3 points to the file.
+	writeLsCache(configDir, "/", []string{"docs", "photos", "readme.txt"}, 2, nil)
+
+	output := captureStdout(t, func() { runLs(addr, configDir, []string{"3"}) })
+	// runInfo should print the file info, not a directory listing.
+	if !strings.Contains(output, "readme.txt") {
+		t.Errorf("expected file info for readme.txt, got:\n%s", output)
+	}
+	if !strings.Contains(output, "abc123") {
+		t.Errorf("expected SHA256 in output, got:\n%s", output)
+	}
+}
+
+// TestRunLs_SortMultipleFiles verifies that the sort.Slice comparator at
+// line 219 fires when the response contains 2+ files.
+func TestRunLs_SortMultipleFiles(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/ls", func(w http.ResponseWriter, _ *http.Request) {
+		// Return files in reverse order to exercise the sort.
+		json.NewEncoder(w).Encode(cliLsResponse{
+			Path: "/data",
+			Files: []cliLsFile{
+				{Name: "zebra.txt", Path: "/data/zebra.txt", Size: 100, ModifiedAt: 1700000000, LocalState: "local"},
+				{Name: "alpha.txt", Path: "/data/alpha.txt", Size: 200, ModifiedAt: 1700000000, LocalState: "local"},
+				{Name: "middle.txt", Path: "/data/middle.txt", Size: 150, ModifiedAt: 1700000000, LocalState: "local"},
+			},
+		})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	addr := strings.TrimPrefix(srv.URL, "http://")
+
+	configDir := t.TempDir()
+	output := captureStdout(t, func() { runLs(addr, configDir, []string{"/data"}) })
+
+	// After sorting, alpha < middle < zebra.
+	alphaIdx := strings.Index(output, "alpha.txt")
+	middleIdx := strings.Index(output, "middle.txt")
+	zebraIdx := strings.Index(output, "zebra.txt")
+	if alphaIdx < 0 || middleIdx < 0 || zebraIdx < 0 {
+		t.Fatalf("missing files in output:\n%s", output)
+	}
+	if !(alphaIdx < middleIdx && middleIdx < zebraIdx) {
+		t.Errorf("files not sorted: alpha@%d middle@%d zebra@%d\n%s", alphaIdx, middleIdx, zebraIdx, output)
+	}
+}

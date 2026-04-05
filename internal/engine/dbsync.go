@@ -18,23 +18,24 @@ const dbSyncRemotePath = "pdrive-meta/metadata.db.enc"
 // backupHeader is a 16-byte header prepended to the plaintext before encryption.
 // Layout: [8-byte magic "pdriveDB"] [8-byte Unix timestamp (big-endian nanoseconds)]
 // This lets restore pick the newest backup across providers.
-var backupMagic = [8]byte{'p', 'd', 'r', 'i', 'v', 'e', 'D', 'B'}
+// BackupMagic is the 8-byte header prefix for encrypted DB backups.
+var BackupMagic = [8]byte{'p', 'd', 'r', 'i', 'v', 'e', 'D', 'B'}
 
 func makeBackupPayload(dbData []byte) []byte {
 	hdr := make([]byte, 16)
-	copy(hdr[:8], backupMagic[:])
+	copy(hdr[:8], BackupMagic[:])
 	binary.BigEndian.PutUint64(hdr[8:16], uint64(time.Now().UnixNano()))
 	return append(hdr, dbData...)
 }
 
-func parseBackupPayload(plain []byte) (timestamp int64, dbData []byte, ok bool) {
+// ParseBackupPayload validates the magic header and extracts the timestamp
+// and raw DB bytes from an encrypted backup payload.
+func ParseBackupPayload(plain []byte) (timestamp int64, dbData []byte, ok bool) {
 	if len(plain) < 16 {
 		return 0, nil, false
 	}
-	for i := 0; i < 8; i++ {
-		if plain[i] != backupMagic[i] {
-			return 0, nil, false
-		}
+	if !bytes.Equal(plain[:8], BackupMagic[:]) {
+		return 0, nil, false
 	}
 	ts := int64(binary.BigEndian.Uint64(plain[8:16]))
 	return ts, plain[16:], true

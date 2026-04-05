@@ -14,7 +14,7 @@
 
 # Test / coverage artifacts
 *.out
-*.html
+coverage*.html
 
 # OS
 .DS_Store

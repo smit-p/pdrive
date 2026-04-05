@@ -1243,7 +1243,7 @@ func TestBackupDB_RoundTrip(t *testing.T) {
 		t.Fatalf("Decrypt: %v", err)
 	}
 
-	ts, dbData, ok := parseBackupPayload(plain)
+	ts, dbData, ok := ParseBackupPayload(plain)
 	if !ok {
 		t.Fatal("backup payload does not have valid header")
 	}
@@ -2073,7 +2073,7 @@ func TestBackupDB_WithSalt(t *testing.T) {
 func TestParseBackupPayload_BadMagic(t *testing.T) {
 	bad := make([]byte, 24)
 	bad[0] = 'X'
-	_, _, ok := parseBackupPayload(bad)
+	_, _, ok := ParseBackupPayload(bad)
 	if ok {
 		t.Error("expected bad magic to be rejected")
 	}
@@ -2081,7 +2081,7 @@ func TestParseBackupPayload_BadMagic(t *testing.T) {
 
 // TestParseBackupPayload_TooShort verifies payloads shorter than 16 bytes are rejected.
 func TestParseBackupPayload_TooShort(t *testing.T) {
-	_, _, ok := parseBackupPayload([]byte("short"))
+	_, _, ok := ParseBackupPayload([]byte("short"))
 	if ok {
 		t.Error("expected short payload to be rejected")
 	}
@@ -2091,7 +2091,7 @@ func TestParseBackupPayload_TooShort(t *testing.T) {
 func TestMakeAndParseBackupPayload(t *testing.T) {
 	data := []byte("test-db-content")
 	payload := makeBackupPayload(data)
-	ts, dbData, ok := parseBackupPayload(payload)
+	ts, dbData, ok := ParseBackupPayload(payload)
 	if !ok {
 		t.Fatal("expected valid payload")
 	}

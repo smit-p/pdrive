@@ -1,4 +1,4 @@
-package vfs
+ package vfs
 
 import (
 	"os"
@@ -7,36 +7,6 @@ import (
 
 	"golang.org/x/sys/unix"
 )
-
-// ── formatInt ──
-
-func TestFormatInt_Zero(t *testing.T) {
-	if got := formatInt(0); got != "0" {
-		t.Errorf("formatInt(0) = %q, want %q", got, "0")
-	}
-}
-
-func TestFormatInt_Positive(t *testing.T) {
-	tests := []struct {
-		in   int64
-		want string
-	}{
-		{1, "1"},
-		{42, "42"},
-		{1234567890, "1234567890"},
-	}
-	for _, tt := range tests {
-		if got := formatInt(tt.in); got != tt.want {
-			t.Errorf("formatInt(%d) = %q, want %q", tt.in, got, tt.want)
-		}
-	}
-}
-
-func TestFormatInt_Negative(t *testing.T) {
-	if got := formatInt(-7); got != "-7" {
-		t.Errorf("formatInt(-7) = %q, want %q", got, "-7")
-	}
-}
 
 // ── shouldSkipPath ──
 
