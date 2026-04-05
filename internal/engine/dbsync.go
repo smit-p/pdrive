@@ -78,7 +78,7 @@ func (e *Engine) FlushBackup() {
 // that restore can pick the newest copy. Having a copy on every provider
 // ensures it can be restored after a total loss of one account.
 func (e *Engine) BackupDB() error {
-	if e.dbPath == "" || len(e.encKey) == 0 {
+	if e.dbPath == "" || len(e.encKey) == 0 || e.rc == nil {
 		return nil
 	}
 	providers, err := e.db.GetAllProviders()
@@ -135,6 +135,9 @@ func (e *Engine) BackupDB() error {
 // Safe to call concurrently with uploads; it only touches objects in pdrive-chunks/
 // and never removes anything that has a valid DB entry.
 func (e *Engine) GCOrphanedChunks() {
+	if e.rc == nil {
+		return
+	}
 	providers, err := e.db.GetAllProviders()
 	if err != nil || len(providers) == 0 {
 		return

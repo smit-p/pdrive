@@ -2574,3 +2574,154 @@ func TestSearchFiles_EscapesLIKEWildcards(t *testing.T) {
 		t.Fatalf("expected 1 match for literal '_done', got %d", len(files))
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Activity log tests
+// ---------------------------------------------------------------------------
+
+func TestInsertActivity(t *testing.T) {
+	db := testDB(t)
+
+	// Basic insert.
+	if err := db.InsertActivity("upload", "/docs/readme.txt", "size=1024"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify the row was persisted.
+	entries, err := db.RecentActivity(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+	e := entries[0]
+	if e.Action != "upload" {
+		t.Errorf("action = %q, want %q", e.Action, "upload")
+	}
+	if e.Path != "/docs/readme.txt" {
+		t.Errorf("path = %q, want %q", e.Path, "/docs/readme.txt")
+	}
+	if e.Detail != "size=1024" {
+		t.Errorf("detail = %q, want %q", e.Detail, "size=1024")
+	}
+	if e.ID == 0 {
+		t.Error("expected non-zero ID")
+	}
+	if e.CreatedAt == 0 {
+		t.Error("expected non-zero CreatedAt")
+	}
+}
+
+func TestInsertActivity_EmptyDetail(t *testing.T) {
+	db := testDB(t)
+
+	if err := db.InsertActivity("delete", "/old.txt", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := db.RecentActivity(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+	if entries[0].Detail != "" {
+		t.Errorf("expected empty detail, got %q", entries[0].Detail)
+	}
+}
+
+func TestRecentActivity_Ordering(t *testing.T) {
+	db := testDB(t)
+
+	// Insert 5 entries; they all get the same second-level timestamp,
+	// so ordering should fall back to id DESC.
+	for i := 0; i < 5; i++ {
+		if err := db.InsertActivity("op", fmt.Sprintf("/file%d.txt", i), ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	entries, err := db.RecentActivity(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 5 {
+		t.Fatalf("expected 5 entries, got %d", len(entries))
+	}
+	// Most recent (highest ID) should be first.
+	for i := 1; i < len(entries); i++ {
+		if entries[i].ID >= entries[i-1].ID {
+			t.Errorf("entries not in descending ID order: %d >= %d", entries[i].ID, entries[i-1].ID)
+		}
+	}
+}
+
+func TestRecentActivity_Limit(t *testing.T) {
+	db := testDB(t)
+
+	for i := 0; i < 10; i++ {
+		if err := db.InsertActivity("op", fmt.Sprintf("/f%d.txt", i), ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	entries, err := db.RecentActivity(3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 3 {
+		t.Fatalf("expected 3 entries (limit), got %d", len(entries))
+	}
+}
+
+func TestRecentActivity_ZeroLimit(t *testing.T) {
+	db := testDB(t)
+
+	for i := 0; i < 60; i++ {
+		if err := db.InsertActivity("op", fmt.Sprintf("/f%d.txt", i), ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Zero limit should default to 50.
+	entries, err := db.RecentActivity(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 50 {
+		t.Fatalf("expected 50 entries (default), got %d", len(entries))
+	}
+}
+
+func TestRecentActivity_NegativeLimit(t *testing.T) {
+	db := testDB(t)
+
+	for i := 0; i < 3; i++ {
+		if err := db.InsertActivity("op", fmt.Sprintf("/f%d.txt", i), ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Negative limit should default to 50.
+	entries, err := db.RecentActivity(-1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 3 {
+		t.Fatalf("expected 3 entries, got %d", len(entries))
+	}
+}
+
+func TestRecentActivity_Empty(t *testing.T) {
+	db := testDB(t)
+
+	entries, err := db.RecentActivity(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("expected 0 entries, got %d", len(entries))
+	}
+}

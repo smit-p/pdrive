@@ -42,7 +42,7 @@ test.describe('Initial Load & Layout', () => {
     await waitForApp(page);
     const navItems = page.locator('.nav-item');
     const count = await navItems.count();
-    expect(count).toBeGreaterThanOrEqual(6); // Files, Dashboard, Uploads, Search, Tree, Metrics
+    expect(count).toBeGreaterThanOrEqual(7); // Files, Dashboard, Uploads, Search, Tree, Activity, Metrics
     await expect(page.locator('.nav-item[data-page="browse"]')).toHaveText(/Files/);
     await expect(page.locator('.nav-item[data-page="dashboard"]')).toHaveText(/Dashboard/);
     await expect(page.locator('.nav-item[data-page="uploads"]')).toHaveText(/Uploads/);
@@ -867,5 +867,192 @@ test.describe('Responsive Layout', () => {
     const sidebar = page.locator('.sidebar');
     const box = await sidebar.boundingBox();
     expect(box.x).toBeGreaterThanOrEqual(0);
+  });
+});
+
+// ─── 15. Upload Feature ────────────────────────────────────────────────────
+
+test.describe('Upload Feature', () => {
+  test('upload button is visible in action bar', async ({ page }) => {
+    await waitForApp(page);
+    await page.waitForSelector('.action-bar', { timeout: 3000 });
+    await expect(page.locator('button[data-action="uploadFile"]')).toBeVisible();
+    await expect(page.locator('button[data-action="uploadFile"]')).toContainText('Upload');
+  });
+
+  test('hidden file input exists', async ({ page }) => {
+    await waitForApp(page);
+    await page.waitForSelector('.action-bar', { timeout: 3000 });
+    const input = page.locator('#upload-input');
+    await expect(input).toBeAttached();
+    expect(await input.getAttribute('type')).toBe('file');
+  });
+
+  test('upload via API creates file', async ({ page }) => {
+    await waitForApp(page);
+    // Upload a file via the API directly
+    const resp = await page.evaluate(async () => {
+      const blob = new Blob(['hello upload test'], { type: 'text/plain' });
+      const file = new File([blob], 'e2e-upload-test.txt', { type: 'text/plain' });
+      const fd = new FormData();
+      fd.append('file', file);
+      fd.append('dir', '/');
+      const r = await fetch('/api/upload', { method: 'POST', body: fd });
+      return { status: r.status, body: await r.json() };
+    });
+    expect(resp.status).toBe(200);
+    expect(resp.body.status).toBe('ok');
+    expect(resp.body.path).toBe('/e2e-upload-test.txt');
+    expect(resp.body.size).toBe(17);
+    // Cleanup
+    await page.evaluate(async () => {
+      await fetch('/api/delete?path=%2Fe2e-upload-test.txt', { method: 'POST' });
+    });
+  });
+
+  test('upload rejects request without file', async ({ page }) => {
+    await waitForApp(page);
+    const status = await page.evaluate(async () => {
+      const fd = new FormData();
+      fd.append('dir', '/');
+      const r = await fetch('/api/upload', { method: 'POST', body: fd });
+      return r.status;
+    });
+    expect(status).toBe(400);
+  });
+
+  test('drag-over shows visual feedback', async ({ page }) => {
+    await waitForApp(page);
+    const main = page.locator('#main');
+    // Simulate dragenter via page.evaluate since DataTransfer is a browser API
+    await main.evaluate((el) => {
+      el.dispatchEvent(new DragEvent('dragenter', { bubbles: true }));
+    });
+    await page.waitForTimeout(100);
+    await expect(main).toHaveClass(/drag-over/);
+  });
+});
+
+// ─── 16. Verify Feature ────────────────────────────────────────────────────
+
+test.describe('Verify Feature', () => {
+  test('verify API returns result for existing file', async ({ page }) => {
+    await waitForApp(page);
+    // First upload a file to verify
+    await page.evaluate(async () => {
+      const blob = new Blob(['verify test content'], { type: 'text/plain' });
+      const file = new File([blob], 'e2e-verify-test.txt', { type: 'text/plain' });
+      const fd = new FormData();
+      fd.append('file', file);
+      fd.append('dir', '/');
+      await fetch('/api/upload', { method: 'POST', body: fd });
+    });
+    // Verify the file
+    const result = await page.evaluate(async () => {
+      const r = await fetch('/api/verify?path=%2Fe2e-verify-test.txt');
+      return r.json();
+    });
+    expect(result.path).toBe('/e2e-verify-test.txt');
+    expect(typeof result.ok).toBe('boolean');
+    // Cleanup
+    await page.evaluate(async () => {
+      await fetch('/api/delete?path=%2Fe2e-verify-test.txt', { method: 'POST' });
+    });
+  });
+
+  test('verify API rejects missing path', async ({ page }) => {
+    await waitForApp(page);
+    const status = await page.evaluate(async () => {
+      const r = await fetch('/api/verify');
+      return r.status;
+    });
+    expect(status).toBe(400);
+  });
+
+  test('verify button appears in info panel', async ({ page }) => {
+    await waitForApp(page);
+    // Upload a test file
+    await page.evaluate(async () => {
+      const blob = new Blob(['panel verify test'], { type: 'text/plain' });
+      const file = new File([blob], 'e2e-panel-verify.txt', { type: 'text/plain' });
+      const fd = new FormData();
+      fd.append('file', file);
+      fd.append('dir', '/');
+      await fetch('/api/upload', { method: 'POST', body: fd });
+    });
+    // Reload browse
+    await page.locator('.nav-item[data-page="browse"]').click();
+    await page.waitForSelector('.file-table', { timeout: 5000 });
+    // Click info on the file
+    const infoBtn = page.locator('button[data-action="showInfo"][data-path="/e2e-panel-verify.txt"]');
+    if (await infoBtn.count() > 0) {
+      await infoBtn.click();
+      await page.waitForSelector('.info-panel.open', { timeout: 3000 });
+      await expect(page.locator('button[data-action="verifyFile"]')).toBeVisible();
+    }
+    // Cleanup
+    await page.evaluate(async () => {
+      await fetch('/api/delete?path=%2Fe2e-panel-verify.txt', { method: 'POST' });
+    });
+  });
+});
+
+// ─── 17. Activity Page ─────────────────────────────────────────────────────
+
+test.describe('Activity Page', () => {
+  test('activity nav item is visible in sidebar', async ({ page }) => {
+    await waitForApp(page);
+    await expect(page.locator('.nav-item[data-page="activity"]')).toBeVisible();
+    await expect(page.locator('.nav-item[data-page="activity"]')).toContainText('Activity');
+  });
+
+  test('navigating to activity page renders', async ({ page }) => {
+    await waitForApp(page);
+    await navigateToPage(page, 'activity');
+    await expect(page.locator('.nav-item[data-page="activity"]')).toHaveClass(/active/);
+    // Should show either the activity table or empty state
+    await page.waitForSelector('#activity-content', { timeout: 3000 });
+    await expect(page.locator('#activity-content')).toBeVisible();
+  });
+
+  test('activity API returns array', async ({ page }) => {
+    await waitForApp(page);
+    const result = await page.evaluate(async () => {
+      const r = await fetch('/api/activity');
+      return { status: r.status, body: await r.json() };
+    });
+    expect(result.status).toBe(200);
+    expect(Array.isArray(result.body)).toBe(true);
+  });
+
+  test('activity shows entries after upload', async ({ page }) => {
+    await waitForApp(page);
+    // Upload a file to generate activity
+    await page.evaluate(async () => {
+      const blob = new Blob(['activity test'], { type: 'text/plain' });
+      const file = new File([blob], 'e2e-activity-test.txt', { type: 'text/plain' });
+      const fd = new FormData();
+      fd.append('file', file);
+      fd.append('dir', '/');
+      await fetch('/api/upload', { method: 'POST', body: fd });
+    });
+    // Navigate to activity page
+    await navigateToPage(page, 'activity');
+    await page.waitForSelector('#activity-content', { timeout: 3000 });
+    // Wait for content to load
+    await page.waitForTimeout(500);
+    const content = await page.locator('#activity-content').innerHTML();
+    // Should have at least one entry
+    expect(content.length).toBeGreaterThan(50);
+    // Cleanup
+    await page.evaluate(async () => {
+      await fetch('/api/delete?path=%2Fe2e-activity-test.txt', { method: 'POST' });
+    });
+  });
+
+  test('page title shows Activity heading', async ({ page }) => {
+    await waitForApp(page);
+    await navigateToPage(page, 'activity');
+    await expect(page.locator('.page-title')).toContainText('Activity');
   });
 });

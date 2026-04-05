@@ -163,24 +163,24 @@ mount -t davfs http://localhost:8765 /mnt/pdrive
 
 ### HTTP API
 
-| Endpoint                     | Method | Description                                                 |
-| ---------------------------- | ------ | ----------------------------------------------------------- |
-| `/api/ls?path=/`             | GET    | Directory listing with `local_state` (local/stub/uploading) |
-| `/api/status`                | GET    | Total files, bytes, per-provider quotas                     |
-| `/api/health`                | GET    | Uptime, DB status, in-flight uploads                        |
-| `/api/uploads`               | GET    | In-flight upload progress                                   |
-| `/api/metrics`               | GET    | Telemetry counters (files/chunks/bytes)                     |
-| `/api/remotes`               | GET    | List configured remotes with enabled status                 |
-| `/api/info?path=/file`       | GET    | File metadata, chunks, provider locations                   |
-| `/api/tree?path=/`           | GET    | Recursive directory tree                                    |
-| `/api/find?pattern=*.pdf`    | GET    | Glob search across all files                                |
-| `/api/du?path=/`             | GET    | Disk usage summary for a directory                          |
-| `/api/download?path=/file`   | GET    | Download decrypted file content                             |
-| `/api/pin?path=/file`        | POST   | Download cloud file to local                                |
-| `/api/unpin?path=/file`      | POST   | Evict local data, replace with stub                         |
-| `/api/delete?path=/file`     | POST   | Delete file from cloud and local                            |
-| `/api/mv?from=/a&to=/b`      | POST   | Move or rename a file                                       |
-| `/api/mkdir?path=/dir`       | POST   | Create a new directory                                      |
+| Endpoint                   | Method | Description                                                 |
+| -------------------------- | ------ | ----------------------------------------------------------- |
+| `/api/ls?path=/`           | GET    | Directory listing with `local_state` (local/stub/uploading) |
+| `/api/status`              | GET    | Total files, bytes, per-provider quotas                     |
+| `/api/health`              | GET    | Uptime, DB status, in-flight uploads                        |
+| `/api/uploads`             | GET    | In-flight upload progress                                   |
+| `/api/metrics`             | GET    | Telemetry counters (files/chunks/bytes)                     |
+| `/api/remotes`             | GET    | List configured remotes with enabled status                 |
+| `/api/info?path=/file`     | GET    | File metadata, chunks, provider locations                   |
+| `/api/tree?path=/`         | GET    | Recursive directory tree                                    |
+| `/api/find?pattern=*.pdf`  | GET    | Glob search across all files                                |
+| `/api/du?path=/`           | GET    | Disk usage summary for a directory                          |
+| `/api/download?path=/file` | GET    | Download decrypted file content                             |
+| `/api/pin?path=/file`      | POST   | Download cloud file to local                                |
+| `/api/unpin?path=/file`    | POST   | Evict local data, replace with stub                         |
+| `/api/delete?path=/file`   | POST   | Delete file from cloud and local                            |
+| `/api/mv?from=/a&to=/b`    | POST   | Move or rename a file                                       |
+| `/api/mkdir?path=/dir`     | POST   | Create a new directory                                      |
 
 ## CLI Reference
 

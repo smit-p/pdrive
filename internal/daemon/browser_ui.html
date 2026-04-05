@@ -37,6 +37,7 @@ input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 2px var(--a
 .topbar{grid-column:1/-1;grid-row:1;display:flex;align-items:center;gap:12px;padding:0 16px;border-bottom:1px solid var(--border);background:var(--bg);z-index:30;position:relative}
 .sidebar{grid-column:1;grid-row:2;background:var(--bg2);border-right:1px solid var(--border);padding:8px 0;overflow-y:auto;display:flex;flex-direction:column;gap:2px}
 .main{grid-column:2;grid-row:2;overflow-y:auto;display:flex;flex-direction:column;position:relative}
+.main.drag-over{outline:3px dashed var(--accent);outline-offset:-6px;background:rgba(59,130,246,0.06)}
 
 /* Topbar */
 .logo{font-weight:700;font-size:15px;color:var(--accent);letter-spacing:-.3px;cursor:pointer;flex-shrink:0;padding:0 4px}
@@ -239,6 +240,7 @@ input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 2px var(--a
     <a class="nav-item" data-action="goPage" data-page="search"><span class="nav-icon">🔍</span>Search</a>
     <a class="nav-item" data-action="goPage" data-page="tree"><span class="nav-icon">🌳</span>Tree</a>
     <div class="sidebar-section">System</div>
+    <a class="nav-item" data-action="goPage" data-page="activity"><span class="nav-icon">📋</span>Activity</a>
     <a class="nav-item" data-action="goPage" data-page="metrics"><span class="nav-icon">📈</span>Metrics</a>
   </nav>
 
@@ -359,7 +361,22 @@ var api={
   del:function(p){return api._post('/api/delete?path='+encodeURIComponent(p))},
   mv:function(src,dst){return api._post('/api/mv?src='+encodeURIComponent(src)+'&dst='+encodeURIComponent(dst))},
   mkdir:function(p){return api._post('/api/mkdir?path='+encodeURIComponent(p))},
-  downloadUrl:function(p){return'/api/download?path='+encodeURIComponent(p)}
+  downloadUrl:function(p){return'/api/download?path='+encodeURIComponent(p)},
+  upload:function(file,dir){
+    var fd=new FormData();
+    fd.append('file',file);
+    fd.append('dir',dir||'/');
+    return fetch('/api/upload',{method:'POST',body:fd}).then(function(r){
+      if(!r.ok)return r.text().then(function(t){throw new Error(t)});
+      return r.json();
+    });
+  },
+  verify:function(p){
+    return fetch('/api/verify?path='+encodeURIComponent(p)).then(function(r){
+      return r.json();
+    });
+  },
+  activity:function(){return api._get('/api/activity')}
 };
 
 // ─── State ──────────────────────────────────────────────────────────────────
@@ -479,6 +496,7 @@ function renderInfoContent(data,panel){
 
   // Actions
   var actions='<button class="btn btn-primary" data-action="download" data-path="'+esc(data.path)+'">⬇ Download</button>'
+    +'<button class="btn btn-secondary" data-action="verifyFile" data-path="'+esc(data.path)+'">✓ Verify</button>'
     +'<button class="btn btn-secondary" data-action="pin" data-path="'+esc(data.path)+'">📌 Pin</button>'
     +'<button class="btn btn-secondary" data-action="unpin" data-path="'+esc(data.path)+'">☁️ Unpin</button>'
     +'<button class="btn btn-secondary" data-action="moveFile" data-path="'+esc(data.path)+'">📁 Move</button>'
@@ -566,6 +584,8 @@ function renderBrowse(){
   // Action bar
   html+='<div class="action-bar">';
   html+='<button class="btn btn-secondary" data-action="newFolder">+ New Folder</button>';
+  html+='<button class="btn btn-secondary" data-action="uploadFile">⬆ Upload</button>';
+  html+='<input type="file" id="upload-input" style="display:none" multiple>';
   html+='<div style="flex:1"></div>';
   html+='<button class="btn-ghost" data-action="duHere" title="Disk usage" style="font-size:12px">💾 Usage</button>';
   if(S.path!=='/'){
@@ -925,6 +945,37 @@ function loadMetrics(){
   });
 }
 
+// ─── Page: Activity ─────────────────────────────────────────────────────────
+
+function renderActivity(){
+  var html='<div class="page"><h2 class="page-title">Activity</h2>';
+  html+='<div id="activity-content"><div class="loading-center"><span class="spinner"></span></div></div></div>';
+  return html;
+}
+
+function loadActivity(){
+  renderPage();
+  api.activity().then(function(items){
+    var el=document.getElementById('activity-content');
+    if(!el)return;
+    if(!items||!items.length){
+      el.innerHTML='<div class="empty-state"><div class="empty-icon">📋</div><p>No activity yet</p></div>';
+      return;
+    }
+    var html='<table class="file-table"><thead><tr><th>Action</th><th>Path</th><th>Detail</th><th class="r">Time</th></tr></thead><tbody>';
+    items.forEach(function(e){
+      html+='<tr><td><span class="badge badge-local"><span class="badge-dot"></span>'+esc(e.action)+'</span></td>';
+      html+='<td>'+esc(e.path)+'</td>';
+      html+='<td>'+esc(e.detail||'')+'</td>';
+      html+='<td class="r">'+fmtDateFull(e.created_at)+'</td></tr>';
+    });
+    html+='</tbody></table>';
+    el.innerHTML=html;
+  }).catch(function(e){
+    toast('Failed to load activity: '+e.message,'error');
+  });
+}
+
 // ─── Page Router ────────────────────────────────────────────────────────────
 
 function renderPage(){
@@ -937,6 +988,7 @@ function renderPage(){
     case'search':html=renderSearch();break;
     case'tree':html=renderTree();break;
     case'metrics':html=renderMetrics();break;
+    case'activity':html=renderActivity();break;
     default:html=renderBrowse();
   }
   main.innerHTML=html;
@@ -959,6 +1011,7 @@ function goPage(page,opts){
     case'search':renderPage();setTimeout(function(){var el=document.getElementById('search-pattern');if(el)el.focus()},50);break;
     case'tree':if(!S.treeData)loadTree();else renderPage();break;
     case'metrics':loadMetrics();break;
+    case'activity':loadActivity();break;
     default:renderPage();
   }
 }
@@ -1028,6 +1081,34 @@ function doDuHere(){
   api.du(S.path).then(function(d){
     toast(d.file_count+' files, '+fmtSize(d.total_bytes)+' total','info');
   }).catch(function(e){toast('Error: '+e.message,'error')});
+}
+
+function doUploadFiles(files){
+  if(!files||!files.length)return;
+  var dir=S.path||'/';
+  var todo=Array.from(files);
+  var done=0;
+  function next(){
+    if(!todo.length){
+      if(done)toast('Uploaded '+done+' file'+(done>1?'s':''),'success');
+      if(S.page==='browse')loadBrowse(S.path);
+      return;
+    }
+    var f=todo.shift();
+    api.upload(f,dir).then(function(){done++;next()}).catch(function(e){toast('Upload failed: '+e.message,'error');next()});
+  }
+  next();
+}
+
+function doVerify(p){
+  toast('Verifying '+pathBasename(p)+'…','info');
+  api.verify(p).then(function(res){
+    if(res.ok){
+      toast('✓ '+pathBasename(p)+' integrity OK','success');
+    } else {
+      toast('✗ '+pathBasename(p)+': '+(res.error||'failed'),'error');
+    }
+  }).catch(function(e){toast('Verify error: '+e.message,'error')});
 }
 
 // Bulk actions
@@ -1125,6 +1206,15 @@ document.addEventListener('click',function(e){
     case'duHere':
       e.preventDefault();
       doDuHere();
+      break;
+    case'uploadFile':
+      e.preventDefault();
+      var inp=document.getElementById('upload-input');
+      if(inp)inp.click();
+      break;
+    case'verifyFile':
+      e.preventDefault();
+      doVerify(path);
       break;
     case'sort':
       e.preventDefault();
@@ -1375,6 +1465,29 @@ function pollUploads(){
     if(S.page==='browse'&&S.uploads.length)loadBrowse(S.path);
   }).catch(function(){});
 }
+
+// ─── Upload: file input + drag-drop ─────────────────────────────────────────
+
+document.addEventListener('change',function(e){
+  if(e.target.id==='upload-input'){
+    doUploadFiles(e.target.files);
+    e.target.value='';
+  }
+});
+
+(function(){
+  var main=document.getElementById('main');
+  var dragCounter=0;
+  main.addEventListener('dragenter',function(e){e.preventDefault();dragCounter++;main.classList.add('drag-over')});
+  main.addEventListener('dragleave',function(e){e.preventDefault();dragCounter--;if(dragCounter<=0){dragCounter=0;main.classList.remove('drag-over')}});
+  main.addEventListener('dragover',function(e){e.preventDefault()});
+  main.addEventListener('drop',function(e){
+    e.preventDefault();dragCounter=0;main.classList.remove('drag-over');
+    if(S.page==='browse'&&e.dataTransfer&&e.dataTransfer.files.length){
+      doUploadFiles(e.dataTransfer.files);
+    }
+  });
+})();
 
 // ─── Init ───────────────────────────────────────────────────────────────────
 

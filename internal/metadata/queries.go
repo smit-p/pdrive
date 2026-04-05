@@ -8,6 +8,12 @@ import (
 	"time"
 )
 
+// escapeLike escapes SQL LIKE wildcard characters (%, _) in a literal string
+// so they are matched verbatim.  The caller must add ESCAPE '\' to the query.
+var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+
+func escapeLike(s string) string { return likeEscaper.Replace(s) }
+
 // File represents a virtual file in the pdrive filesystem.
 type File struct {
 	ID          string
@@ -268,9 +274,9 @@ func (db *DB) ListFiles(dirPath string) ([]File, error) {
 	rows, err := db.conn.Query(
 		`SELECT id, virtual_path, size_bytes, created_at, modified_at, sha256_full, upload_state, tmp_path
 		 FROM files
-		 WHERE virtual_path LIKE ? || '%'
+		 WHERE virtual_path LIKE ? ESCAPE '\'
 		   AND upload_state = 'complete'
-		   AND INSTR(SUBSTR(virtual_path, LENGTH(?) + 1), '/') = 0`, dirPath, dirPath,
+		   AND INSTR(SUBSTR(virtual_path, LENGTH(?) + 1), '/') = 0`, escapeLike(dirPath)+"%", dirPath,
 	)
 	if err != nil {
 		return nil, err
@@ -298,7 +304,7 @@ func (db *DB) ListSubdirectories(dirPath string) ([]string, error) {
 	seen := make(map[string]bool)
 
 	// 1. Explicit directories that are immediate children.
-	dirRows, err := db.conn.Query(`SELECT path FROM directories WHERE path LIKE ?`, dirPath+"%")
+	dirRows, err := db.conn.Query(`SELECT path FROM directories WHERE path LIKE ? ESCAPE '\'`, escapeLike(dirPath)+"%")
 	if err != nil {
 		return nil, err
 	}
@@ -328,7 +334,7 @@ func (db *DB) ListSubdirectories(dirPath string) ([]string, error) {
 
 	// 2. Implicit directories from file paths.
 	fileRows, err := db.conn.Query(
-		`SELECT DISTINCT virtual_path FROM files WHERE virtual_path LIKE ?`, dirPath+"%",
+		`SELECT DISTINCT virtual_path FROM files WHERE virtual_path LIKE ? ESCAPE '\'`, escapeLike(dirPath)+"%",
 	)
 	if err != nil {
 		return nil, err
@@ -506,7 +512,7 @@ func (db *DB) PathIsDir(dirPath string) (bool, error) {
 	// Check implicit directories (files under this path).
 	prefix := cleanDir + "/"
 	var fileCount int
-	err := db.conn.QueryRow(`SELECT COUNT(*) FROM files WHERE virtual_path LIKE ?`, prefix+"%").Scan(&fileCount)
+	err := db.conn.QueryRow(`SELECT COUNT(*) FROM files WHERE virtual_path LIKE ? ESCAPE '\'`, escapeLike(prefix)+"%").Scan(&fileCount)
 	return fileCount > 0, err
 }
 
@@ -554,8 +560,8 @@ func (db *DB) DeleteDirectory(dirPath string) error {
 // DeleteDirectoriesUnder deletes all explicit directory records under (and including) a prefix.
 func (db *DB) DeleteDirectoriesUnder(dirPath string) error {
 	dirPath = strings.TrimSuffix(dirPath, "/")
-	_, err := db.conn.Exec(`DELETE FROM directories WHERE path = ? OR path LIKE ?`,
-		dirPath, dirPath+"/%")
+	_, err := db.conn.Exec(`DELETE FROM directories WHERE path = ? OR path LIKE ? ESCAPE '\'`,
+		dirPath, escapeLike(dirPath)+"/%")
 	return err
 }
 
@@ -564,7 +570,7 @@ func (db *DB) GetFilesUnderDir(dirPath string) ([]File, error) {
 	prefix := strings.TrimSuffix(dirPath, "/") + "/"
 	rows, err := db.conn.Query(
 		`SELECT id, virtual_path, size_bytes, created_at, modified_at, sha256_full, upload_state, tmp_path
-		 FROM files WHERE virtual_path LIKE ?`, prefix+"%",
+		 FROM files WHERE virtual_path LIKE ? ESCAPE '\'`, escapeLike(prefix)+"%",
 	)
 	if err != nil {
 		return nil, err
@@ -596,8 +602,8 @@ func (db *DB) RenameFilesUnderDir(oldDir, newDir string) error {
 	newPrefix := strings.TrimSuffix(newDir, "/") + "/"
 	_, err := db.conn.Exec(
 		`UPDATE files SET virtual_path = ? || SUBSTR(virtual_path, ?)
-		 WHERE virtual_path LIKE ?`,
-		newPrefix, len(oldPrefix)+1, oldPrefix+"%",
+		 WHERE virtual_path LIKE ? ESCAPE '\'`,
+		newPrefix, len(oldPrefix)+1, escapeLike(oldPrefix)+"%",
 	)
 	return err
 }
@@ -614,8 +620,8 @@ func (db *DB) RenameDirectoriesUnder(oldDir, newDir string) error {
 	// Rename subdirectories.
 	_, err = db.conn.Exec(
 		`UPDATE directories SET path = ? || SUBSTR(path, ?)
-		 WHERE path LIKE ?`,
-		newDir, len(oldDir)+1, oldDir+"/%",
+		 WHERE path LIKE ? ESCAPE '\'`,
+		newDir, len(oldDir)+1, escapeLike(oldDir)+"/%",
 	)
 	return err
 }
@@ -707,14 +713,14 @@ func (db *DB) SearchFiles(root, pattern string) ([]File, error) {
 	}
 	// Escape LIKE special characters in the user-provided pattern so that
 	// literal '%' and '_' in the search term are not treated as wildcards.
-	escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(pattern)
+	escaped := escapeLike(pattern)
 	likePattern := "%" + escaped + "%"
 	rows, err := db.conn.Query(
 		`SELECT id, virtual_path, size_bytes, created_at, modified_at, sha256_full, upload_state, tmp_path
 		 FROM files
-		 WHERE virtual_path LIKE ? || '%'
+		 WHERE virtual_path LIKE ? ESCAPE '\'
 		   AND upload_state = 'complete'
-		   AND virtual_path LIKE ? ESCAPE '\'`, root, likePattern,
+		   AND virtual_path LIKE ? ESCAPE '\'`, escapeLike(root)+"%", likePattern,
 	)
 	if err != nil {
 		return nil, err
@@ -740,9 +746,9 @@ func (db *DB) ListAllFiles(root string) ([]File, error) {
 	rows, err := db.conn.Query(
 		`SELECT id, virtual_path, size_bytes, created_at, modified_at, sha256_full, upload_state, tmp_path
 		 FROM files
-		 WHERE virtual_path LIKE ? || '%'
+		 WHERE virtual_path LIKE ? ESCAPE '\'
 		   AND upload_state = 'complete'
-		 ORDER BY virtual_path`, root,
+		 ORDER BY virtual_path`, escapeLike(root)+"%",
 	)
 	if err != nil {
 		return nil, err
@@ -769,8 +775,50 @@ func (db *DB) DiskUsage(root string) (int64, int64, error) {
 	err := db.conn.QueryRow(
 		`SELECT COUNT(*), COALESCE(SUM(size_bytes), 0)
 		 FROM files
-		 WHERE virtual_path LIKE ? || '%'
-		   AND upload_state = 'complete'`, root,
+		 WHERE virtual_path LIKE ? ESCAPE '\'
+		   AND upload_state = 'complete'`, escapeLike(root)+"%",
 	).Scan(&count, &total)
 	return count, total, err
+}
+
+// ActivityEntry represents a row in the activity_log table.
+type ActivityEntry struct {
+	ID        int64
+	Action    string
+	Path      string
+	Detail    string
+	CreatedAt int64
+}
+
+// InsertActivity logs an action to the activity_log table.
+func (db *DB) InsertActivity(action, path, detail string) error {
+	_, err := db.conn.Exec(
+		`INSERT INTO activity_log (action, path, detail, created_at) VALUES (?, ?, ?, ?)`,
+		action, path, detail, time.Now().Unix(),
+	)
+	return err
+}
+
+// RecentActivity returns the most recent N activity log entries.
+func (db *DB) RecentActivity(limit int) ([]ActivityEntry, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := db.conn.Query(
+		`SELECT id, action, path, COALESCE(detail, ''), created_at
+		 FROM activity_log ORDER BY created_at DESC, id DESC LIMIT ?`, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var entries []ActivityEntry
+	for rows.Next() {
+		var e ActivityEntry
+		if err := rows.Scan(&e.ID, &e.Action, &e.Path, &e.Detail, &e.CreatedAt); err != nil {
+			return nil, err
+		}
+		entries = append(entries, e)
+	}
+	return entries, rows.Err()
 }

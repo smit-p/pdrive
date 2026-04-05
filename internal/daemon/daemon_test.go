@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -2800,5 +2801,705 @@ func TestCheckMissingProviders_WithIdentity(t *testing.T) {
 	}
 	if !strings.Contains(missing[0], "drive") {
 		t.Errorf("expected type in label, got %q", missing[0])
+	}
+}
+
+// ---------------------------------------------------------------------------
+// stubRcloneClient for remotes endpoint testing
+// ---------------------------------------------------------------------------
+
+type stubRcloneClient struct {
+	remotes    []string
+	types      map[string]string
+	listErr    error
+	getTypeErr error
+}
+
+func (s *stubRcloneClient) ListRemotes() ([]string, error) {
+	return s.remotes, s.listErr
+}
+
+func (s *stubRcloneClient) GetRemoteType(name string) (string, error) {
+	if s.getTypeErr != nil {
+		return "", s.getTypeErr
+	}
+	if t, ok := s.types[name]; ok {
+		return t, nil
+	}
+	return "unknown", nil
+}
+
+// ---------------------------------------------------------------------------
+// /api/remotes tests
+// ---------------------------------------------------------------------------
+
+func TestRemotesEndpoint_Success(t *testing.T) {
+	h, _ := newTestHandler(t)
+	h.rcloneClient = &stubRcloneClient{
+		remotes: []string{"gdrive", "dropbox"},
+		types:   map[string]string{"gdrive": "drive", "dropbox": "dropbox"},
+	}
+	h.configDir = t.TempDir()
+
+	req := httptest.NewRequest("GET", "/api/remotes", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	var resp struct {
+		Remotes []struct {
+			Name   string `json:"name"`
+			Type   string `json:"type"`
+			Active bool   `json:"active"`
+		} `json:"remotes"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Remotes) != 2 {
+		t.Fatalf("expected 2 remotes, got %d", len(resp.Remotes))
+	}
+	// When no activeRemotes filter, all should be active.
+	for _, r := range resp.Remotes {
+		if !r.Active {
+			t.Errorf("expected %s to be active", r.Name)
+		}
+	}
+}
+
+func TestRemotesEndpoint_WithActiveFilter(t *testing.T) {
+	h, _ := newTestHandler(t)
+	h.rcloneClient = &stubRcloneClient{
+		remotes: []string{"gdrive", "dropbox", "onedrive"},
+		types:   map[string]string{"gdrive": "drive", "dropbox": "dropbox", "onedrive": "onedrive"},
+	}
+	h.configDir = t.TempDir()
+	h.activeRemotes = []string{"gdrive"}
+
+	req := httptest.NewRequest("GET", "/api/remotes", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	var resp struct {
+		Remotes []struct {
+			Name   string `json:"name"`
+			Type   string `json:"type"`
+			Active bool   `json:"active"`
+		} `json:"remotes"`
+	}
+	json.NewDecoder(rec.Body).Decode(&resp)
+	activeCount := 0
+	for _, r := range resp.Remotes {
+		if r.Active {
+			activeCount++
+			if r.Name != "gdrive" {
+				t.Errorf("expected only gdrive to be active, got %s", r.Name)
+			}
+		}
+	}
+	if activeCount != 1 {
+		t.Errorf("expected 1 active, got %d", activeCount)
+	}
+}
+
+func TestRemotesEndpoint_ListError(t *testing.T) {
+	h, _ := newTestHandler(t)
+	h.rcloneClient = &stubRcloneClient{
+		listErr: fmt.Errorf("connection refused"),
+	}
+
+	req := httptest.NewRequest("GET", "/api/remotes", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500, got %d", rec.Code)
+	}
+}
+
+func TestRemotesEndpoint_SavedRemotesFile(t *testing.T) {
+	h, _ := newTestHandler(t)
+	h.rcloneClient = &stubRcloneClient{
+		remotes: []string{"gdrive", "dropbox"},
+		types:   map[string]string{"gdrive": "drive", "dropbox": "dropbox"},
+	}
+	h.configDir = t.TempDir()
+	// Write a remotes.json to simulate saved remote selection.
+	os.WriteFile(filepath.Join(h.configDir, "remotes.json"), []byte(`["gdrive"]`), 0644)
+
+	req := httptest.NewRequest("GET", "/api/remotes", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	var resp struct {
+		Remotes []struct {
+			Name   string `json:"name"`
+			Active bool   `json:"active"`
+		} `json:"remotes"`
+	}
+	json.NewDecoder(rec.Body).Decode(&resp)
+	for _, r := range resp.Remotes {
+		if r.Name == "gdrive" && !r.Active {
+			t.Error("gdrive should be active")
+		}
+		if r.Name == "dropbox" && r.Active {
+			t.Error("dropbox should not be active")
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// /api/upload tests
+// ---------------------------------------------------------------------------
+
+func TestUploadEndpoint_RequiresPOST(t *testing.T) {
+	h, _ := newTestHandler(t)
+	req := httptest.NewRequest("GET", "/api/upload", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", rec.Code)
+	}
+}
+
+func TestUploadEndpoint_NoFile(t *testing.T) {
+	h, _ := newTestHandler(t)
+	req := httptest.NewRequest("POST", "/api/upload", strings.NewReader(""))
+	req.Header.Set("Content-Type", "multipart/form-data; boundary=xxx")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", rec.Code)
+	}
+}
+
+func TestUploadEndpoint_Success(t *testing.T) {
+	h, eng, db := newTestHandlerWithCloud(t)
+	_ = eng
+
+	// Build multipart form
+	var buf bytes.Buffer
+	writer := multipartWriter(&buf)
+	part, _ := writer.CreateFormFile("file", "test.txt")
+	part.Write([]byte("hello world"))
+	writer.WriteField("dir", "/docs")
+	writer.Close()
+
+	req := httptest.NewRequest("POST", "/api/upload", &buf)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Verify file was created.
+	f, err := db.GetCompleteFileByPath("/docs/test.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f == nil {
+		t.Fatal("uploaded file not found in DB")
+	}
+	if f.SizeBytes != 11 {
+		t.Errorf("expected size 11, got %d", f.SizeBytes)
+	}
+
+	// Verify activity was logged.
+	entries, _ := db.RecentActivity(10)
+	found := false
+	for _, e := range entries {
+		if e.Action == "upload" && e.Path == "/docs/test.txt" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("upload activity not logged")
+	}
+}
+
+func TestUploadEndpoint_DefaultDir(t *testing.T) {
+	h, _, db := newTestHandlerWithCloud(t)
+
+	var buf bytes.Buffer
+	writer := multipartWriter(&buf)
+	part, _ := writer.CreateFormFile("file", "root.txt")
+	part.Write([]byte("root file"))
+	writer.Close()
+
+	req := httptest.NewRequest("POST", "/api/upload", &buf)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	f, _ := db.GetCompleteFileByPath("/root.txt")
+	if f == nil {
+		t.Fatal("uploaded file not found at /root.txt")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// /api/verify tests
+// ---------------------------------------------------------------------------
+
+func TestVerifyEndpoint_NoPath(t *testing.T) {
+	h, _ := newTestHandler(t)
+	req := httptest.NewRequest("GET", "/api/verify", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", rec.Code)
+	}
+}
+
+func TestVerifyEndpoint_FileNotFound(t *testing.T) {
+	h, _ := newTestHandler(t)
+	req := httptest.NewRequest("GET", "/api/verify?path=/nonexistent.txt", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", rec.Code)
+	}
+	var resp struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
+	}
+	json.NewDecoder(rec.Body).Decode(&resp)
+	if resp.OK {
+		t.Error("expected ok=false for nonexistent file")
+	}
+	if resp.Error == "" {
+		t.Error("expected error message")
+	}
+}
+
+func TestVerifyEndpoint_Success(t *testing.T) {
+	h, eng, db := newTestHandlerWithCloud(t)
+	eng.WriteFile("/verify.txt", []byte("verify me"))
+
+	req := httptest.NewRequest("GET", "/api/verify?path=/verify.txt", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		OK bool `json:"ok"`
+	}
+	json.NewDecoder(rec.Body).Decode(&resp)
+	if !resp.OK {
+		t.Error("expected verify to pass")
+	}
+
+	// Verify activity was logged.
+	entries, _ := db.RecentActivity(10)
+	found := false
+	for _, e := range entries {
+		if e.Action == "verify" && e.Path == "/verify.txt" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("verify activity not logged")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// /api/activity tests
+// ---------------------------------------------------------------------------
+
+func TestActivityEndpoint_Empty(t *testing.T) {
+	h, _ := newTestHandler(t)
+	req := httptest.NewRequest("GET", "/api/activity", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	var entries []metadata.ActivityEntry
+	json.NewDecoder(rec.Body).Decode(&entries)
+	if len(entries) != 0 {
+		t.Errorf("expected 0 entries, got %d", len(entries))
+	}
+}
+
+func TestActivityEndpoint_WithEntries(t *testing.T) {
+	h, db := newTestHandler(t)
+	db.InsertActivity("upload", "/test.txt", "100 bytes")
+	db.InsertActivity("delete", "/old.txt", "file")
+
+	req := httptest.NewRequest("GET", "/api/activity", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	var entries []struct {
+		Action    string `json:"Action"`
+		Path      string `json:"Path"`
+		Detail    string `json:"Detail"`
+		CreatedAt int64  `json:"CreatedAt"`
+	}
+	json.NewDecoder(rec.Body).Decode(&entries)
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(entries))
+	}
+	// Most recent first.
+	if entries[0].Action != "delete" {
+		t.Error("expected most recent entry first")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Activity logging in existing endpoints
+// ---------------------------------------------------------------------------
+
+func TestDeleteEndpoint_LogsActivity(t *testing.T) {
+	h, eng, db := newTestHandlerWithCloud(t)
+	eng.WriteFile("/todelete.txt", []byte("bye"))
+
+	req := httptest.NewRequest("POST", "/api/delete?path=/todelete.txt", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	entries, _ := db.RecentActivity(10)
+	found := false
+	for _, e := range entries {
+		if e.Action == "delete" && e.Path == "/todelete.txt" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("delete activity not logged")
+	}
+}
+
+func TestMkdirEndpoint_LogsActivity(t *testing.T) {
+	h, db := newTestHandler(t)
+
+	req := httptest.NewRequest("POST", "/api/mkdir?path=/newdir", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	entries, _ := db.RecentActivity(10)
+	found := false
+	for _, e := range entries {
+		if e.Action == "mkdir" && e.Path == "/newdir" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("mkdir activity not logged")
+	}
+}
+
+func TestMvEndpoint_LogsActivity(t *testing.T) {
+	h, eng, db := newTestHandlerWithCloud(t)
+	eng.WriteFile("/moveme.txt", []byte("moving"))
+
+	req := httptest.NewRequest("POST", "/api/mv?src=/moveme.txt&dst=/moved.txt", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	entries, _ := db.RecentActivity(10)
+	found := false
+	for _, e := range entries {
+		if e.Action == "move" && e.Path == "/moveme.txt" && e.Detail == "/moved.txt" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("move activity not logged")
+	}
+}
+
+func TestDownloadEndpoint_LogsActivity(t *testing.T) {
+	h, eng, db := newTestHandlerWithCloud(t)
+	eng.WriteFile("/dl.txt", []byte("download me"))
+
+	req := httptest.NewRequest("GET", "/api/download?path=/dl.txt", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	entries, _ := db.RecentActivity(10)
+	found := false
+	for _, e := range entries {
+		if e.Action == "download" && e.Path == "/dl.txt" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("download activity not logged")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Additional edge case tests
+// ---------------------------------------------------------------------------
+
+func TestUploadEndpoint_InvalidMultipart(t *testing.T) {
+	h, _ := newTestHandler(t)
+	req := httptest.NewRequest("POST", "/api/upload", strings.NewReader("not multipart"))
+	req.Header.Set("Content-Type", "text/plain")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", rec.Code)
+	}
+}
+
+func TestVerifyEndpoint_RootPath(t *testing.T) {
+	h, _ := newTestHandler(t)
+	req := httptest.NewRequest("GET", "/api/verify?path=/", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", rec.Code)
+	}
+}
+
+func TestDeleteEndpoint_DirLogsActivity(t *testing.T) {
+	h, db := newTestHandler(t)
+	h.engine.MkDir("/delete-dir/")
+
+	req := httptest.NewRequest("POST", "/api/delete?path=/delete-dir", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	entries, _ := db.RecentActivity(10)
+	found := false
+	for _, e := range entries {
+		if e.Action == "delete" && strings.Contains(e.Path, "delete-dir") && e.Detail == "directory" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("dir delete activity not logged")
+	}
+}
+
+func TestMvEndpoint_DirLogsActivity(t *testing.T) {
+	h, db := newTestHandler(t)
+	h.engine.MkDir("/mvdir/")
+
+	req := httptest.NewRequest("POST", "/api/mv?src=/mvdir&dst=/mvdir2", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	entries, _ := db.RecentActivity(10)
+	found := false
+	for _, e := range entries {
+		if e.Action == "move" && e.Path == "/mvdir" && e.Detail == "/mvdir2" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("dir move activity not logged")
+	}
+}
+
+// multipartWriter is a helper to create mime/multipart writers.
+func multipartWriter(buf *bytes.Buffer) *multipart.Writer {
+	return multipart.NewWriter(buf)
+}
+
+// ---------------------------------------------------------------------------
+// cleanPath unit tests
+// ---------------------------------------------------------------------------
+
+func TestCleanPath(t *testing.T) {
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{"", "/"},
+		{".", "/"},
+		{"/", "/"},
+		{"/foo/bar", "/foo/bar"},
+		{"foo/bar", "/foo/bar"},
+		{"../../etc/passwd", "/etc/passwd"},
+		{"foo/../../../bar", "/bar"},
+		{"/../../../etc", "/etc"},
+		{"/normal/../ok", "/ok"},
+		{"//double//slash", "/double/slash"},
+	}
+	for _, c := range cases {
+		got := cleanPath(c.input)
+		if got != c.want {
+			t.Errorf("cleanPath(%q) = %q, want %q", c.input, got, c.want)
+		}
+	}
+}
+
+// TestPathTraversal_Delete ensures that path traversal attempt doesn't affect
+// files outside the virtual filesystem.
+func TestPathTraversal_Delete(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	db, err := metadata.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	encKey := bytes.Repeat([]byte("K"), 32)
+	b := broker.NewBroker(db, broker.PolicyPFRD, 0)
+	eng := engine.NewEngineWithCloud(db, dbPath, nil, b, encKey)
+	defer eng.Close()
+
+	h := &browserHandler{engine: eng, startTime: time.Now()}
+
+	// Try to delete with path traversal — should not escape to host FS
+	req := httptest.NewRequest("POST", "/api/delete?path=../../etc/passwd", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	// The path gets cleaned to /etc/passwd, and the file won't exist in our
+	// virtual FS, so we expect a 404 (not found) rather than deleting
+	// something on the host filesystem.
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("expected 404 for traversal attempt, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestPathTraversal_Upload ensures filenames are sanitised in uploads.
+func TestPathTraversal_Upload(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	db, err := metadata.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	cloud := newFakeCloud()
+	encKey := bytes.Repeat([]byte("K"), 32)
+	b := broker.NewBroker(db, broker.PolicyPFRD, 0)
+	total := int64(100 << 30)
+	free := int64(50 << 30)
+	db.UpsertProvider(&metadata.Provider{
+		ID: "test-remote:", Type: "test", DisplayName: "Test",
+		RcloneRemote: "test-remote:", QuotaTotalBytes: &total, QuotaFreeBytes: &free,
+	}) //nolint:errcheck
+	eng := engine.NewEngineWithCloud(db, dbPath, cloud, b, encKey)
+	defer eng.Close()
+
+	h := &browserHandler{engine: eng, startTime: time.Now()}
+
+	// Create a multipart form with a traversal attempt in the filename
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	mw.WriteField("dir", "/uploads") //nolint:errcheck
+	fw, _ := mw.CreateFormFile("file", "../../etc/evil.txt")
+	fw.Write([]byte("malicious content")) //nolint:errcheck
+	mw.Close()
+
+	req := httptest.NewRequest("POST", "/api/upload", &buf)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// The file should be stored at /uploads/evil.txt (base name only),
+	// not at /uploads/../../etc/evil.txt
+	var resp map[string]interface{}
+	json.Unmarshal(rec.Body.Bytes(), &resp) //nolint:errcheck
+	gotPath, _ := resp["path"].(string)
+	if gotPath != "/uploads/evil.txt" {
+		t.Errorf("expected sanitised path /uploads/evil.txt, got %q", gotPath)
+	}
+}
+
+func TestUploadEndpoint_InvalidFilename(t *testing.T) {
+	h, _, _ := newTestHandlerWithCloud(t)
+
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	mw.WriteField("dir", "/") //nolint:errcheck
+	// Create a form file with filename "." which should be rejected
+	fw, _ := mw.CreateFormFile("file", ".")
+	fw.Write([]byte("bad")) //nolint:errcheck
+	mw.Close()
+
+	req := httptest.NewRequest("POST", "/api/upload", &buf)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for invalid filename, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestUploadEndpoint_GETNotAllowed(t *testing.T) {
+	h, _ := newTestHandler(t)
+
+	req := httptest.NewRequest("PUT", "/api/upload", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405 for PUT, got %d", rec.Code)
+	}
+}
+
+func TestDuEndpoint_NoPath(t *testing.T) {
+	h, _ := newTestHandler(t)
+
+	req := httptest.NewRequest("GET", "/api/du", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	// Should default to root "/" and return disk usage
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]interface{}
+	json.Unmarshal(rec.Body.Bytes(), &resp) //nolint:errcheck
+	if _, ok := resp["total_bytes"]; !ok {
+		t.Error("expected total_bytes in response")
+	}
+	if _, ok := resp["file_count"]; !ok {
+		t.Error("expected file_count in response")
 	}
 }

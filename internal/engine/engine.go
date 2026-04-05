@@ -988,6 +988,9 @@ func (e *Engine) RenameDir(oldPath, newPath string) error {
 // Skips cloud objects that are still referenced by other files (dedup clones).
 // Failed deletions are persisted to DB for later retry.
 func (e *Engine) deleteCloudChunks(locs []metadata.ChunkLocation) {
+	if e.rc == nil {
+		return
+	}
 	for _, loc := range locs {
 		// Check if another chunk_location still references this cloud object
 		// (happens when content-hash dedup cloned the chunks).

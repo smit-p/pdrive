@@ -225,7 +225,9 @@ func (d *Daemon) Start(ctx context.Context) error {
 	}
 
 	d.webdavServer = &http.Server{
-		Addr: d.config.WebDAVAddr,
+		Addr:              d.config.WebDAVAddr,
+		ReadHeaderTimeout: 30 * time.Second,
+		IdleTimeout:       120 * time.Second,
 		Handler: &browserHandler{
 			davHandler:    handler,
 			engine:        d.engine,
@@ -681,6 +683,15 @@ type browserHandler struct {
 	activeRemotes []string // from --remotes flag; empty = all
 }
 
+// cleanPath sanitises a user-supplied virtual path: it cleans ".." segments
+// and ensures the result is absolute (rooted at "/").  This prevents
+// path-traversal attacks where a relative path like "../../etc" would escape
+// the sync directory when joined with the filesystem root.
+func cleanPath(raw string) string {
+	p := path.Clean("/" + raw)
+	return p
+}
+
 func (h *browserHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case "/api/uploads":
@@ -734,6 +745,15 @@ func (h *browserHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/api/du":
 		h.serveAPIDu(w, r)
 		return
+	case "/api/upload":
+		h.serveAPIUpload(w, r)
+		return
+	case "/api/verify":
+		h.serveAPIVerify(w, r)
+		return
+	case "/api/activity":
+		h.serveAPIActivity(w, r)
+		return
 	}
 
 	// Only intercept GET/HEAD with a browser-like Accept header.
@@ -749,7 +769,7 @@ func (h *browserHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *browserHandler) serveAPILs(w http.ResponseWriter, r *http.Request) {
-	p := path.Clean(r.URL.Query().Get("path"))
+	p := cleanPath(r.URL.Query().Get("path"))
 	if p == "" || p == "." {
 		p = "/"
 	}
@@ -867,8 +887,8 @@ func (h *browserHandler) serveAPIPin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "sync dir not configured", http.StatusServiceUnavailable)
 		return
 	}
-	p := path.Clean(r.URL.Query().Get("path"))
-	if p == "" || p == "." || p == "/" {
+	p := cleanPath(r.URL.Query().Get("path"))
+	if p == "/" {
 		http.Error(w, "path required", http.StatusBadRequest)
 		return
 	}
@@ -876,6 +896,7 @@ func (h *browserHandler) serveAPIPin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	h.engine.DB().InsertActivity("pin", p, "") //nolint:errcheck
 	w.Header().Set("Content-Type", "application/json")
 	fmt.Fprintf(w, `{"status":"ok","path":%q,"state":"local"}`, p)
 }
@@ -889,8 +910,8 @@ func (h *browserHandler) serveAPIUnpin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "sync dir not configured", http.StatusServiceUnavailable)
 		return
 	}
-	p := path.Clean(r.URL.Query().Get("path"))
-	if p == "" || p == "." || p == "/" {
+	p := cleanPath(r.URL.Query().Get("path"))
+	if p == "/" {
 		http.Error(w, "path required", http.StatusBadRequest)
 		return
 	}
@@ -898,6 +919,7 @@ func (h *browserHandler) serveAPIUnpin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	h.engine.DB().InsertActivity("unpin", p, "") //nolint:errcheck
 	w.Header().Set("Content-Type", "application/json")
 	fmt.Fprintf(w, `{"status":"ok","path":%q,"state":"stub"}`, p)
 }
@@ -907,8 +929,8 @@ func (h *browserHandler) serveAPIDelete(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "POST required", http.StatusMethodNotAllowed)
 		return
 	}
-	p := path.Clean(r.URL.Query().Get("path"))
-	if p == "" || p == "." || p == "/" {
+	p := cleanPath(r.URL.Query().Get("path"))
+	if p == "/" {
 		http.Error(w, "path required", http.StatusBadRequest)
 		return
 	}
@@ -931,6 +953,7 @@ func (h *browserHandler) serveAPIDelete(w http.ResponseWriter, r *http.Request) 
 		if h.syncDir != nil {
 			os.RemoveAll(filepath.Join(h.syncDir.Root(), p))
 		}
+		h.engine.DB().InsertActivity("delete", p, "directory") //nolint:errcheck
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"status":"ok","path":%q,"type":"dir"}`, p)
 		return
@@ -953,12 +976,13 @@ func (h *browserHandler) serveAPIDelete(w http.ResponseWriter, r *http.Request) 
 	if h.syncDir != nil {
 		os.Remove(filepath.Join(h.syncDir.Root(), p))
 	}
+	h.engine.DB().InsertActivity("delete", p, "file") //nolint:errcheck
 	w.Header().Set("Content-Type", "application/json")
 	fmt.Fprintf(w, `{"status":"ok","path":%q,"type":"file"}`, p)
 }
 
 func (h *browserHandler) serveAPITree(w http.ResponseWriter, r *http.Request) {
-	p := path.Clean(r.URL.Query().Get("path"))
+	p := cleanPath(r.URL.Query().Get("path"))
 	if p == "" || p == "." {
 		p = "/"
 	}
@@ -980,7 +1004,7 @@ func (h *browserHandler) serveAPITree(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *browserHandler) serveAPIFind(w http.ResponseWriter, r *http.Request) {
-	root := path.Clean(r.URL.Query().Get("path"))
+	root := cleanPath(r.URL.Query().Get("path"))
 	if root == "" || root == "." {
 		root = "/"
 	}
@@ -1011,9 +1035,9 @@ func (h *browserHandler) serveAPIMv(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "POST required", http.StatusMethodNotAllowed)
 		return
 	}
-	src := path.Clean(r.URL.Query().Get("src"))
-	dst := path.Clean(r.URL.Query().Get("dst"))
-	if src == "" || src == "." || dst == "" || dst == "." {
+	src := cleanPath(r.URL.Query().Get("src"))
+	dst := cleanPath(r.URL.Query().Get("dst"))
+	if src == "/" || dst == "/" {
 		http.Error(w, "src and dst required", http.StatusBadRequest)
 		return
 	}
@@ -1043,6 +1067,7 @@ func (h *browserHandler) serveAPIMv(w http.ResponseWriter, r *http.Request) {
 			os.MkdirAll(filepath.Dir(newLocal), 0755)
 			os.Rename(oldLocal, newLocal)
 		}
+		h.engine.DB().InsertActivity("move", src, dst) //nolint:errcheck
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"status":"ok","src":%q,"dst":%q,"type":"dir"}`, src, dst)
 		return
@@ -1068,6 +1093,7 @@ func (h *browserHandler) serveAPIMv(w http.ResponseWriter, r *http.Request) {
 		os.MkdirAll(filepath.Dir(newLocal), 0755)
 		os.Rename(oldLocal, newLocal)
 	}
+	h.engine.DB().InsertActivity("move", src, dst) //nolint:errcheck
 	w.Header().Set("Content-Type", "application/json")
 	fmt.Fprintf(w, `{"status":"ok","src":%q,"dst":%q,"type":"file"}`, src, dst)
 }
@@ -1077,8 +1103,8 @@ func (h *browserHandler) serveAPIMkdir(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "POST required", http.StatusMethodNotAllowed)
 		return
 	}
-	p := path.Clean(r.URL.Query().Get("path"))
-	if p == "" || p == "." || p == "/" {
+	p := cleanPath(r.URL.Query().Get("path"))
+	if p == "/" {
 		http.Error(w, "path required", http.StatusBadRequest)
 		return
 	}
@@ -1093,13 +1119,14 @@ func (h *browserHandler) serveAPIMkdir(w http.ResponseWriter, r *http.Request) {
 	if h.syncDir != nil {
 		os.MkdirAll(filepath.Join(h.syncDir.Root(), p), 0755)
 	}
+	h.engine.DB().InsertActivity("mkdir", p, "") //nolint:errcheck
 	w.Header().Set("Content-Type", "application/json")
 	fmt.Fprintf(w, `{"status":"ok","path":%q}`, p)
 }
 
 func (h *browserHandler) serveAPIInfo(w http.ResponseWriter, r *http.Request) {
-	p := path.Clean(r.URL.Query().Get("path"))
-	if p == "" || p == "." {
+	p := cleanPath(r.URL.Query().Get("path"))
+	if p == "/" {
 		http.Error(w, "path required", http.StatusBadRequest)
 		return
 	}
@@ -1149,7 +1176,7 @@ func (h *browserHandler) serveAPIInfo(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *browserHandler) serveAPIDu(w http.ResponseWriter, r *http.Request) {
-	p := path.Clean(r.URL.Query().Get("path"))
+	p := cleanPath(r.URL.Query().Get("path"))
 	if p == "" || p == "." {
 		p = "/"
 	}
@@ -1191,8 +1218,8 @@ func (h *browserHandler) serveAPIHealth(w http.ResponseWriter, _ *http.Request) 
 }
 
 func (h *browserHandler) serveAPIDownload(w http.ResponseWriter, r *http.Request) {
-	p := path.Clean(r.URL.Query().Get("path"))
-	if p == "" || p == "." || p == "/" {
+	p := cleanPath(r.URL.Query().Get("path"))
+	if p == "/" {
 		http.Error(w, "path required", http.StatusBadRequest)
 		return
 	}
@@ -1214,7 +1241,82 @@ func (h *browserHandler) serveAPIDownload(w http.ResponseWriter, r *http.Request
 	}()
 
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename=%q`, path.Base(p)))
+	h.engine.DB().InsertActivity("download", p, "") //nolint:errcheck
 	http.ServeContent(w, r, path.Base(p), time.Unix(file.ModifiedAt, 0), tmp)
+}
+
+func (h *browserHandler) serveAPIUpload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseMultipartForm(64 << 20); err != nil {
+		http.Error(w, "invalid multipart form: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	dir := cleanPath(r.FormValue("dir"))
+	if dir == "" || dir == "." {
+		dir = "/"
+	}
+
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		http.Error(w, "file field required: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	// Sanitise the filename — strip any directory components to prevent
+	// path injection via a crafted multipart Content-Disposition header.
+	baseName := filepath.Base(header.Filename)
+	if baseName == "." || baseName == "/" || baseName == "" {
+		http.Error(w, "invalid filename", http.StatusBadRequest)
+		return
+	}
+	virtualPath := path.Join(dir, baseName)
+
+	if err := h.engine.WriteFileStream(virtualPath, file, header.Size); err != nil {
+		http.Error(w, "upload failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	h.engine.DB().InsertActivity("upload", virtualPath, fmt.Sprintf("%d bytes", header.Size)) //nolint:errcheck
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprintf(w, `{"status":"ok","path":%q,"size":%d}`, virtualPath, header.Size)
+}
+
+func (h *browserHandler) serveAPIVerify(w http.ResponseWriter, r *http.Request) {
+	p := cleanPath(r.URL.Query().Get("path"))
+	if p == "/" {
+		http.Error(w, "path required", http.StatusBadRequest)
+		return
+	}
+
+	tmp, err := h.engine.ReadFileToTempFile(p)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, `{"path":%q,"ok":false,"error":%q}`, p, err.Error())
+		return
+	}
+	tmp.Close()
+	os.Remove(tmp.Name())
+
+	h.engine.DB().InsertActivity("verify", p, "integrity check passed") //nolint:errcheck
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprintf(w, `{"path":%q,"ok":true}`, p)
+}
+
+func (h *browserHandler) serveAPIActivity(w http.ResponseWriter, r *http.Request) {
+	entries, err := h.engine.DB().RecentActivity(100)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if entries == nil {
+		entries = []metadata.ActivityEntry{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(entries) //nolint:errcheck
 }
 
 func (h *browserHandler) serveBrowser(w http.ResponseWriter, r *http.Request) {
