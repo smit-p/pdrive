@@ -50,6 +50,30 @@ type Provider struct {
 	RateLimitedUntil *int64
 }
 
+// GetProviderChunkBytes returns the total encrypted bytes pdrive has stored on
+// each provider, keyed by provider ID.
+func (db *DB) GetProviderChunkBytes() (map[string]int64, error) {
+	rows, err := db.conn.Query(`
+		SELECT cl.provider_id, COALESCE(SUM(c.encrypted_size), 0)
+		FROM chunk_locations cl
+		JOIN chunks c ON c.id = cl.chunk_id
+		GROUP BY cl.provider_id`)
+	if err != nil {
+		return nil, fmt.Errorf("querying provider chunk bytes: %w", err)
+	}
+	defer rows.Close()
+	out := make(map[string]int64)
+	for rows.Next() {
+		var providerID string
+		var bytes int64
+		if err := rows.Scan(&providerID, &bytes); err != nil {
+			return nil, err
+		}
+		out[providerID] = bytes
+	}
+	return out, rows.Err()
+}
+
 // InsertFile inserts a new file record.
 func (db *DB) InsertFile(f *File) error {
 	state := f.UploadState
@@ -658,4 +682,77 @@ func (db *DB) GetChunkLocationsByProvider(providerID string) ([]ChunkLocation, e
 		locs = append(locs, cl)
 	}
 	return locs, rows.Err()
+}
+
+// SearchFiles returns all completed files whose virtual_path contains the
+// given pattern (case-insensitive LIKE match) under the specified root.
+func (db *DB) SearchFiles(root, pattern string) ([]File, error) {
+	if !strings.HasSuffix(root, "/") {
+		root += "/"
+	}
+	likePattern := "%" + pattern + "%"
+	rows, err := db.conn.Query(
+		`SELECT id, virtual_path, size_bytes, created_at, modified_at, sha256_full, upload_state, tmp_path
+		 FROM files
+		 WHERE virtual_path LIKE ? || '%'
+		   AND upload_state = 'complete'
+		   AND virtual_path LIKE ?`, root, likePattern,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var files []File
+	for rows.Next() {
+		var f File
+		if err := rows.Scan(&f.ID, &f.VirtualPath, &f.SizeBytes, &f.CreatedAt, &f.ModifiedAt, &f.SHA256Full, &f.UploadState, &f.TmpPath); err != nil {
+			return nil, err
+		}
+		files = append(files, f)
+	}
+	return files, rows.Err()
+}
+
+// ListAllFiles returns all completed files under root, recursively.
+func (db *DB) ListAllFiles(root string) ([]File, error) {
+	if !strings.HasSuffix(root, "/") {
+		root += "/"
+	}
+	rows, err := db.conn.Query(
+		`SELECT id, virtual_path, size_bytes, created_at, modified_at, sha256_full, upload_state, tmp_path
+		 FROM files
+		 WHERE virtual_path LIKE ? || '%'
+		   AND upload_state = 'complete'
+		 ORDER BY virtual_path`, root,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var files []File
+	for rows.Next() {
+		var f File
+		if err := rows.Scan(&f.ID, &f.VirtualPath, &f.SizeBytes, &f.CreatedAt, &f.ModifiedAt, &f.SHA256Full, &f.UploadState, &f.TmpPath); err != nil {
+			return nil, err
+		}
+		files = append(files, f)
+	}
+	return files, rows.Err()
+}
+
+// DiskUsage returns (file_count, total_bytes) for all completed files under root.
+func (db *DB) DiskUsage(root string) (int64, int64, error) {
+	if !strings.HasSuffix(root, "/") {
+		root += "/"
+	}
+	var count, total int64
+	err := db.conn.QueryRow(
+		`SELECT COUNT(*), COALESCE(SUM(size_bytes), 0)
+		 FROM files
+		 WHERE virtual_path LIKE ? || '%'
+		   AND upload_state = 'complete'`, root,
+	).Scan(&count, &total)
+	return count, total, err
 }

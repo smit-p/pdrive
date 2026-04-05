@@ -12,6 +12,10 @@
 *.swo
 *~
 
+# Test / coverage artifacts
+*.out
+*.html
+
 # OS
 .DS_Store
 Thumbs.db

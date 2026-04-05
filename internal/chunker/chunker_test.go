@@ -2,9 +2,11 @@ package chunker
 
 import (
 	"bytes"
+	"crypto/aes"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -379,5 +381,343 @@ func TestAssemble_Empty(t *testing.T) {
 	got, _ := io.ReadAll(r)
 	if len(got) != 0 {
 		t.Errorf("expected empty output, got %d bytes", len(got))
+	}
+}
+
+// --- Argon2id KDF tests ---
+
+func TestDeriveKey_Deterministic(t *testing.T) {
+	salt := make([]byte, SaltSize)
+	copy(salt, "fixed-test-salt!")
+	k1 := DeriveKey("hunter2", salt)
+	k2 := DeriveKey("hunter2", salt)
+	if !bytes.Equal(k1, k2) {
+		t.Fatal("same password+salt must produce identical keys")
+	}
+}
+
+func TestDeriveKey_Length(t *testing.T) {
+	salt := make([]byte, SaltSize)
+	key := DeriveKey("some-password", salt)
+	if len(key) != 32 {
+		t.Fatalf("expected 32-byte key, got %d", len(key))
+	}
+}
+
+func TestDeriveKey_DifferentPasswords(t *testing.T) {
+	salt := make([]byte, SaltSize)
+	k1 := DeriveKey("password-a", salt)
+	k2 := DeriveKey("password-b", salt)
+	if bytes.Equal(k1, k2) {
+		t.Fatal("different passwords must produce different keys")
+	}
+}
+
+func TestDeriveKey_DifferentSalts(t *testing.T) {
+	s1 := make([]byte, SaltSize)
+	s2 := make([]byte, SaltSize)
+	s2[0] = 0xFF
+	k1 := DeriveKey("same-password", s1)
+	k2 := DeriveKey("same-password", s2)
+	if bytes.Equal(k1, k2) {
+		t.Fatal("different salts must produce different keys")
+	}
+}
+
+func TestGenerateSalt_Length(t *testing.T) {
+	salt, err := GenerateSalt()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(salt) != SaltSize {
+		t.Fatalf("expected %d-byte salt, got %d", SaltSize, len(salt))
+	}
+}
+
+func TestGenerateSalt_Unique(t *testing.T) {
+	s1, _ := GenerateSalt()
+	s2, _ := GenerateSalt()
+	if bytes.Equal(s1, s2) {
+		t.Fatal("two GenerateSalt calls should produce different salts")
+	}
+}
+
+func TestPasswordDerivedKey_EncryptRoundtrip(t *testing.T) {
+	salt, _ := GenerateSalt()
+	key := DeriveKey("correct horse battery staple", salt)
+	plaintext := []byte("top secret data")
+
+	ct, err := Encrypt(key, plaintext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := Decrypt(key, ct)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, plaintext) {
+		t.Fatal("round-trip mismatch")
+	}
+
+	// Wrong password can't decrypt.
+	badKey := DeriveKey("wrong password", salt)
+	if _, err := Decrypt(badKey, ct); err == nil {
+		t.Fatal("expected decryption failure with wrong password-derived key")
+	}
+}
+
+// ── additional coverage tests ────────────────────────────────────────────────
+
+// TestSplit_DefaultChunkSize verifies Split uses DefaultChunkSize when given 0.
+func TestSplit_DefaultChunkSize(t *testing.T) {
+	data := []byte("small")
+	chunks, err := Split(bytes.NewReader(data), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chunks) != 1 {
+		t.Fatalf("expected 1 chunk, got %d", len(chunks))
+	}
+	if chunks[0].Size != len(data) {
+		t.Errorf("expected size %d, got %d", len(data), chunks[0].Size)
+	}
+}
+
+// TestSplit_NegativeChunkSize verifies Split treats negative chunkSize as default.
+func TestSplit_NegativeChunkSize(t *testing.T) {
+	data := []byte("tiny")
+	chunks, err := Split(bytes.NewReader(data), -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chunks) != 1 {
+		t.Fatalf("expected 1 chunk, got %d", len(chunks))
+	}
+}
+
+// TestSplit_ReaderError verifies Split propagates reader errors.
+func TestSplit_ReaderError(t *testing.T) {
+	r := &errReader{err: io.ErrClosedPipe, afterN: 5}
+	_, err := Split(r, 10)
+	if err == nil {
+		t.Fatal("expected error from Split")
+	}
+}
+
+type errReader struct {
+	err    error
+	afterN int
+	n      int
+}
+
+func (r *errReader) Read(p []byte) (int, error) {
+	if r.n >= r.afterN {
+		return 0, r.err
+	}
+	n := len(p)
+	if n > r.afterN-r.n {
+		n = r.afterN - r.n
+	}
+	r.n += n
+	return n, nil
+}
+
+// TestNewChunkReader_DefaultChunkSize tests NewChunkReader with 0 chunkSize.
+func TestNewChunkReader_DefaultChunkSize(t *testing.T) {
+	cr := NewChunkReader(bytes.NewReader([]byte("hello")), 0)
+	if cr.chunkSize != DefaultChunkSize {
+		t.Errorf("expected chunkSize=%d, got %d", DefaultChunkSize, cr.chunkSize)
+	}
+}
+
+// TestChunkReader_MultiChunk tests ChunkReader returning multiple chunks.
+func TestChunkReader_MultiChunk_Partial(t *testing.T) {
+	data := []byte("0123456789abcdef") // 16 bytes
+	cr := NewChunkReader(bytes.NewReader(data), 5)
+	var chunks []*Chunk
+	for {
+		c, err := cr.Next()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c == nil {
+			break
+		}
+		chunks = append(chunks, c)
+	}
+	// 16/5 = 3 full + 1 partial = 4 chunks (sizes: 5, 5, 5, 1)
+	if len(chunks) != 4 {
+		t.Fatalf("expected 4 chunks, got %d", len(chunks))
+	}
+	if chunks[3].Size != 1 {
+		t.Errorf("last chunk size: expected 1, got %d", chunks[3].Size)
+	}
+}
+
+// TestChunkReader_ReaderError tests ChunkReader error propagation.
+func TestChunkReader_ReaderError(t *testing.T) {
+	r := &errReader{err: io.ErrClosedPipe, afterN: 3}
+	cr := NewChunkReader(r, 10)
+	_, err := cr.Next()
+	if err == nil {
+		t.Fatal("expected error from ChunkReader.Next")
+	}
+}
+
+// TestChunkReader_Empty tests ChunkReader on empty input.
+func TestChunkReader_EmptyInput(t *testing.T) {
+	cr := NewChunkReader(bytes.NewReader(nil), 10)
+	c, err := cr.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c != nil {
+		t.Error("expected nil chunk for empty reader")
+	}
+}
+
+// TestAssemble_SequenceGap_NonContiguous tests that non-contiguous sequences cause an error.
+func TestAssemble_SequenceGap_NonContiguous(t *testing.T) {
+	h := sha256.Sum256([]byte("data"))
+	hx := hex.EncodeToString(h[:])
+	chunks := []DecryptedChunk{
+		{Sequence: 0, Data: []byte("data"), SHA256: hx},
+		{Sequence: 2, Data: []byte("data"), SHA256: hx}, // gap: missing 1
+	}
+	_, err := Assemble(chunks)
+	if err == nil {
+		t.Fatal("expected sequence gap error")
+	}
+	if !strings.Contains(err.Error(), "gap") {
+		t.Errorf("expected 'gap' in error, got: %s", err)
+	}
+}
+
+// TestAssemble_HashMismatch_Corruption tests that hash verification catches corruption.
+func TestAssemble_HashMismatch_Corruption(t *testing.T) {
+	chunks := []DecryptedChunk{
+		{Sequence: 0, Data: []byte("real"), SHA256: "badhash"},
+	}
+	_, err := Assemble(chunks)
+	if err == nil {
+		t.Fatal("expected hash mismatch error")
+	}
+	if !strings.Contains(err.Error(), "mismatch") {
+		t.Errorf("expected 'mismatch' in error, got: %s", err)
+	}
+}
+
+// TestAssemble_NilSlice tests assembling nil chunks.
+func TestAssemble_NilSlice(t *testing.T) {
+	r, err := Assemble(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := io.ReadAll(r)
+	if len(data) != 0 {
+		t.Errorf("expected empty, got %d bytes", len(data))
+	}
+}
+
+// TestEncrypt_BadKey tests Encrypt with an invalid key size.
+func TestEncrypt_BadKey(t *testing.T) {
+	_, err := Encrypt([]byte("short"), []byte("data"))
+	if err == nil {
+		t.Fatal("expected error for short key")
+	}
+}
+
+// TestDecrypt_BadKey tests Decrypt with an invalid key size.
+func TestDecrypt_BadKey(t *testing.T) {
+	// Create minimal valid-looking blob (nonce + something)
+	blob := make([]byte, NonceSize+aes.BlockSize+1)
+	_, err := Decrypt([]byte("short"), blob)
+	if err == nil {
+		t.Fatal("expected error for short key")
+	}
+}
+
+// TestDecrypt_TooShort tests Decrypt with blob shorter than minimum.
+func TestDecrypt_TooShort(t *testing.T) {
+	key := make([]byte, 32)
+	_, err := Decrypt(key, []byte("tiny"))
+	if err == nil {
+		t.Fatal("expected error for too-short blob")
+	}
+}
+
+// TestChunkSizeForFile_Negative tests negative file size.
+func TestChunkSizeForFile_Negative(t *testing.T) {
+	s := ChunkSizeForFile(-1)
+	if s != DefaultChunkSize {
+		t.Errorf("expected DefaultChunkSize, got %d", s)
+	}
+}
+
+// TestChunkSizeForFile_VeryLarge tests capping at MaxChunkSize.
+func TestChunkSizeForFile_VeryLarge(t *testing.T) {
+	s := ChunkSizeForFile(10 * 1024 * 1024 * 1024) // 10 GB
+	if s != MaxChunkSize {
+		t.Errorf("expected MaxChunkSize (%d), got %d", MaxChunkSize, s)
+	}
+}
+
+// TestChunkReader_ReaderError_ZeroBytes tests error when reader returns 0 bytes
+// with a non-EOF error — exercises the n==0, non-EOF branch in Next.
+func TestChunkReader_ReaderError_ZeroBytes(t *testing.T) {
+	r := &errReader{err: io.ErrClosedPipe, afterN: 0}
+	cr := NewChunkReader(r, 10)
+	_, err := cr.Next()
+	if err == nil {
+		t.Fatal("expected error from ChunkReader.Next with zero-byte error reader")
+	}
+	if err != io.ErrClosedPipe {
+		t.Errorf("expected ErrClosedPipe, got %v", err)
+	}
+}
+
+// TestChunkReader_PartialReadError tests that Next returns error (not chunk)
+// when partial read + non-EOF error happens mid-chunk.
+func TestChunkReader_PartialReadError(t *testing.T) {
+	r := &errReader{err: fmt.Errorf("disk failure"), afterN: 5}
+	cr := NewChunkReader(r, 10)
+	c, err := cr.Next()
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if c != nil {
+		t.Error("expected nil chunk on error")
+	}
+}
+
+// TestEncrypt_EmptyPlaintext tests encryption of empty data.
+func TestEncrypt_EmptyPlaintext(t *testing.T) {
+	key := make([]byte, 32)
+	ct, err := Encrypt(key, []byte{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pt, err := Decrypt(key, ct)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pt) != 0 {
+		t.Errorf("expected empty, got %d bytes", len(pt))
+	}
+}
+
+func TestEncrypt_InvalidKeyLength(t *testing.T) {
+	_, err := Encrypt([]byte("short"), []byte("data"))
+	if err == nil {
+		t.Fatal("expected error for invalid key length")
+	}
+}
+
+func TestDecrypt_InvalidKeyLength(t *testing.T) {
+	// Need valid-looking ciphertext (at least NonceSize+BlockSize bytes).
+	blob := make([]byte, NonceSize+aes.BlockSize+1)
+	_, err := Decrypt([]byte("short"), blob)
+	if err == nil {
+		t.Fatal("expected error for invalid key length")
 	}
 }

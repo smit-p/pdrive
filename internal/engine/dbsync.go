@@ -2,14 +2,43 @@ package engine
 
 import (
 	"bytes"
+	"encoding/binary"
+	"fmt"
 	"log/slog"
 	"os"
 	"path"
 	"strings"
 	"time"
+
+	"github.com/smit-p/pdrive/internal/chunker"
 )
 
-const dbSyncRemotePath = "pdrive-meta/metadata.db"
+const dbSyncRemotePath = "pdrive-meta/metadata.db.enc"
+
+// backupHeader is a 16-byte header prepended to the plaintext before encryption.
+// Layout: [8-byte magic "pdriveDB"] [8-byte Unix timestamp (big-endian nanoseconds)]
+// This lets restore pick the newest backup across providers.
+var backupMagic = [8]byte{'p', 'd', 'r', 'i', 'v', 'e', 'D', 'B'}
+
+func makeBackupPayload(dbData []byte) []byte {
+	hdr := make([]byte, 16)
+	copy(hdr[:8], backupMagic[:])
+	binary.BigEndian.PutUint64(hdr[8:16], uint64(time.Now().UnixNano()))
+	return append(hdr, dbData...)
+}
+
+func parseBackupPayload(plain []byte) (timestamp int64, dbData []byte, ok bool) {
+	if len(plain) < 16 {
+		return 0, nil, false
+	}
+	for i := 0; i < 8; i++ {
+		if plain[i] != backupMagic[i] {
+			return 0, nil, false
+		}
+	}
+	ts := int64(binary.BigEndian.Uint64(plain[8:16]))
+	return ts, plain[16:], true
+}
 
 // scheduleBackup debounces metadata DB backup: waits 30s after the last mutation.
 func (e *Engine) scheduleBackup() {
@@ -42,11 +71,13 @@ func (e *Engine) FlushBackup() {
 	}
 }
 
-// BackupDB uploads the metadata database to ALL configured cloud providers.
-// Having a copy on every provider ensures it can be restored after a total
-// loss of one account.
+// BackupDB uploads an encrypted copy of the metadata database to ALL
+// configured cloud providers. The payload is AES-256-GCM encrypted with the
+// same key used for chunk encryption, and includes a nanosecond timestamp so
+// that restore can pick the newest copy. Having a copy on every provider
+// ensures it can be restored after a total loss of one account.
 func (e *Engine) BackupDB() error {
-	if e.dbPath == "" {
+	if e.dbPath == "" || len(e.encKey) == 0 {
 		return nil
 	}
 	providers, err := e.db.GetAllProviders()
@@ -64,15 +95,35 @@ func (e *Engine) BackupDB() error {
 		return err
 	}
 
+	payload := makeBackupPayload(data)
+	encrypted, err := chunker.Encrypt(e.encKey, payload)
+	if err != nil {
+		return fmt.Errorf("encrypting metadata backup: %w", err)
+	}
+
 	var lastErr error
 	for _, provider := range providers {
-		if err := e.rc.PutFile(provider.RcloneRemote, dbSyncRemotePath, bytes.NewReader(data)); err != nil {
+		if err := e.rc.PutFile(provider.RcloneRemote, dbSyncRemotePath, bytes.NewReader(encrypted)); err != nil {
 			slog.Warn("metadata DB backup failed", "provider", provider.DisplayName, "error", err)
 			lastErr = err
 			continue
 		}
-		slog.Info("metadata DB backed up to cloud", "provider", provider.DisplayName, "size", len(data))
+		slog.Info("metadata DB backed up to cloud (encrypted)", "provider", provider.DisplayName, "size", len(encrypted))
 	}
+
+	// Upload Argon2id salt (if password-based encryption) so a new machine
+	// can derive the same key.  The salt is public by design; security
+	// depends on the password strength, not salt secrecy.
+	if e.saltPath != "" {
+		if salt, err := os.ReadFile(e.saltPath); err == nil && len(salt) > 0 {
+			for _, provider := range providers {
+				if err := e.rc.PutFile(provider.RcloneRemote, "pdrive-meta/enc.salt", bytes.NewReader(salt)); err != nil {
+					slog.Debug("salt upload failed", "provider", provider.DisplayName, "error", err)
+				}
+			}
+		}
+	}
+
 	return lastErr
 }
 

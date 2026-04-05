@@ -94,6 +94,9 @@ func (s *SyncDir) Start(ctx context.Context) error {
 
 // Stop tears down the watcher and cancels pending uploads.
 func (s *SyncDir) Stop() {
+	if s.cancel == nil {
+		return
+	}
 	s.cancel()
 	if s.watcher != nil {
 		s.watcher.Close()
@@ -171,6 +174,9 @@ func (s *SyncDir) handleEvent(ev fsnotify.Event) {
 			return
 		}
 		if info.IsDir() {
+			if shouldSkipDir(filepath.Base(absPath)) {
+				return
+			}
 			s.watcher.Add(absPath)
 			s.engine.MkDir(vp + "/")
 			slog.Info("sync: dir created", "path", vp)
@@ -375,9 +381,6 @@ func (s *SyncDir) initialSync() {
 		if existing == nil {
 			slog.Info("sync: uploading local-only file", "path", vp)
 			s.upload(p, vp)
-		} else {
-			// Mark existing local files with green Finder tag.
-			setFinderTag(p, "Local", finderColorGreen)
 		}
 		return nil
 	})

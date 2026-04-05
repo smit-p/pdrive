@@ -1,8 +1,8 @@
 package main
 
 import (
+	"bufio"
 	"context"
-	crypto_rand "crypto/rand"
 	"encoding/hex"
 	"flag"
 	"fmt"
@@ -16,45 +16,12 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
-	"text/template"
+	"time"
 
+	"github.com/smit-p/pdrive/internal/chunker"
 	"github.com/smit-p/pdrive/internal/daemon"
+	"golang.org/x/term"
 )
-
-const launchAgentLabel = "com.smit.pdrive"
-
-const (
-	qaWorkflowPinName   = "pdrive Pin to Local"
-	qaWorkflowUnpinName = "pdrive Free Up Space"
-)
-
-// launchAgentPlist is the launchd plist template for auto-restart on macOS.
-var launchAgentPlist = template.Must(template.New("plist").Parse(`<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-	<key>Label</key>
-	<string>{{.Label}}</string>
-	<key>ProgramArguments</key>
-	<array>
-		<string>{{.BinPath}}</string>
-		{{- range .Args}}
-		<string>{{.}}</string>
-		{{- end}}
-	</array>
-	<key>KeepAlive</key>
-	<true/>
-	<key>RunAtLoad</key>
-	<true/>
-	<key>StandardOutPath</key>
-	<string>{{.LogPath}}</string>
-	<key>StandardErrorPath</key>
-	<string>{{.LogPath}}</string>
-	<key>ThrottleInterval</key>
-	<integer>10</integer>
-</dict>
-</plist>
-`))
 
 func main() {
 	homeDir, err := os.UserHomeDir()
@@ -64,31 +31,23 @@ func main() {
 	}
 	defaultConfigDir := filepath.Join(homeDir, ".pdrive")
 
+	flag.Usage = func() { printCLIUsage() }
+
 	configDir := flag.String("config-dir", defaultConfigDir, "Configuration directory")
 	syncDir := flag.String("sync-dir", filepath.Join(homeDir, "pdrive"), "Local folder to sync (like Dropbox); empty disables sync")
 	rcloneAddr := flag.String("rclone-addr", "127.0.0.1:5572", "rclone RC address")
 	webdavAddr := flag.String("webdav-addr", "127.0.0.1:8765", "HTTP API/WebDAV address")
 	rcloneBinFlag := flag.String("rclone-bin", "", "Absolute path to rclone binary (auto-detected if empty)")
-	encKeyHex := flag.String("enc-key", "", "Encryption key (64-char hex string for AES-256). If empty, uses a test key.")
+	encKeyHex := flag.String("enc-key", "", "Encryption key (64-char hex string for AES-256); legacy, prefer --password")
+	password := flag.String("password", "", "Encryption password (derives AES-256 key via Argon2id)")
 	brokerPolicy := flag.String("broker-policy", "pfrd", "Chunk placement policy: pfrd (weighted random by free space) or mfs (most free space)")
 	minFreeSpace := flag.Int64("min-free-space", 256*1024*1024, "Minimum free space (bytes) to keep on each provider (default 256 MB)")
 	skipRestore := flag.Bool("skip-restore", false, "Skip restoring metadata DB from cloud on startup (use after a manual wipe)")
 	chunkSize := flag.Int("chunk-size", 0, "Override chunk size in bytes (e.g. 67108864 for 64 MB); 0 uses dynamic sizing")
 	rateLimit := flag.Int("rate-limit", 0, "API rate limit in requests per second (default 8)")
 	debug := flag.Bool("debug", false, "Enable debug logging")
-	install := flag.Bool("install", false, "Install pdrive as a launchd service (macOS) that auto-restarts on crash/reboot")
-	uninstall := flag.Bool("uninstall", false, "Remove the launchd service installed by --install")
+	foreground := flag.Bool("foreground", false, "Run daemon in the foreground instead of backgrounding (useful with systemd or for debugging)")
 	flag.Parse()
-
-	// Handle --uninstall before anything else.
-	if *uninstall {
-		if err := uninstallLaunchAgent(homeDir); err != nil {
-			fmt.Fprintf(os.Stderr, "uninstall failed: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Println("pdrive launchd service removed.")
-		return
-	}
 
 	// Configure logging.
 	logLevel := slog.LevelInfo
@@ -97,56 +56,212 @@ func main() {
 	}
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel})))
 
-	// Handle subcommands: pin / unpin — do this early, before any rclone lookup,
-	// because pin/unpin are pure HTTP API calls and don't need rclone at all.
-	// This is critical: Services/Quick Actions run with a stripped PATH that
-	// doesn't include /opt/homebrew/bin, so rclone lookup would fail here.
+	// Handle subcommands early, before any rclone lookup — these are all pure
+	// HTTP calls to the running daemon and don't need rclone.
 	if args := flag.Args(); len(args) > 0 {
 		switch args[0] {
 		case "pin", "unpin":
 			if len(args) < 2 {
-				fmt.Fprintf(os.Stderr, "Usage: pdrive %s <path>\n", args[0])
+				fmt.Fprintf(os.Stderr, "Usage: pdrive %s <path|number>\n", args[0])
 				os.Exit(1)
 			}
-			runPinUnpin(*webdavAddr, args[0], args[1:])
+			runPinUnpin(*webdavAddr, *configDir, args[0], args[1:])
+			return
+		case "ls":
+			runLs(*webdavAddr, *configDir, args[1:])
+			return
+		case "browse":
+			runBrowse(*webdavAddr, *configDir)
+			return
+		case "status":
+			runStatus(*webdavAddr)
+			return
+		case "uploads":
+			runUploads(*webdavAddr)
+			return
+		case "health":
+			runHealth(*webdavAddr)
+			return
+		case "metrics":
+			runMetrics(*webdavAddr)
+			return
+		case "cat":
+			runCat(*webdavAddr, *configDir, args[1:])
+			return
+		case "get":
+			runGet(*webdavAddr, *configDir, args[1:])
+			return
+		case "rm":
+			if len(args) < 2 {
+				fmt.Fprintf(os.Stderr, "Usage: pdrive rm <path|number> [<path|number>...]\n")
+				os.Exit(1)
+			}
+			runRm(*webdavAddr, *configDir, args[1:])
+			return
+		case "tree":
+			runTree(*webdavAddr, *configDir, args[1:])
+			return
+		case "find":
+			if len(args) < 2 {
+				fmt.Fprintf(os.Stderr, "Usage: pdrive find <pattern> [path]\n")
+				os.Exit(1)
+			}
+			runFind(*webdavAddr, *configDir, args[1:])
+			return
+		case "mv":
+			if len(args) < 3 {
+				fmt.Fprintf(os.Stderr, "Usage: pdrive mv <src> <dst>\n")
+				os.Exit(1)
+			}
+			runMv(*webdavAddr, *configDir, args[1:])
+			return
+		case "mkdir":
+			if len(args) < 2 {
+				fmt.Fprintf(os.Stderr, "Usage: pdrive mkdir <path>\n")
+				os.Exit(1)
+			}
+			runMkdir(*webdavAddr, args[1:])
+			return
+		case "info":
+			if len(args) < 2 {
+				fmt.Fprintf(os.Stderr, "Usage: pdrive info <path|number>\n")
+				os.Exit(1)
+			}
+			runInfo(*webdavAddr, *configDir, args[1:])
+			return
+		case "du":
+			runDu(*webdavAddr, *configDir, args[1:])
+			return
+		case "stop":
+			stopDaemon(*configDir)
+			return
+		case "help":
+			printCLIUsage()
+			fmt.Fprintf(os.Stderr, "\nAll daemon flags:\n\n")
+			flag.CommandLine.SetOutput(os.Stderr)
+			flag.PrintDefaults()
 			return
 		default:
 			fmt.Fprintf(os.Stderr, "Unknown subcommand: %s\n", args[0])
+			fmt.Fprintln(os.Stderr)
+			printCLIUsage()
 			os.Exit(1)
 		}
 	}
 
+	// Daemonize: unless --foreground is set, re-exec as a detached background
+	// process then exit immediately. We pass --foreground to the child so it
+	// skips this block and runs directly. Using a flag (not an env var) avoids
+	// the risk of a leaked env var causing every invocation to skip daemonizing.
+	if !*foreground {
+		// Probe the API — if it responds the daemon is already running.
+		hc := &http.Client{Timeout: 2 * time.Second}
+		if resp, err := hc.Get("http://" + *webdavAddr + "/api/health"); err == nil {
+			resp.Body.Close()
+			fmt.Printf("pdrive daemon is already running at http://%s\n\n", *webdavAddr)
+			printCLIUsage()
+			return
+		}
+
+		if err := os.MkdirAll(*configDir, 0700); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		logPath := filepath.Join(*configDir, "daemon.log")
+		logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: opening log file: %v\n", err)
+			os.Exit(1)
+		}
+		exe, err := os.Executable()
+		if err != nil {
+			logFile.Close()
+			fmt.Fprintf(os.Stderr, "Error: resolving executable path: %v\n", err)
+			os.Exit(1)
+		}
+		// Re-exec self with --foreground so the child skips this daemonize block.
+		childArgs := make([]string, len(os.Args[1:]))
+		copy(childArgs, os.Args[1:])
+		childArgs = append(childArgs, "--foreground")
+		cmd := exec.Command(exe, childArgs...)
+		cmd.Env = os.Environ()
+		cmd.Stdout = logFile
+		cmd.Stderr = logFile
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+		if err := cmd.Start(); err != nil {
+			logFile.Close()
+			fmt.Fprintf(os.Stderr, "Error: failed to start daemon: %v\n", err)
+			os.Exit(1)
+		}
+		logFile.Close()
+		fmt.Printf("pdrive daemon started (PID %d)\n", cmd.Process.Pid)
+		fmt.Printf("  Logs: %s\n", logPath)
+		fmt.Printf("  Stop: pdrive stop\n")
+		return
+	}
+
 	// Resolve encryption key.
+	// Priority: --enc-key (raw hex) > --password (Argon2id) > existing salt file > existing key file > interactive prompt
+	// When a password is given but no local salt exists, we defer key derivation
+	// to the daemon (which will try to fetch the salt from cloud first).
 	var encKey []byte
-	if *encKeyHex != "" {
+	var deferredPassword string // set when key derivation is deferred to daemon
+	saltPath := filepath.Join(*configDir, "enc.salt")
+	keyPath := filepath.Join(*configDir, "enc.key")
+
+	switch {
+	case *encKeyHex != "":
+		// Legacy: raw 32-byte hex key.
 		var err error
 		encKey, err = hex.DecodeString(*encKeyHex)
 		if err != nil || len(encKey) != 32 {
 			fmt.Fprintf(os.Stderr, "Error: --enc-key must be a 64-character hex string (32 bytes)\n")
 			os.Exit(1)
 		}
-	} else {
-		// Auto-generate and persist a random AES-256 key on first run.
-		keyPath := filepath.Join(*configDir, "enc.key")
-		if data, err := os.ReadFile(keyPath); err == nil && len(data) == 32 {
+
+	case *password != "":
+		// Password given — derive immediately if local salt exists,
+		// otherwise defer to daemon for cloud salt lookup.
+		if salt, err := os.ReadFile(saltPath); err == nil && len(salt) == chunker.SaltSize {
+			encKey = chunker.DeriveKey(*password, salt)
+		} else {
+			deferredPassword = *password
+		}
+
+	default:
+		// Auto-detect: try salt file first (password-derived), then legacy key file.
+		if salt, err := os.ReadFile(saltPath); err == nil && len(salt) == chunker.SaltSize {
+			// Salt exists but no password on CLI — prompt interactively.
+			fmt.Fprint(os.Stderr, "Enter pdrive password: ")
+			pw, err := readPassword()
+			if err != nil || pw == "" {
+				fmt.Fprintf(os.Stderr, "\nError: password required (salt file exists at %s)\n", saltPath)
+				os.Exit(1)
+			}
+			encKey = chunker.DeriveKey(pw, salt)
+		} else if data, err := os.ReadFile(keyPath); err == nil && len(data) == 32 {
+			// Legacy raw key file.
 			encKey = data
 		} else {
-			encKey = make([]byte, 32)
-			if _, err := crypto_rand.Read(encKey); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: failed to generate encryption key: %v\n", err)
+			// First run — prompt for a password.
+			fmt.Fprintln(os.Stderr, "No encryption key found. Set up a password for pdrive.")
+			fmt.Fprintln(os.Stderr, "This password encrypts all your data. Remember it — it cannot be recovered.")
+			fmt.Fprintln(os.Stderr)
+			fmt.Fprint(os.Stderr, "Enter new password: ")
+			pw1, err := readPassword()
+			if err != nil || len(pw1) < 8 {
+				fmt.Fprintf(os.Stderr, "\nError: password must be at least 8 characters\n")
 				os.Exit(1)
 			}
-			if err := os.MkdirAll(*configDir, 0700); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: failed to create config directory: %v\n", err)
+			fmt.Fprint(os.Stderr, "\nConfirm password: ")
+			pw2, _ := readPassword()
+			if pw1 != pw2 {
+				fmt.Fprintf(os.Stderr, "\nError: passwords do not match\n")
 				os.Exit(1)
 			}
-			if err := os.WriteFile(keyPath, encKey, 0600); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: failed to save encryption key: %v\n", err)
-				os.Exit(1)
-			}
-			slog.Info("generated new encryption key", "path", keyPath)
-			fmt.Fprintf(os.Stderr, "Generated new AES-256 encryption key: %s\n", keyPath)
-			fmt.Fprintf(os.Stderr, "Back up this file! Without it, your data cannot be decrypted.\n")
+			fmt.Fprintln(os.Stderr)
+			// Defer to daemon — it will try cloud salt first, then generate fresh.
+			deferredPassword = pw1
 		}
 	}
 
@@ -162,24 +277,18 @@ func main() {
 			if _, err := os.Stat(bundled); err == nil {
 				rcloneBin = bundled
 			} else {
-				fmt.Fprintf(os.Stderr, "Error: rclone not found. Install it: brew install rclone\n")
+				fmt.Fprintf(os.Stderr, "Error: rclone not found in PATH. Install it from https://rclone.org/install/\n")
 				os.Exit(1)
 			}
 		}
 	}
 
-	// --install: copy binary to ~/.pdrive/bin/ and register a launchd agent.
-	if *install {
-		if err := installLaunchAgent(homeDir, *configDir, *syncDir, *webdavAddr, *rcloneAddr, *encKeyHex, *brokerPolicy, *minFreeSpace, *debug, rcloneBin); err != nil {
-			fmt.Fprintf(os.Stderr, "install failed: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Println("pdrive installed as launchd service. It will start now and restart automatically on crash or reboot.")
-		fmt.Printf("  Binary:        %s\n", filepath.Join(homeDir, ".pdrive", "bin", "pdrive"))
-		fmt.Printf("  Plist:         %s\n", launchAgentPlistPath(homeDir))
-		fmt.Printf("  Logs:          %s\n", filepath.Join(homeDir, ".pdrive", "daemon.log"))
-		fmt.Printf("  Quick Actions: right-click a file in ~/pdrive → Services → 'Pin to Local' or 'Free Up Space'\n")
-		return
+	// Write PID file so we can detect a running instance and support `pdrive stop`.
+	pidFile := filepath.Join(*configDir, "daemon.pid")
+	if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0600); err != nil {
+		slog.Warn("could not write PID file", "error", err)
+	} else {
+		defer os.Remove(pidFile)
 	}
 
 	cfg := daemon.Config{
@@ -189,6 +298,7 @@ func main() {
 		WebDAVAddr:   *webdavAddr,
 		SyncDir:      *syncDir,
 		EncKey:       encKey,
+		Password:     deferredPassword,
 		BrokerPolicy: *brokerPolicy,
 		MinFreeSpace: *minFreeSpace,
 		SkipRestore:  *skipRestore,
@@ -215,380 +325,62 @@ func main() {
 	d.Stop()
 }
 
-func launchAgentPlistPath(homeDir string) string {
-	return filepath.Join(homeDir, "Library", "LaunchAgents", launchAgentLabel+".plist")
-}
-
-// installLaunchAgent copies the current binary to ~/.pdrive/bin/pdrive,
-// writes a launchd plist, and loads the agent.
-func installLaunchAgent(homeDir, configDir, syncDir, webdavAddr, rcloneAddr, encKeyHex, brokerPolicy string, minFreeSpace int64, debug bool, rcloneBin string) error {
-	// Copy current binary to a persistent location.
-	binDir := filepath.Join(homeDir, ".pdrive", "bin")
-	if err := os.MkdirAll(binDir, 0700); err != nil {
-		return fmt.Errorf("creating bin dir: %w", err)
-	}
-	exePath, err := os.Executable()
+// readPidFile reads an integer PID from a file.
+func readPidFile(path string) (int, error) {
+	data, err := os.ReadFile(path)
 	if err != nil {
-		return fmt.Errorf("resolving executable path: %w", err)
+		return 0, err
 	}
-	destBin := filepath.Join(binDir, "pdrive")
-	if err := copyFile(exePath, destBin, 0755); err != nil {
-		return fmt.Errorf("copying binary: %w", err)
+	var pid int
+	if _, err := fmt.Sscan(strings.TrimSpace(string(data)), &pid); err != nil {
+		return 0, err
 	}
+	return pid, nil
+}
 
-	// Build the argument list for the plist (omit flags that have default values).
-	args := []string{
-		"--config-dir", configDir,
-		"--sync-dir", syncDir,
-		"--webdav-addr", webdavAddr,
-		"--rclone-addr", rcloneAddr,
-		// Always bake in the resolved rclone path so launchd doesn't need PATH.
-		"--rclone-bin", rcloneBin,
-	}
-	if encKeyHex != "" {
-		args = append(args, "--enc-key", encKeyHex)
-	}
-	if brokerPolicy != "" && brokerPolicy != "pfrd" {
-		args = append(args, "--broker-policy", brokerPolicy)
-	}
-	if minFreeSpace != 256*1024*1024 {
-		args = append(args, "--min-free-space", fmt.Sprintf("%d", minFreeSpace))
-	}
-	if debug {
-		args = append(args, "--debug")
-	}
-
-	logPath := filepath.Join(homeDir, ".pdrive", "daemon.log")
-
-	// Write plist file.
-	plistPath := launchAgentPlistPath(homeDir)
-	if err := os.MkdirAll(filepath.Dir(plistPath), 0755); err != nil {
-		return fmt.Errorf("creating LaunchAgents dir: %w", err)
-	}
-	f, err := os.Create(plistPath)
+// stopDaemon sends SIGTERM to the running daemon process.
+func stopDaemon(configDir string) {
+	pidFile := filepath.Join(configDir, "daemon.pid")
+	pid, err := readPidFile(pidFile)
 	if err != nil {
-		return fmt.Errorf("creating plist: %w", err)
+		fmt.Println("pdrive daemon is not running.")
+		return
 	}
-	defer f.Close()
-	type plistData struct {
-		Label   string
-		BinPath string
-		Args    []string
-		LogPath string
+	proc, err := os.FindProcess(pid)
+	if err != nil || proc.Signal(syscall.Signal(0)) != nil {
+		fmt.Println("pdrive daemon is not running.")
+		os.Remove(pidFile)
+		return
 	}
-	if err := launchAgentPlist.Execute(f, plistData{
-		Label:   launchAgentLabel,
-		BinPath: destBin,
-		Args:    args,
-		LogPath: logPath,
-	}); err != nil {
-		return fmt.Errorf("rendering plist: %w", err)
+	if err := proc.Signal(syscall.SIGTERM); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to stop daemon (PID %d): %v\n", pid, err)
+		os.Exit(1)
 	}
-	f.Close()
-
-	// Unload first in case it was previously loaded (ignore errors).
-	exec.Command("launchctl", "unload", plistPath).Run() //nolint:errcheck
-
-	// Load the agent.
-	if out, err := exec.Command("launchctl", "load", plistPath).CombinedOutput(); err != nil {
-		return fmt.Errorf("launchctl load: %w: %s", err, out)
-	}
-
-	// Install Finder Quick Actions for pin/unpin (non-fatal if it fails).
-	if err := installQuickActions(homeDir, syncDir); err != nil {
-		slog.Warn("could not install Finder Quick Actions", "error", err)
-	}
-	return nil
+	fmt.Printf("pdrive daemon stopped (PID %d)\n", pid)
 }
 
-// uninstallLaunchAgent unloads and removes the plist.
-func uninstallLaunchAgent(homeDir string) error {
-	plistPath := launchAgentPlistPath(homeDir)
-	// Unload (ignore error if not loaded).
-	exec.Command("launchctl", "unload", plistPath).Run() //nolint:errcheck
-	if err := os.Remove(plistPath); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("removing plist: %w", err)
+// readPassword reads a password from stdin. Hides input when stdin is a terminal.
+func readPassword() (string, error) {
+	fd := int(os.Stdin.Fd())
+	if term.IsTerminal(fd) {
+		pw, err := term.ReadPassword(fd)
+		return string(pw), err
 	}
-	uninstallQuickActions(homeDir) //nolint:errcheck
-	return nil
-}
-
-// copyFile copies src to dst with the given permissions.
-func copyFile(src, dst string, perm os.FileMode) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
+	// Non-interactive (pipe/redirect): read a line.
+	scanner := bufio.NewScanner(os.Stdin)
+	if scanner.Scan() {
+		return strings.TrimSpace(scanner.Text()), nil
 	}
-	defer in.Close()
-	// Write to a temp file in the same dir then rename for atomicity.
-	tmp := dst + ".tmp"
-	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, perm)
-	if err != nil {
-		return err
+	if err := scanner.Err(); err != nil {
+		return "", err
 	}
-	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
-		os.Remove(tmp)
-		return err
-	}
-	if err := out.Close(); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	return os.Rename(tmp, dst)
-}
-
-// installQuickActions writes two Automator Service workflow bundles to
-// ~/Library/Services/ so they appear in Finder's right-click Services menu.
-func installQuickActions(homeDir, syncDir string) error {
-	servicesDir := filepath.Join(homeDir, "Library", "Services")
-	if err := os.MkdirAll(servicesDir, 0755); err != nil {
-		return fmt.Errorf("creating Services dir: %w", err)
-	}
-
-	pdriveBin := filepath.Join(homeDir, ".pdrive", "bin", "pdrive")
-
-	pinScript := fmt.Sprintf(`PDRIVE=%q
-SYNC=%q
-while IFS= read -r f; do
-    vpath="${f#$SYNC}"
-    [ -n "$vpath" ] && "$PDRIVE" pin "$vpath"
-done`, pdriveBin, syncDir)
-
-	unpinScript := fmt.Sprintf(`PDRIVE=%q
-SYNC=%q
-while IFS= read -r f; do
-    vpath="${f#$SYNC}"
-    [ -n "$vpath" ] && "$PDRIVE" unpin "$vpath"
-done`, pdriveBin, syncDir)
-
-	workflows := []struct {
-		name   string
-		title  string
-		script string
-		uuid   string
-	}{
-		{qaWorkflowPinName, "pdrive: Pin to Local", pinScript, "A1B2C3D4-0001-0001-0001-000000000001"},
-		{qaWorkflowUnpinName, "pdrive: Free Up Space", unpinScript, "A1B2C3D4-0001-0001-0001-000000000002"},
-	}
-
-	for _, wf := range workflows {
-		contentsDir := filepath.Join(servicesDir, wf.name+".workflow", "Contents")
-		if err := os.MkdirAll(contentsDir, 0755); err != nil {
-			return fmt.Errorf("creating workflow dir: %w", err)
-		}
-		if err := writeWorkflowDoc(contentsDir, wf.script, wf.uuid); err != nil {
-			return err
-		}
-		if err := writeWorkflowInfo(contentsDir, wf.title); err != nil {
-			return err
-		}
-	}
-
-	// Restart the Pasteboard Server so macOS reloads the Services menu.
-	exec.Command("killall", "pbs").Run() //nolint:errcheck
-	return nil
-}
-
-// uninstallQuickActions removes the workflow bundles from ~/Library/Services/.
-func uninstallQuickActions(homeDir string) error {
-	servicesDir := filepath.Join(homeDir, "Library", "Services")
-	for _, name := range []string{qaWorkflowPinName, qaWorkflowUnpinName} {
-		p := filepath.Join(servicesDir, name+".workflow")
-		if err := os.RemoveAll(p); err != nil && !os.IsNotExist(err) {
-			return err
-		}
-	}
-	exec.Command("killall", "pbs").Run() //nolint:errcheck
-	return nil
-}
-
-// writeWorkflowDoc writes the Automator document.wflow XML for a Run Shell Script service.
-func writeWorkflowDoc(contentsDir, script, uuid string) error {
-	// %q-formatted paths in the script may contain backslashes on Windows but
-	// are always clean on macOS. We escape & and < for XML safety.
-	xmlScript := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(script)
-
-	content := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-	<key>AMApplicationBuild</key>
-	<string>521.1</string>
-	<key>AMApplicationVersion</key>
-	<string>2.10</string>
-	<key>AMDocumentVersion</key>
-	<string>2</string>
-	<key>actions</key>
-	<array>
-		<dict>
-			<key>action</key>
-			<dict>
-				<key>AMAccepts</key>
-				<dict>
-					<key>Container</key>
-					<string>List</string>
-					<key>Optional</key>
-					<true/>
-					<key>Types</key>
-					<array>
-						<string>com.apple.cocoa.path</string>
-					</array>
-				</dict>
-				<key>AMActionVersion</key>
-				<string>2.0.3</string>
-				<key>AMApplication</key>
-				<array>
-					<string>Finder</string>
-				</array>
-				<key>AMParameterProperties</key>
-				<dict>
-					<key>COMMAND_STRING</key>
-					<dict/>
-					<key>shell</key>
-					<dict/>
-					<key>source</key>
-					<dict/>
-				</dict>
-				<key>AMProvides</key>
-				<dict>
-					<key>Container</key>
-					<string>List</string>
-					<key>Types</key>
-					<array>
-						<string>com.apple.cocoa.path</string>
-					</array>
-				</dict>
-				<key>ActionBundlePath</key>
-				<string>/System/Library/Automator/Run Shell Script.action</string>
-				<key>ActionName</key>
-				<string>Run Shell Script</string>
-				<key>ActionParameters</key>
-				<dict>
-					<key>COMMAND_STRING</key>
-					<string>%s</string>
-					<key>CheckedForDefaults</key>
-					<true/>
-					<key>shell</key>
-					<string>/bin/bash</string>
-					<key>source</key>
-					<string>0</string>
-				</dict>
-				<key>BundleIdentifier</key>
-				<string>com.apple.RunShellScript</string>
-				<key>CFBundleVersion</key>
-				<string>2.0.3</string>
-				<key>CanShowSelectedItemsWhenRun</key>
-				<false/>
-				<key>CanShowWhenRun</key>
-				<true/>
-				<key>Category</key>
-				<array>
-					<string>AMCategoryUtilities</string>
-				</array>
-				<key>Class Name</key>
-				<string>RunShellScriptAction</string>
-				<key>InputUUID</key>
-				<string>77D5CEF2-9A51-4B27-A0C0-000000000001</string>
-				<key>Keywords</key>
-				<array>
-					<string>Shell</string>
-					<string>Script</string>
-					<string>Command</string>
-					<string>Run</string>
-					<string>Unix</string>
-				</array>
-				<key>OutputUUID</key>
-				<string>77D5CEF2-9A51-4B27-A0C0-000000000002</string>
-				<key>UUID</key>
-				<string>%s</string>
-				<key>UnlocalizedApplications</key>
-				<array>
-					<string>Automator</string>
-				</array>
-				<key>arguments</key>
-				<dict>
-					<key>0</key>
-					<dict>
-						<key>default value</key>
-						<string>do shell script ""</string>
-						<key>name</key>
-						<string>COMMAND_STRING</string>
-						<key>required</key>
-						<string>0</string>
-						<key>type</key>
-						<string>0</string>
-						<key>uuid</key>
-						<string>77D5CEF2-9A51-4B27-A0C0-000000000003</string>
-					</dict>
-				</dict>
-				<key>isViewVisible</key>
-				<integer>1</integer>
-				<key>location</key>
-				<string>309.000000:253.000000</string>
-			</dict>
-			<key>isViewVisible</key>
-			<integer>1</integer>
-		</dict>
-	</array>
-	<key>connectors</key>
-	<dict/>
-	<key>workflowMetaData</key>
-	<dict>
-		<key>serviceApplicationBundleID</key>
-		<string></string>
-		<key>serviceInputTypeIdentifier</key>
-		<string>com.apple.Automator.fileSystemObject</string>
-		<key>serviceOutputTypeIdentifier</key>
-		<string>com.apple.Automator.nothing</string>
-		<key>serviceProcessesInput</key>
-		<integer>0</integer>
-		<key>workflowTypeIdentifier</key>
-		<string>com.apple.Automator.servicesMenu</string>
-	</dict>
-</dict>
-</plist>`, xmlScript, uuid)
-
-	return os.WriteFile(filepath.Join(contentsDir, "document.wflow"), []byte(content), 0644)
-}
-
-// writeWorkflowInfo writes the Info.plist that names the item in the Services menu.
-func writeWorkflowInfo(contentsDir, menuTitle string) error {
-	content := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-	<key>NSServices</key>
-	<array>
-		<dict>
-			<key>NSMenuItem</key>
-			<dict>
-				<key>default</key>
-				<string>%s</string>
-			</dict>
-			<key>NSMessage</key>
-			<string>runWorkflowAsService</string>
-			<key>NSRequiredContext</key>
-			<dict>
-				<key>NSApplicationIdentifier</key>
-				<string>com.apple.finder</string>
-			</dict>
-			<key>NSSendFileTypes</key>
-			<array>
-				<string>public.item</string>
-				<string>public.folder</string>
-			</array>
-		</dict>
-	</array>
-</dict>
-</plist>`, menuTitle)
-
-	return os.WriteFile(filepath.Join(contentsDir, "Info.plist"), []byte(content), 0644)
+	return "", io.EOF
 }
 
 // runPinUnpin calls the running daemon's /api/pin or /api/unpin endpoint.
-func runPinUnpin(addr, action string, paths []string) {
+func runPinUnpin(addr, configDir, action string, paths []string) {
 	for _, p := range paths {
+		p = resolveLsArg(p, configDir).Path
 		if !strings.HasPrefix(p, "/") {
 			p = "/" + p
 		}

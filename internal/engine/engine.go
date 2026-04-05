@@ -81,6 +81,10 @@ type Engine struct {
 	backupTimer *time.Timer
 	backupMu    sync.Mutex
 
+	// saltPath is the local path to the Argon2id salt file (enc.salt).
+	// When set, BackupDB uploads the salt alongside the encrypted DB.
+	saltPath string
+
 	// Telemetry counters (atomic).
 	filesUploaded   atomic.Int64
 	filesDownloaded atomic.Int64
@@ -190,6 +194,10 @@ func (e *Engine) DB() *metadata.DB { return e.db }
 // SetChunkSize overrides the dynamic chunk-size calculation with a fixed value.
 // Pass 0 to revert to the default dynamic behaviour.
 func (e *Engine) SetChunkSize(bytes int) { e.overrideChunkSize = bytes }
+
+// SetSaltPath sets the local path to the Argon2id salt file.
+// When set, BackupDB also uploads the salt to every provider.
+func (e *Engine) SetSaltPath(p string) { e.saltPath = p }
 
 // SetMaxChunkRetries overrides the default retry count for chunk uploads.
 func (e *Engine) SetMaxChunkRetries(n int) { e.maxChunkRetries = n }
@@ -888,7 +896,12 @@ func (e *Engine) DeleteFile(virtualPath string) error {
 
 	slog.Info("file deleted", "path", virtualPath)
 	e.filesDeleted.Add(1)
-	e.scheduleBackup()
+	// Immediate backup — deletions are irreversible and must be synced ASAP.
+	go func() {
+		if err := e.BackupDB(); err != nil {
+			slog.Warn("post-delete backup failed", "error", err)
+		}
+	}()
 	return nil
 }
 
@@ -911,7 +924,7 @@ func (e *Engine) DeleteDir(dirPath string) error {
 		locs, _ := e.db.GetChunkLocationsForFile(f.ID)
 		allLocs = append(allLocs, locs...)
 		if err := e.db.DeleteFile(f.ID); err != nil {
-			slog.Warn("failed to delete file record", "file", f.VirtualPath, "error", err)
+			return fmt.Errorf("deleting file record %s: %w", f.VirtualPath, err)
 		}
 	}
 	if err := e.db.DeleteDirectoriesUnder(dirPath); err != nil {
@@ -924,7 +937,12 @@ func (e *Engine) DeleteDir(dirPath string) error {
 	}
 
 	slog.Info("directory deleted", "path", dirPath)
-	e.scheduleBackup()
+	// Immediate backup — deletions are irreversible and must be synced ASAP.
+	go func() {
+		if err := e.BackupDB(); err != nil {
+			slog.Warn("post-delete backup failed", "error", err)
+		}
+	}()
 	return nil
 }
 
@@ -1026,9 +1044,10 @@ func (e *Engine) IsDir(path string) (bool, error) {
 
 // StorageStatus holds aggregate storage statistics.
 type StorageStatus struct {
-	TotalFiles int64
-	TotalBytes int64
-	Providers  []metadata.Provider
+	TotalFiles    int64
+	TotalBytes    int64
+	Providers     []metadata.Provider
+	ProviderBytes map[string]int64 // encrypted bytes stored per provider ID
 }
 
 // StorageStatus returns total file count, total bytes stored, and per-provider quota info.
@@ -1041,10 +1060,15 @@ func (e *Engine) StorageStatus() (StorageStatus, error) {
 	if err != nil {
 		return StorageStatus{}, fmt.Errorf("getting providers: %w", err)
 	}
+	providerBytes, err := e.db.GetProviderChunkBytes()
+	if err != nil {
+		providerBytes = map[string]int64{}
+	}
 	return StorageStatus{
-		TotalFiles: totalFiles,
-		TotalBytes: totalBytes,
-		Providers:  providers,
+		TotalFiles:    totalFiles,
+		TotalBytes:    totalBytes,
+		Providers:     providers,
+		ProviderBytes: providerBytes,
 	}, nil
 }
 
@@ -1090,4 +1114,70 @@ func (e *Engine) RetryFailedDeletions() {
 		slog.Info("failed deletion retry complete",
 			"succeeded", succeeded, "retried", retried, "abandoned", abandoned)
 	}
+}
+
+// SearchFiles returns all completed files matching a pattern under the given root.
+func (e *Engine) SearchFiles(root, pattern string) ([]metadata.File, error) {
+	return e.db.SearchFiles(root, pattern)
+}
+
+// ListAllFiles returns all completed files under root, recursively.
+func (e *Engine) ListAllFiles(root string) ([]metadata.File, error) {
+	return e.db.ListAllFiles(root)
+}
+
+// DiskUsage returns (file_count, total_bytes) for all completed files under root.
+func (e *Engine) DiskUsage(root string) (int64, int64, error) {
+	return e.db.DiskUsage(root)
+}
+
+// FileInfo holds detailed information about a single file, including chunk distribution.
+type FileInfo struct {
+	File   metadata.File
+	Chunks []ChunkInfo
+}
+
+// ChunkInfo describes one chunk and where it's stored.
+type ChunkInfo struct {
+	Sequence      int
+	SizeBytes     int
+	EncryptedSize int
+	Providers     []string // provider display names
+}
+
+// GetFileInfo returns detailed metadata for a file, including chunk distribution.
+func (e *Engine) GetFileInfo(virtualPath string) (*FileInfo, error) {
+	f, err := e.db.GetFileByPath(virtualPath)
+	if err != nil || f == nil {
+		return nil, err
+	}
+	chunks, err := e.db.GetChunksForFile(f.ID)
+	if err != nil {
+		return nil, err
+	}
+	// Build provider name lookup.
+	providers, _ := e.db.GetAllProviders()
+	provNames := make(map[string]string)
+	for _, p := range providers {
+		provNames[p.ID] = p.DisplayName
+	}
+	var infos []ChunkInfo
+	for _, c := range chunks {
+		locs, _ := e.db.GetChunkLocations(c.ID)
+		var names []string
+		for _, loc := range locs {
+			if n, ok := provNames[loc.ProviderID]; ok {
+				names = append(names, n)
+			} else {
+				names = append(names, loc.ProviderID)
+			}
+		}
+		infos = append(infos, ChunkInfo{
+			Sequence:      c.Sequence,
+			SizeBytes:     c.SizeBytes,
+			EncryptedSize: c.EncryptedSize,
+			Providers:     names,
+		})
+	}
+	return &FileInfo{File: *f, Chunks: infos}, nil
 }

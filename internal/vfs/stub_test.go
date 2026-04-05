@@ -1,7 +1,6 @@
 package vfs
 
 import (
-	"bytes"
 	"strconv"
 	"testing"
 )
@@ -28,27 +27,5 @@ func TestFormatInt(t *testing.T) {
 			t.Errorf("formatInt(%d) = %q, differs from strconv %q",
 				tc.in, got, strconv.FormatInt(tc.in, 10))
 		}
-	}
-}
-
-func TestBuildTagPlist_ValidHeader(t *testing.T) {
-	p := buildTagPlist("Green", finderColorGreen)
-	if !bytes.HasPrefix(p, []byte("bplist00")) {
-		t.Error("plist must start with bplist00 header")
-	}
-}
-
-func TestBuildTagPlist_ContainsTag(t *testing.T) {
-	p := buildTagPlist("Gray", finderColorGray)
-	if !bytes.Contains(p, []byte("Gray")) {
-		t.Error("plist must contain the tag name")
-	}
-}
-
-func TestBuildTagPlist_DifferentColors(t *testing.T) {
-	gray := buildTagPlist("Gray", finderColorGray)
-	green := buildTagPlist("Green", finderColorGreen)
-	if bytes.Equal(gray, green) {
-		t.Error("different colors must produce different plists")
 	}
 }

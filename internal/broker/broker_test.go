@@ -196,3 +196,97 @@ func TestAllProvidersRateLimited(t *testing.T) {
 		t.Fatalf("expected ErrNoSpace when all providers rate-limited, got %v", err)
 	}
 }
+
+// TestNewBroker_DefaultPolicy verifies that an empty policy defaults to PFRD.
+func TestNewBroker_DefaultPolicy(t *testing.T) {
+	db, _ := metadata.Open(":memory:")
+	defer db.Close()
+	b := NewBroker(db, "", 0)
+	if b.policy != PolicyPFRD {
+		t.Errorf("expected PolicyPFRD, got %q", b.policy)
+	}
+}
+
+// TestPickPFRD_ZeroFreeSpace tests the totalFree <= 0 fallback in pickPFRD.
+func TestPickPFRD_ZeroFreeSpace(t *testing.T) {
+	db, _ := metadata.Open(":memory:")
+	defer db.Close()
+	zero := int64(0)
+	db.UpsertProvider(&metadata.Provider{
+		ID: "z", Type: "gdrive", DisplayName: "Z", RcloneRemote: "z:",
+		QuotaTotalBytes: ptr(100e9), QuotaFreeBytes: &zero,
+	})
+	b := NewBroker(db, PolicyPFRD, 0)
+	// Call the public interface — eligible will return z (zero free space
+	// passes since chunkSize=0 and minFreeSpace=0).
+	id, err := b.AssignChunk(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != "z" {
+		t.Errorf("expected 'z', got %q", id)
+	}
+}
+
+// TestEligible_MinFreeSpaceFilterOutAll verifies providers below minFreeSpace are skipped.
+func TestEligible_MinFreeSpaceFilterOutAll(t *testing.T) {
+	db, _ := metadata.Open(":memory:")
+	defer db.Close()
+	db.UpsertProvider(&metadata.Provider{
+		ID: "small", Type: "gdrive", DisplayName: "Small", RcloneRemote: "s:",
+		QuotaTotalBytes: ptr(100e9), QuotaFreeBytes: ptr(1e9),
+	})
+	b := NewBroker(db, PolicyPFRD, int64(50e9)) // minFreeSpace = 50 GB
+	_, err := b.AssignChunk(1024)
+	if err != ErrNoSpace {
+		t.Fatalf("expected ErrNoSpace, got %v", err)
+	}
+}
+
+// TestAssignChunk_PolicyMFS verifies MFS selects the provider with most free space.
+func TestAssignChunk_PolicyMFS(t *testing.T) {
+	db, _ := metadata.Open(":memory:")
+	defer db.Close()
+	db.UpsertProvider(&metadata.Provider{
+		ID: "a", Type: "gdrive", DisplayName: "A", RcloneRemote: "a:",
+		QuotaTotalBytes: ptr(100e9), QuotaFreeBytes: ptr(10e9),
+	})
+	db.UpsertProvider(&metadata.Provider{
+		ID: "b", Type: "dropbox", DisplayName: "B", RcloneRemote: "b:",
+		QuotaTotalBytes: ptr(100e9), QuotaFreeBytes: ptr(90e9),
+	})
+	b := NewBroker(db, PolicyMFS, 0)
+	id, err := b.AssignChunk(1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != "b" {
+		t.Errorf("MFS should pick 'b' (most free), got %q", id)
+	}
+}
+
+// TestEligible_NilQuotaFreeBytes verifies providers without quota info are skipped.
+func TestEligible_NilQuotaFreeBytes(t *testing.T) {
+	db, _ := metadata.Open(":memory:")
+	defer db.Close()
+	db.UpsertProvider(&metadata.Provider{
+		ID: "noq", Type: "gdrive", DisplayName: "NoQuota", RcloneRemote: "n:",
+		QuotaTotalBytes: ptr(100e9), QuotaFreeBytes: nil,
+	})
+	b := NewBroker(db, PolicyPFRD, 0)
+	_, err := b.AssignChunk(1024)
+	if err != ErrNoSpace {
+		t.Fatalf("expected ErrNoSpace for nil QuotaFreeBytes, got %v", err)
+	}
+}
+
+// TestAssignChunk_DBError verifies that a closed DB triggers an error from eligible.
+func TestAssignChunk_DBError(t *testing.T) {
+	db, _ := metadata.Open(":memory:")
+	db.Close() // close immediately to trigger query error
+	b := NewBroker(db, PolicyPFRD, 0)
+	_, err := b.AssignChunk(1024)
+	if err == nil {
+		t.Fatal("expected error for closed DB")
+	}
+}

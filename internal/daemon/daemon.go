@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	_ "embed"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/smit-p/pdrive/internal/broker"
+	"github.com/smit-p/pdrive/internal/chunker"
 	"github.com/smit-p/pdrive/internal/engine"
 	"github.com/smit-p/pdrive/internal/metadata"
 	"github.com/smit-p/pdrive/internal/vfs"
@@ -41,9 +43,10 @@ type lsResponse struct {
 }
 
 type statusProvider struct {
-	Name            string `json:"name"`
-	QuotaTotalBytes *int64 `json:"quota_total_bytes"`
-	QuotaFreeBytes  *int64 `json:"quota_free_bytes"`
+	Name              string `json:"name"`
+	QuotaTotalBytes   *int64 `json:"quota_total_bytes"`
+	QuotaFreeBytes    *int64 `json:"quota_free_bytes"`
+	QuotaUsedByPdrive *int64 `json:"quota_used_by_pdrive"`
 }
 
 type statusResponse struct {
@@ -59,7 +62,8 @@ type Config struct {
 	RcloneAddr   string // e.g., "127.0.0.1:5572"
 	WebDAVAddr   string // e.g., "127.0.0.1:8765"
 	SyncDir      string // local folder to sync (e.g. ~/pdrive); empty disables sync
-	EncKey       []byte // 32-byte AES-256 key
+	EncKey       []byte // 32-byte AES-256 key (set when salt is available locally)
+	Password     string // raw password — when set and EncKey is nil, daemon derives key after cloud salt lookup
 	BrokerPolicy string // "pfrd" or "mfs"
 	MinFreeSpace int64  // bytes to keep free on each provider
 	SkipRestore  bool   // skip cloud DB restore on startup (useful after a manual wipe)
@@ -115,6 +119,16 @@ func (d *Daemon) Start(ctx context.Context) error {
 		return fmt.Errorf("starting rclone: %w", err)
 	}
 
+	// If a password was given without a local salt, try to fetch the salt from
+	// cloud so the same key is derived as on the original machine.
+	if len(d.config.EncKey) == 0 && d.config.Password != "" {
+		if err := d.resolveCloudSalt(); err != nil {
+			d.rclone.Stop()
+			d.db.Close()
+			return fmt.Errorf("resolving encryption salt: %w", err)
+		}
+	}
+
 	// If local DB is empty and restore is not disabled, try to restore from a cloud backup.
 	var fileCount int
 	if err := d.db.Conn().QueryRow("SELECT COUNT(*) FROM files").Scan(&fileCount); err != nil {
@@ -163,6 +177,12 @@ func (d *Daemon) Start(ctx context.Context) error {
 	}
 	if d.config.ChunkSize > 0 {
 		d.engine.SetChunkSize(d.config.ChunkSize)
+	}
+	// If password-derived encryption is in use, tell the engine where the salt
+	// lives so it can upload it alongside the encrypted DB backup.
+	saltPath := filepath.Join(d.config.ConfigDir, "enc.salt")
+	if _, err := os.Stat(saltPath); err == nil {
+		d.engine.SetSaltPath(saltPath)
 	}
 
 	// Start local sync dir if configured.
@@ -319,7 +339,64 @@ func (d *Daemon) validateRestoredDB() bool {
 	return true
 }
 
-// tryRestoreDB attempts to download a metadata DB backup from any configured rclone remote.
+const saltRemotePath = "pdrive-meta/enc.salt"
+
+// resolveCloudSalt tries to fetch the Argon2id salt from any configured cloud remote.
+// If found, it derives the encryption key and saves the salt locally.
+// If no cloud salt exists, it generates a fresh salt (true first run).
+// On success, d.config.EncKey and d.config.Password are set appropriately.
+func (d *Daemon) resolveCloudSalt() error {
+	saltPath := filepath.Join(d.config.ConfigDir, "enc.salt")
+
+	// Try every remote for an existing salt.
+	remotes, err := d.rclone.Client().ListRemotes()
+	if err != nil {
+		slog.Debug("could not list remotes for salt lookup", "error", err)
+	}
+	for _, remote := range remotes {
+		rc, err := d.rclone.Client().GetFile(remote, saltRemotePath)
+		if err != nil {
+			continue
+		}
+		salt, readErr := io.ReadAll(rc)
+		rc.Close()
+		if readErr != nil || len(salt) != chunker.SaltSize {
+			continue
+		}
+		// Found salt on cloud — derive key and save locally.
+		d.config.EncKey = chunker.DeriveKey(d.config.Password, salt)
+		if err := os.WriteFile(saltPath, salt, 0600); err != nil {
+			slog.Warn("could not save cloud salt locally", "error", err)
+		}
+		slog.Info("encryption salt restored from cloud", "remote", remote)
+		d.config.Password = "" // clear password from memory
+		return nil
+	}
+
+	// No cloud salt — first run. Generate a fresh salt.
+	salt, err := chunker.GenerateSalt()
+	if err != nil {
+		return fmt.Errorf("generating salt: %w", err)
+	}
+	if err := os.MkdirAll(d.config.ConfigDir, 0700); err != nil {
+		return fmt.Errorf("creating config dir: %w", err)
+	}
+	if err := os.WriteFile(saltPath, salt, 0600); err != nil {
+		return fmt.Errorf("saving salt: %w", err)
+	}
+	d.config.EncKey = chunker.DeriveKey(d.config.Password, salt)
+	d.config.Password = "" // clear password from memory
+	slog.Info("new encryption salt generated")
+	return nil
+}
+
+// backupMagic must match the header written by engine.makeBackupPayload.
+var backupMagic = [8]byte{'p', 'd', 'r', 'i', 'v', 'e', 'D', 'B'}
+
+// tryRestoreDB downloads metadata DB backups from ALL configured rclone remotes,
+// decrypts them, and writes the newest one (by embedded timestamp) to dbPath.
+// Falls back to the legacy unencrypted path ("pdrive-meta/metadata.db") for
+// backward compatibility with backups created before encryption was added.
 // Returns true if a backup was found and restored.
 func (d *Daemon) tryRestoreDB(dbPath string) bool {
 	remotes, err := d.rclone.Client().ListRemotes()
@@ -327,24 +404,85 @@ func (d *Daemon) tryRestoreDB(dbPath string) bool {
 		slog.Debug("could not list rclone remotes for DB restore", "error", err)
 		return false
 	}
+
+	var bestData []byte
+	var bestTS int64
+	var bestRemote string
+
 	for _, remote := range remotes {
-		rc, err := d.rclone.Client().GetFile(remote, "pdrive-meta/metadata.db")
-		if err != nil {
+		// Try encrypted backup first.
+		if data, ts, ok := d.tryDownloadEncrypted(remote); ok {
+			if ts > bestTS {
+				bestTS = ts
+				bestData = data
+				bestRemote = remote
+			}
 			continue
 		}
-		data, readErr := io.ReadAll(rc)
-		rc.Close()
-		if readErr != nil || len(data) == 0 {
-			continue
+		// Fall back to legacy unencrypted backup.
+		if data, ok := d.tryDownloadLegacy(remote); ok {
+			if bestTS == 0 && bestData == nil {
+				bestData = data
+				bestRemote = remote
+			}
 		}
-		if err := os.WriteFile(dbPath, data, 0600); err != nil {
-			slog.Warn("failed to write restored DB", "error", err)
-			continue
-		}
-		slog.Info("metadata DB restored from cloud", "remote", remote, "size", len(data))
-		return true
 	}
-	return false
+
+	if bestData == nil {
+		return false
+	}
+
+	if err := os.WriteFile(dbPath, bestData, 0600); err != nil {
+		slog.Warn("failed to write restored DB", "error", err)
+		return false
+	}
+	slog.Info("metadata DB restored from cloud", "remote", bestRemote, "size", len(bestData), "encrypted", bestTS > 0)
+	return true
+}
+
+// tryDownloadEncrypted downloads and decrypts the encrypted backup from a remote.
+func (d *Daemon) tryDownloadEncrypted(remote string) (dbData []byte, timestamp int64, ok bool) {
+	rc, err := d.rclone.Client().GetFile(remote, "pdrive-meta/metadata.db.enc")
+	if err != nil {
+		return nil, 0, false
+	}
+	blob, readErr := io.ReadAll(rc)
+	rc.Close()
+	if readErr != nil || len(blob) == 0 {
+		return nil, 0, false
+	}
+
+	plain, err := chunker.Decrypt(d.config.EncKey, blob)
+	if err != nil {
+		slog.Warn("could not decrypt backup from remote", "remote", remote, "error", err)
+		return nil, 0, false
+	}
+
+	// Parse header.
+	if len(plain) < 16 {
+		return nil, 0, false
+	}
+	for i := 0; i < 8; i++ {
+		if plain[i] != backupMagic[i] {
+			return nil, 0, false
+		}
+	}
+	ts := int64(binary.BigEndian.Uint64(plain[8:16]))
+	return plain[16:], ts, true
+}
+
+// tryDownloadLegacy downloads a legacy unencrypted backup for backward compatibility.
+func (d *Daemon) tryDownloadLegacy(remote string) ([]byte, bool) {
+	rc, err := d.rclone.Client().GetFile(remote, "pdrive-meta/metadata.db")
+	if err != nil {
+		return nil, false
+	}
+	data, readErr := io.ReadAll(rc)
+	rc.Close()
+	if readErr != nil || len(data) == 0 {
+		return nil, false
+	}
+	return data, true
 }
 
 // browserHandler wraps the WebDAV handler to serve HTML directory listings
@@ -382,11 +520,39 @@ func (h *browserHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(h.engine.Metrics()) //nolint:errcheck
 		return
+	case "/api/download":
+		h.serveAPIDownload(w, r)
+		return
+	case "/api/delete":
+		h.serveAPIDelete(w, r)
+		return
+	case "/api/tree":
+		h.serveAPITree(w, r)
+		return
+	case "/api/find":
+		h.serveAPIFind(w, r)
+		return
+	case "/api/mv":
+		h.serveAPIMv(w, r)
+		return
+	case "/api/mkdir":
+		h.serveAPIMkdir(w, r)
+		return
+	case "/api/info":
+		h.serveAPIInfo(w, r)
+		return
+	case "/api/du":
+		h.serveAPIDu(w, r)
+		return
 	}
 
 	// Only intercept GET/HEAD with a browser-like Accept header.
 	if (r.Method == "GET" || r.Method == "HEAD") && strings.Contains(r.Header.Get("Accept"), "text/html") {
 		h.serveBrowser(w, r)
+		return
+	}
+	if h.davHandler == nil {
+		http.Error(w, "WebDAV not configured", http.StatusInternalServerError)
 		return
 	}
 	h.davHandler.ServeHTTP(w, r)
@@ -416,8 +582,6 @@ func (h *browserHandler) serveAPILs(w http.ResponseWriter, r *http.Request) {
 		state := "local"
 		if h.syncDir != nil && h.syncDir.IsStub(f.VirtualPath) {
 			state = "stub"
-		} else if f.UploadState == "pending" {
-			state = "uploading"
 		}
 		resp.Files = append(resp.Files, lsFile{
 			Name:       path.Base(f.VirtualPath),
@@ -443,10 +607,12 @@ func (h *browserHandler) serveAPIStatus(w http.ResponseWriter, r *http.Request) 
 		Providers:  make([]statusProvider, 0, len(st.Providers)),
 	}
 	for _, p := range st.Providers {
+		usedBytes := st.ProviderBytes[p.ID]
 		resp.Providers = append(resp.Providers, statusProvider{
-			Name:            p.DisplayName,
-			QuotaTotalBytes: p.QuotaTotalBytes,
-			QuotaFreeBytes:  p.QuotaFreeBytes,
+			Name:              p.DisplayName,
+			QuotaTotalBytes:   p.QuotaTotalBytes,
+			QuotaFreeBytes:    p.QuotaFreeBytes,
+			QuotaUsedByPdrive: &usedBytes,
 		})
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -497,6 +663,266 @@ func (h *browserHandler) serveAPIUnpin(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, `{"status":"ok","path":%q,"state":"stub"}`, p)
 }
 
+func (h *browserHandler) serveAPIDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	p := path.Clean(r.URL.Query().Get("path"))
+	if p == "" || p == "." || p == "/" {
+		http.Error(w, "path required", http.StatusBadRequest)
+		return
+	}
+
+	// Check if it's a directory first.
+	isDir, err := h.engine.IsDir(p)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if isDir {
+		dirPath := p
+		if !strings.HasSuffix(dirPath, "/") {
+			dirPath += "/"
+		}
+		if err := h.engine.DeleteDir(dirPath); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if h.syncDir != nil {
+			os.RemoveAll(filepath.Join(h.syncDir.Root(), p))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"status":"ok","path":%q,"type":"dir"}`, p)
+		return
+	}
+
+	// Single file.
+	exists, err := h.engine.FileExists(p)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if !exists {
+		http.Error(w, "file not found: "+p, http.StatusNotFound)
+		return
+	}
+	if err := h.engine.DeleteFile(p); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if h.syncDir != nil {
+		os.Remove(filepath.Join(h.syncDir.Root(), p))
+	}
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprintf(w, `{"status":"ok","path":%q,"type":"file"}`, p)
+}
+
+func (h *browserHandler) serveAPITree(w http.ResponseWriter, r *http.Request) {
+	p := path.Clean(r.URL.Query().Get("path"))
+	if p == "" || p == "." {
+		p = "/"
+	}
+	files, err := h.engine.ListAllFiles(p)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	type treeEntry struct {
+		Path string `json:"path"`
+		Size int64  `json:"size"`
+	}
+	entries := make([]treeEntry, 0, len(files))
+	for _, f := range files {
+		entries = append(entries, treeEntry{Path: f.VirtualPath, Size: f.SizeBytes})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(entries) //nolint:errcheck
+}
+
+func (h *browserHandler) serveAPIFind(w http.ResponseWriter, r *http.Request) {
+	root := path.Clean(r.URL.Query().Get("path"))
+	if root == "" || root == "." {
+		root = "/"
+	}
+	pattern := r.URL.Query().Get("pattern")
+	if pattern == "" {
+		http.Error(w, "pattern required", http.StatusBadRequest)
+		return
+	}
+	files, err := h.engine.SearchFiles(root, pattern)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	type findEntry struct {
+		Path string `json:"path"`
+		Size int64  `json:"size"`
+	}
+	entries := make([]findEntry, 0, len(files))
+	for _, f := range files {
+		entries = append(entries, findEntry{Path: f.VirtualPath, Size: f.SizeBytes})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(entries) //nolint:errcheck
+}
+
+func (h *browserHandler) serveAPIMv(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	src := path.Clean(r.URL.Query().Get("src"))
+	dst := path.Clean(r.URL.Query().Get("dst"))
+	if src == "" || src == "." || dst == "" || dst == "." {
+		http.Error(w, "src and dst required", http.StatusBadRequest)
+		return
+	}
+
+	// Check if source is a directory.
+	isDir, err := h.engine.IsDir(src)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if isDir {
+		srcDir := src
+		if !strings.HasSuffix(srcDir, "/") {
+			srcDir += "/"
+		}
+		dstDir := dst
+		if !strings.HasSuffix(dstDir, "/") {
+			dstDir += "/"
+		}
+		if err := h.engine.RenameDir(srcDir, dstDir); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if h.syncDir != nil {
+			oldLocal := filepath.Join(h.syncDir.Root(), src)
+			newLocal := filepath.Join(h.syncDir.Root(), dst)
+			os.MkdirAll(filepath.Dir(newLocal), 0755)
+			os.Rename(oldLocal, newLocal)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"status":"ok","src":%q,"dst":%q,"type":"dir"}`, src, dst)
+		return
+	}
+
+	// Single file.
+	exists, err := h.engine.FileExists(src)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if !exists {
+		http.Error(w, "file not found: "+src, http.StatusNotFound)
+		return
+	}
+	if err := h.engine.RenameFile(src, dst); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if h.syncDir != nil {
+		oldLocal := filepath.Join(h.syncDir.Root(), src)
+		newLocal := filepath.Join(h.syncDir.Root(), dst)
+		os.MkdirAll(filepath.Dir(newLocal), 0755)
+		os.Rename(oldLocal, newLocal)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprintf(w, `{"status":"ok","src":%q,"dst":%q,"type":"file"}`, src, dst)
+}
+
+func (h *browserHandler) serveAPIMkdir(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	p := path.Clean(r.URL.Query().Get("path"))
+	if p == "" || p == "." || p == "/" {
+		http.Error(w, "path required", http.StatusBadRequest)
+		return
+	}
+	dirPath := p
+	if !strings.HasSuffix(dirPath, "/") {
+		dirPath += "/"
+	}
+	if err := h.engine.MkDir(dirPath); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if h.syncDir != nil {
+		os.MkdirAll(filepath.Join(h.syncDir.Root(), p), 0755)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprintf(w, `{"status":"ok","path":%q}`, p)
+}
+
+func (h *browserHandler) serveAPIInfo(w http.ResponseWriter, r *http.Request) {
+	p := path.Clean(r.URL.Query().Get("path"))
+	if p == "" || p == "." {
+		http.Error(w, "path required", http.StatusBadRequest)
+		return
+	}
+	info, err := h.engine.GetFileInfo(p)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if info == nil {
+		http.Error(w, "file not found: "+p, http.StatusNotFound)
+		return
+	}
+	type chunkJSON struct {
+		Sequence      int      `json:"sequence"`
+		SizeBytes     int      `json:"size_bytes"`
+		EncryptedSize int      `json:"encrypted_size"`
+		Providers     []string `json:"providers"`
+	}
+	type infoJSON struct {
+		Path        string      `json:"path"`
+		SizeBytes   int64       `json:"size_bytes"`
+		CreatedAt   int64       `json:"created_at"`
+		ModifiedAt  int64       `json:"modified_at"`
+		SHA256      string      `json:"sha256"`
+		UploadState string      `json:"upload_state"`
+		Chunks      []chunkJSON `json:"chunks"`
+	}
+	resp := infoJSON{
+		Path:        info.File.VirtualPath,
+		SizeBytes:   info.File.SizeBytes,
+		CreatedAt:   info.File.CreatedAt,
+		ModifiedAt:  info.File.ModifiedAt,
+		SHA256:      info.File.SHA256Full,
+		UploadState: info.File.UploadState,
+		Chunks:      make([]chunkJSON, 0, len(info.Chunks)),
+	}
+	for _, c := range info.Chunks {
+		resp.Chunks = append(resp.Chunks, chunkJSON{
+			Sequence:      c.Sequence,
+			SizeBytes:     c.SizeBytes,
+			EncryptedSize: c.EncryptedSize,
+			Providers:     c.Providers,
+		})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp) //nolint:errcheck
+}
+
+func (h *browserHandler) serveAPIDu(w http.ResponseWriter, r *http.Request) {
+	p := path.Clean(r.URL.Query().Get("path"))
+	if p == "" || p == "." {
+		p = "/"
+	}
+	count, total, err := h.engine.DiskUsage(p)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprintf(w, `{"path":%q,"file_count":%d,"total_bytes":%d}`, p, count, total)
+}
+
 func (h *browserHandler) serveAPIHealth(w http.ResponseWriter, _ *http.Request) {
 	dbOK := true
 	if err := h.engine.DB().Conn().Ping(); err != nil {
@@ -525,11 +951,35 @@ func (h *browserHandler) serveAPIHealth(w http.ResponseWriter, _ *http.Request) 
 	json.NewEncoder(w).Encode(resp) //nolint:errcheck
 }
 
+func (h *browserHandler) serveAPIDownload(w http.ResponseWriter, r *http.Request) {
+	p := path.Clean(r.URL.Query().Get("path"))
+	if p == "" || p == "." || p == "/" {
+		http.Error(w, "path required", http.StatusBadRequest)
+		return
+	}
+
+	file, err := h.engine.Stat(p)
+	if err != nil || file == nil {
+		http.Error(w, "file not found", http.StatusNotFound)
+		return
+	}
+
+	tmp, err := h.engine.ReadFileToTempFile(p)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer func() {
+		tmp.Close()
+		os.Remove(tmp.Name())
+	}()
+
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename=%q`, path.Base(p)))
+	http.ServeContent(w, r, path.Base(p), time.Unix(file.ModifiedAt, 0), tmp)
+}
+
 func (h *browserHandler) serveBrowser(w http.ResponseWriter, r *http.Request) {
 	p := path.Clean(r.URL.Path)
-	if !strings.HasPrefix(p, "/") {
-		p = "/" + p
-	}
 
 	// Check if it's a file — stream content from a temp file to avoid
 	// holding the entire file in memory.
