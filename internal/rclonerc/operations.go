@@ -1,16 +1,13 @@
 package rclonerc
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
-	"mime/multipart"
-	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // IsRateLimited checks if an error from the rclone RC API indicates that the
@@ -34,51 +31,90 @@ func ensureColon(remote string) string {
 	return strings.TrimSuffix(remote, ":") + ":"
 }
 
-// PutFile uploads data to remote:remotePath using rclone RC operations/uploadfile.
-// remotePath should be the full path (e.g., "pdrive-chunks/abc123").
+// PutFile uploads data to remote:remotePath using rclone RC operations/copyfile.
+// The data is written to a temporary file first, then rclone copies it from disk
+// to the cloud provider using its native backend (which supports resumable uploads
+// for Google Drive, chunked uploads for Dropbox, etc.). The copy runs as an async
+// rclone job to avoid HTTP timeout issues with large chunks.
 func (c *Client) PutFile(remote, remotePath string, data io.Reader) error {
-	var body bytes.Buffer
-	writer := multipart.NewWriter(&body)
+	tmpDir, err := os.MkdirTemp("", "pdrive-ul-")
+	if err != nil {
+		return fmt.Errorf("creating temp dir: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
 
-	// operations/uploadfile expects:
-	//   remote = parent directory to upload into
-	//   file0 = file content with the filename as the base name
-	dir := filepath.Dir(remotePath)
 	base := filepath.Base(remotePath)
-
-	part, err := writer.CreateFormFile("file0", base)
+	tmpFile := filepath.Join(tmpDir, base)
+	f, err := os.Create(tmpFile)
 	if err != nil {
-		return fmt.Errorf("creating form file: %w", err)
+		return fmt.Errorf("creating temp file: %w", err)
 	}
-	if _, err := io.Copy(part, data); err != nil {
-		return fmt.Errorf("copying file data: %w", err)
+	if _, err := io.Copy(f, data); err != nil {
+		f.Close()
+		return fmt.Errorf("writing temp file: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("closing temp file: %w", err)
 	}
 
-	if err := writer.Close(); err != nil {
-		return fmt.Errorf("closing multipart writer: %w", err)
-	}
-
-	params := url.Values{}
-	params.Set("fs", ensureColon(remote))
-	params.Set("remote", dir)
-	req, err := http.NewRequest("POST", c.baseURL+"/operations/uploadfile?"+params.Encode(), &body)
+	// Launch as an async rclone job so the HTTP call returns immediately
+	// and we are not subject to HTTP client timeouts for slow uploads.
+	result, err := c.call("operations/copyfile", map[string]interface{}{
+		"srcFs":     tmpDir + "/",
+		"srcRemote": base,
+		"dstFs":     ensureColon(remote),
+		"dstRemote": remotePath,
+		"_async":    true,
+	})
 	if err != nil {
-		return fmt.Errorf("creating upload request: %w", err)
-	}
-	req.Header.Set("Content-Type", writer.FormDataContentType())
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("uploading file: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("upload failed with status %d: %s", resp.StatusCode, string(respBody))
+		return fmt.Errorf("starting async upload: %w", err)
 	}
 
-	return nil
+	var job struct {
+		JobID int `json:"jobid"`
+	}
+	if err := json.Unmarshal(result, &job); err != nil {
+		return fmt.Errorf("parsing async job response: %w", err)
+	}
+
+	// Poll job/status until the copy finishes.
+	return c.waitForJob(job.JobID)
+}
+
+// waitForJob polls rclone job/status until the async job completes or fails.
+// Uses exponential backoff starting at 500ms, capped at 10s between polls.
+func (c *Client) waitForJob(jobID int) error {
+	backoff := 500 * time.Millisecond
+	const maxBackoff = 10 * time.Second
+
+	for {
+		time.Sleep(backoff)
+
+		result, err := c.call("job/status", map[string]interface{}{
+			"jobid": jobID,
+		})
+		if err != nil {
+			return fmt.Errorf("polling job %d: %w", jobID, err)
+		}
+
+		var status struct {
+			Finished bool   `json:"finished"`
+			Success  bool   `json:"success"`
+			Error    string `json:"error"`
+		}
+		if err := json.Unmarshal(result, &status); err != nil {
+			return fmt.Errorf("parsing job status: %w", err)
+		}
+
+		if status.Finished {
+			if !status.Success {
+				return fmt.Errorf("rclone job %d failed: %s", jobID, status.Error)
+			}
+			return nil
+		}
+
+		backoff = min(backoff*2, maxBackoff)
+	}
 }
 
 // tempFileReadCloser wraps an os.File and removes its parent temp directory

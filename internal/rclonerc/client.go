@@ -20,7 +20,7 @@ func NewClient(addr string) *Client {
 	return &Client{
 		baseURL: "http://" + addr,
 		httpClient: &http.Client{
-			Timeout: 5 * time.Minute, // uploads can be slow
+			Timeout: 30 * time.Minute, // downloads/sync calls can be slow
 		},
 	}
 }

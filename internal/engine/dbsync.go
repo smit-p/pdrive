@@ -148,6 +148,14 @@ func (e *Engine) GCOrphanedChunks() {
 	if e.rc == nil {
 		return
 	}
+
+	// Defer the GC scan if a file upload is in progress — listing and
+	// deleting orphans would consume API quota that the upload needs.
+	if e.uploading.Load() > 0 {
+		slog.Debug("deferring orphan GC while upload is active")
+		return
+	}
+
 	providers, err := e.db.GetAllProviders()
 	if err != nil || len(providers) == 0 {
 		return

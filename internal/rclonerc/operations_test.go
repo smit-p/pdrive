@@ -98,34 +98,44 @@ func TestCall_Error(t *testing.T) {
 }
 
 func TestPutFile(t *testing.T) {
+	var copyfileBody map[string]interface{}
 	c := fakeRclone(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
 			t.Errorf("expected POST, got %s", r.Method)
 		}
-		if !strings.HasPrefix(r.URL.Path, "/operations/uploadfile") {
+		switch r.URL.Path {
+		case "/operations/copyfile":
+			json.NewDecoder(r.Body).Decode(&copyfileBody)
+			if copyfileBody["dstFs"] != "drive:" {
+				t.Errorf("expected dstFs=drive:, got %v", copyfileBody["dstFs"])
+			}
+			if copyfileBody["dstRemote"] != "pdrive-chunks/chunk001" {
+				t.Errorf("expected dstRemote=pdrive-chunks/chunk001, got %v", copyfileBody["dstRemote"])
+			}
+			if copyfileBody["_async"] != true {
+				t.Error("expected _async=true")
+			}
+			// Verify the temp file was created with correct content.
+			srcFs, _ := copyfileBody["srcFs"].(string)
+			srcRemote, _ := copyfileBody["srcRemote"].(string)
+			if srcFs != "" && srcRemote != "" {
+				data, err := os.ReadFile(srcFs + srcRemote)
+				if err != nil {
+					t.Fatalf("temp file not readable: %v", err)
+				}
+				if string(data) != "hello" {
+					t.Errorf("expected temp file content 'hello', got %q", string(data))
+				}
+			}
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{"jobid": 42})
+		case "/job/status":
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{"finished": true, "success": true})
+		default:
 			t.Errorf("unexpected path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
 		}
-		fs := r.URL.Query().Get("fs")
-		if fs != "drive:" {
-			t.Errorf("expected fs=drive:, got %q", fs)
-		}
-		// Parse multipart to verify file content.
-		if err := r.ParseMultipartForm(10 << 20); err != nil {
-			t.Fatal(err)
-		}
-		f, header, err := r.FormFile("file0")
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer f.Close()
-		if header.Filename != "chunk001" {
-			t.Errorf("expected filename chunk001, got %q", header.Filename)
-		}
-		data, _ := io.ReadAll(f)
-		if string(data) != "hello" {
-			t.Errorf("expected file content 'hello', got %q", string(data))
-		}
-		w.WriteHeader(http.StatusOK)
 	})
 	if err := c.PutFile("drive", "pdrive-chunks/chunk001", strings.NewReader("hello")); err != nil {
 		t.Fatal(err)
@@ -134,15 +144,34 @@ func TestPutFile(t *testing.T) {
 
 func TestPutFile_Error(t *testing.T) {
 	c := fakeRclone(t, func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte("upload error"))
+		switch r.URL.Path {
+		case "/operations/copyfile":
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{"jobid": 1})
+		case "/job/status":
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{"finished": true, "success": false, "error": "upload error 500"})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
 	})
 	err := c.PutFile("drive", "pdrive-chunks/chunk001", strings.NewReader("data"))
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if !strings.Contains(err.Error(), "500") {
-		t.Errorf("error should contain status code: %v", err)
+	if !strings.Contains(err.Error(), "upload error 500") {
+		t.Errorf("error should contain rclone error message: %v", err)
+	}
+}
+
+func TestPutFile_CopyfileStartError(t *testing.T) {
+	c := fakeRclone(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("server error"))
+	})
+	err := c.PutFile("drive", "pdrive-chunks/chunk001", strings.NewReader("data"))
+	if err == nil {
+		t.Fatal("expected error")
 	}
 }
 
@@ -433,8 +462,8 @@ func TestPutFile_ReaderError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error from bad reader")
 	}
-	if !strings.Contains(err.Error(), "copying") {
-		t.Errorf("expected 'copying' in error, got: %v", err)
+	if !strings.Contains(err.Error(), "writing temp file") {
+		t.Errorf("expected 'writing temp file' in error, got: %v", err)
 	}
 }
 
