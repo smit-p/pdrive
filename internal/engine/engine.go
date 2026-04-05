@@ -101,15 +101,17 @@ type Engine struct {
 
 const (
 	// uploadRatePerSec is the maximum number of chunk-upload API calls per second
-	// across all providers. Google Drive's per-user quota is ~10 req/100s;
-	// 2/s provides margin and avoids quota exhaustion during sustained uploads.
-	uploadRatePerSec = 2
-	uploadRateBurst  = 4 // initial burst before the ticker kicks in
+	// across all providers. With operations/copyfile + _async, each call just
+	// starts a lightweight rclone job; the actual cloud API calls (with their
+	// own backoff) run inside rclone.  6/s lets us saturate fast connections
+	// without overwhelming the local rclone RC server.
+	uploadRatePerSec = 6
+	uploadRateBurst  = 10 // initial burst before the ticker kicks in
 )
 
 // NewEngine creates a new engine backed by an rclone RC client.
 func NewEngine(db *metadata.DB, dbPath string, rc *rclonerc.Client, b *broker.Broker, encKey []byte) *Engine {
-	const burst = 4
+	const burst = 10
 	e := newEngine(db, dbPath, rc, b, encKey, burst, uploadRatePerSec)
 	return e
 }
@@ -117,7 +119,7 @@ func NewEngine(db *metadata.DB, dbPath string, rc *rclonerc.Client, b *broker.Br
 // NewEngineWithRate creates an Engine with a custom API rate limit (tokens per second).
 // A ratePerSec of 0 or less uses the default (8/s).
 func NewEngineWithRate(db *metadata.DB, dbPath string, rc *rclonerc.Client, b *broker.Broker, encKey []byte, ratePerSec int) *Engine {
-	const burst = 4
+	const burst = 10
 	if ratePerSec <= 0 {
 		ratePerSec = uploadRatePerSec
 	}
@@ -238,14 +240,16 @@ func (e *Engine) chunkSize(fileSize int64) int {
 }
 
 // workersForChunkSize returns an appropriate concurrency level for the given
-// chunk size so that peak in-flight memory is bounded to roughly 512 MB.
+// chunk size.  PutFile writes data to a temp file and delegates the actual
+// upload to rclone (operations/copyfile + _async), so peak memory is low;
+// the limit is tuned to saturate typical broadband connections.
 func workersForChunkSize(chunkSize int) int {
 	switch {
-	case chunkSize >= 32*1024*1024: // ≥ 32 MB → 2 workers (≤512 MB in-flight)
-		return 2
-	case chunkSize >= 8*1024*1024: // ≥ 8 MB → 3 workers (≤48 MB in-flight)
-		return 3
-	default: // < 8 MB → 4 workers (≤32 MB in-flight)
+	case chunkSize >= 32*1024*1024: // ≥ 32 MB → 6 workers
+		return 6
+	case chunkSize >= 8*1024*1024: // ≥ 8 MB → 8 workers
+		return 8
+	default: // < 8 MB → 10 workers
 		return maxUploadWorkers
 	}
 }
@@ -259,7 +263,7 @@ func (e *Engine) WriteFile(virtualPath string, data []byte) error {
 const (
 	// maxUploadWorkers is the default (small-chunk) concurrency limit; see
 	// workersForChunkSize for how this scales down for larger chunks.
-	maxUploadWorkers = 4
+	maxUploadWorkers = 10
 	// maxUploadRetries is the number of retry attempts for a failed chunk upload.
 	maxUploadRetries = 5
 	// AsyncWriteThreshold: files larger than this are uploaded in the background

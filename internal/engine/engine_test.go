@@ -1262,12 +1262,12 @@ func TestWorkersForChunkSize(t *testing.T) {
 		chunkSize int
 		want      int
 	}{
-		{128 * 1024 * 1024, 2}, // 128 MB → 2 workers
-		{32 * 1024 * 1024, 2},  // 32 MB → 2 workers
-		{16 * 1024 * 1024, 3},  // 16 MB → 3 workers
-		{8 * 1024 * 1024, 3},   // 8 MB → 3 workers
-		{4 * 1024 * 1024, 4},   // 4 MB → 4 workers (max)
-		{1 * 1024 * 1024, 4},   // 1 MB → 4 workers
+		{128 * 1024 * 1024, 6}, // 128 MB → 6 workers
+		{32 * 1024 * 1024, 6},  // 32 MB → 6 workers
+		{16 * 1024 * 1024, 8},  // 16 MB → 8 workers
+		{8 * 1024 * 1024, 8},   // 8 MB → 8 workers
+		{4 * 1024 * 1024, 10},  // 4 MB → 10 workers (max)
+		{1 * 1024 * 1024, 10},  // 1 MB → 10 workers
 	}
 	for _, tc := range cases {
 		got := workersForChunkSize(tc.chunkSize)
