@@ -47,5 +47,3 @@ func clearStubMarker(path string) {
 	unix.Removexattr(path, xattrStub) //nolint:errcheck
 	unix.Removexattr(path, xattrSize) //nolint:errcheck
 }
-
-

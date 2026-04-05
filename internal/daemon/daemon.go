@@ -162,6 +162,17 @@ func (d *Daemon) Start(ctx context.Context) error {
 		}
 	}
 
+	// Sync rclone remotes → providers table. This ensures the broker has
+	// providers to assign chunks to, and keeps quotas up to date.
+	d.syncProviders()
+
+	// After a DB restore, check whether we're missing cloud accounts that the
+	// original machine had. Warn the user so they can add them.
+	missing := d.checkMissingProviders()
+	if len(missing) > 0 {
+		slog.Warn("some files may be inaccessible until the missing providers are configured")
+	}
+
 	// Create persistent spool directory for in-progress upload temp files so
 	// they survive a daemon restart and can be resumed automatically.
 	spoolDir := filepath.Join(d.config.ConfigDir, "spool")
@@ -392,8 +403,6 @@ func (d *Daemon) resolveCloudSalt() error {
 	return nil
 }
 
-
-
 // tryRestoreDB downloads metadata DB backups from ALL configured rclone remotes,
 // decrypts them, and writes the newest one (by embedded timestamp) to dbPath.
 // Falls back to the legacy unencrypted path ("pdrive-meta/metadata.db") for
@@ -479,6 +488,119 @@ func (d *Daemon) tryDownloadLegacy(remote string) ([]byte, bool) {
 		return nil, false
 	}
 	return data, true
+}
+
+// syncProviders discovers rclone remotes and registers/updates them as providers
+// in the metadata database. This is the bridge between "rclone config" and pdrive's
+// provider-aware broker. Called on every startup to keep the DB in sync.
+func (d *Daemon) syncProviders() {
+	remotes, err := d.rclone.Client().ListRemotes()
+	if err != nil {
+		slog.Warn("could not list rclone remotes for provider sync", "error", err)
+		return
+	}
+	if len(remotes) == 0 {
+		slog.Warn("no rclone remotes configured — uploads will fail until a remote is added")
+		return
+	}
+
+	now := time.Now().Unix()
+	for _, remote := range remotes {
+		remoteType, err := d.rclone.Client().GetRemoteType(remote)
+		if err != nil {
+			slog.Debug("could not get remote type", "remote", remote, "error", err)
+			remoteType = "unknown"
+		}
+
+		// Check if this remote is already registered (possibly from a restored DB).
+		existing, _ := d.db.GetProviderByRemote(remote)
+
+		providerID := remote // use remote name as stable ID
+		if existing != nil {
+			providerID = existing.ID
+		}
+
+		// Fetch quota from cloud.
+		var quotaTotal, quotaFree *int64
+		var polledAt *int64
+		aboutResult, err := d.rclone.Client().About(remote)
+		if err != nil {
+			slog.Debug("could not fetch quota", "remote", remote, "error", err)
+			// Keep existing quota values if available.
+			if existing != nil {
+				quotaTotal = existing.QuotaTotalBytes
+				quotaFree = existing.QuotaFreeBytes
+				polledAt = existing.QuotaPolledAt
+			}
+		} else {
+			quotaTotal = &aboutResult.Total
+			quotaFree = &aboutResult.Free
+			polledAt = &now
+		}
+
+		p := &metadata.Provider{
+			ID:              providerID,
+			Type:            remoteType,
+			DisplayName:     remote,
+			RcloneRemote:    remote,
+			QuotaTotalBytes: quotaTotal,
+			QuotaFreeBytes:  quotaFree,
+			QuotaPolledAt:   polledAt,
+		}
+		// Preserve rate-limit state from existing record.
+		if existing != nil {
+			p.RateLimitedUntil = existing.RateLimitedUntil
+		}
+
+		if err := d.db.UpsertProvider(p); err != nil {
+			slog.Warn("failed to register provider", "remote", remote, "error", err)
+			continue
+		}
+		slog.Info("provider synced", "remote", remote, "type", remoteType)
+	}
+}
+
+// checkMissingProviders compares the providers in the restored DB with the
+// currently available rclone remotes. If any DB providers are missing (the user
+// has not yet configured those remotes on this machine), it logs warnings so the
+// user knows which accounts to add.
+// Returns the list of missing provider remote names.
+func (d *Daemon) checkMissingProviders() []string {
+	dbProviders, err := d.db.GetAllProviders()
+	if err != nil || len(dbProviders) == 0 {
+		return nil
+	}
+
+	remotes, err := d.rclone.Client().ListRemotes()
+	if err != nil {
+		slog.Warn("could not list remotes for missing-provider check", "error", err)
+		return nil
+	}
+
+	available := make(map[string]bool, len(remotes))
+	for _, r := range remotes {
+		available[r] = true
+	}
+
+	var missing []string
+	for _, p := range dbProviders {
+		if !available[p.RcloneRemote] {
+			missing = append(missing, p.RcloneRemote)
+		}
+	}
+
+	if len(missing) > 0 {
+		slog.Warn("restored metadata references cloud providers not configured on this machine",
+			"missing", missing,
+			"total_db_providers", len(dbProviders),
+			"available_remotes", len(remotes),
+		)
+		slog.Warn(fmt.Sprintf("pdrive needs %d additional cloud account(s) to access all your files: %s",
+			len(missing), strings.Join(missing, ", ")))
+		slog.Warn("add the missing remotes with: rclone config create <name> <type>")
+	}
+
+	return missing
 }
 
 // browserHandler wraps the WebDAV handler to serve HTML directory listings

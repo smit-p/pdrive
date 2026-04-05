@@ -2468,3 +2468,40 @@ func TestListSubdirectories_ViewScanError(t *testing.T) {
 		return
 	}
 }
+
+func TestGetProviderByRemote(t *testing.T) {
+	db := testDB(t)
+
+	// Empty DB → nil, nil
+	p, err := db.GetProviderByRemote("gdrive")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p != nil {
+		t.Fatal("expected nil for missing remote")
+	}
+
+	// Insert provider, then look it up
+	total, free := int64(100e9), int64(50e9)
+	db.UpsertProvider(&Provider{ID: "p1", Type: "drive", DisplayName: "GDrive", RcloneRemote: "gdrive", QuotaTotalBytes: &total, QuotaFreeBytes: &free})
+
+	p, err = db.GetProviderByRemote("gdrive")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p == nil || p.ID != "p1" {
+		t.Fatalf("expected provider p1, got %v", p)
+	}
+	if p.RcloneRemote != "gdrive" {
+		t.Errorf("RcloneRemote = %q, want %q", p.RcloneRemote, "gdrive")
+	}
+
+	// Different remote → nil
+	p, err = db.GetProviderByRemote("dropbox")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p != nil {
+		t.Fatal("expected nil for non-existent remote")
+	}
+}

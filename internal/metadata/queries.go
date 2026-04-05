@@ -408,6 +408,19 @@ func (db *DB) GetAllProviders() ([]Provider, error) {
 	return providers, rows.Err()
 }
 
+// GetProviderByRemote returns the provider matching the given rclone remote name, or nil if not found.
+func (db *DB) GetProviderByRemote(rcloneRemote string) (*Provider, error) {
+	p := &Provider{}
+	err := db.conn.QueryRow(
+		`SELECT id, type, display_name, rclone_remote, quota_total_bytes, quota_free_bytes, quota_polled_at, rate_limited_until
+		 FROM providers WHERE rclone_remote = ?`, rcloneRemote,
+	).Scan(&p.ID, &p.Type, &p.DisplayName, &p.RcloneRemote, &p.QuotaTotalBytes, &p.QuotaFreeBytes, &p.QuotaPolledAt, &p.RateLimitedUntil)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return p, err
+}
+
 // GetChunkLocationsForFile returns all chunk locations for every chunk belonging to a file.
 func (db *DB) GetChunkLocationsForFile(fileID string) ([]ChunkLocation, error) {
 	rows, err := db.conn.Query(

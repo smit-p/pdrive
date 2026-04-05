@@ -177,6 +177,54 @@ func (c *Client) ListDir(remote, remotePath string) ([]ListItem, error) {
 	return resp.List, nil
 }
 
+// About returns raw quota information for a remote via operations/about.
+func (c *Client) About(remote string) (QuotaInfo, error) {
+	result, err := c.call("operations/about", map[string]interface{}{
+		"fs": ensureColon(remote),
+	})
+	if err != nil {
+		return QuotaInfo{}, fmt.Errorf("fetching quota for %s: %w", remote, err)
+	}
+
+	var resp struct {
+		Total *int64 `json:"total"`
+		Used  *int64 `json:"used"`
+		Free  *int64 `json:"free"`
+	}
+	if err := json.Unmarshal(result, &resp); err != nil {
+		return QuotaInfo{}, fmt.Errorf("parsing about response: %w", err)
+	}
+
+	info := QuotaInfo{}
+	if resp.Total != nil {
+		info.Total = *resp.Total
+	}
+	if resp.Used != nil {
+		info.Used = *resp.Used
+	}
+	if resp.Free != nil {
+		info.Free = *resp.Free
+	}
+	return info, nil
+}
+
+// GetRemoteType returns the backend type (e.g., "drive", "s3", "dropbox")
+// for the named remote via the config/get RC endpoint.
+func (c *Client) GetRemoteType(remote string) (string, error) {
+	result, err := c.call("config/get", map[string]interface{}{"name": remote})
+	if err != nil {
+		return "", fmt.Errorf("getting remote config for %s: %w", remote, err)
+	}
+	var cfg map[string]interface{}
+	if err := json.Unmarshal(result, &cfg); err != nil {
+		return "", fmt.Errorf("parsing config response: %w", err)
+	}
+	if t, ok := cfg["type"].(string); ok {
+		return t, nil
+	}
+	return "unknown", nil
+}
+
 // ListRemotes returns all configured rclone remote names.
 func (c *Client) ListRemotes() ([]string, error) {
 	result, err := c.call("config/listremotes", map[string]interface{}{})

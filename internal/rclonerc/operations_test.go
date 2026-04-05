@@ -455,3 +455,92 @@ func TestPutFile_Unreachable(t *testing.T) {
 		t.Fatal("expected error for unreachable server")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// About (operations/about)
+// ---------------------------------------------------------------------------
+
+func TestAbout_Success(t *testing.T) {
+	c := fakeRclone(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"total": 15e9,
+			"used":  5e9,
+			"free":  10e9,
+		})
+	})
+	info, err := c.About("drive")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Total != int64(15e9) {
+		t.Errorf("Total = %d, want %d", info.Total, int64(15e9))
+	}
+	if info.Free != int64(10e9) {
+		t.Errorf("Free = %d, want %d", info.Free, int64(10e9))
+	}
+}
+
+func TestAbout_Error(t *testing.T) {
+	c := fakeRclone(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`error`))
+	})
+	_, err := c.About("drive")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestAbout_BadJSON(t *testing.T) {
+	c := fakeRclone(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`not json`))
+	})
+	_, err := c.About("drive")
+	if err == nil {
+		t.Fatal("expected error for bad JSON")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// GetRemoteType (config/get)
+// ---------------------------------------------------------------------------
+
+func TestGetRemoteType_Success(t *testing.T) {
+	c := fakeRclone(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"type":      "drive",
+			"client_id": "xxx",
+		})
+	})
+	rt, err := c.GetRemoteType("gdrive")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rt != "drive" {
+		t.Errorf("GetRemoteType = %q, want %q", rt, "drive")
+	}
+}
+
+func TestGetRemoteType_NoType(t *testing.T) {
+	c := fakeRclone(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{"client_id": "xxx"})
+	})
+	rt, err := c.GetRemoteType("gdrive")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rt != "unknown" {
+		t.Errorf("GetRemoteType = %q, want %q", rt, "unknown")
+	}
+}
+
+func TestGetRemoteType_Error(t *testing.T) {
+	c := fakeRclone(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`not found`))
+	})
+	_, err := c.GetRemoteType("gdrive")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}

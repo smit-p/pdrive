@@ -2565,3 +2565,212 @@ func TestMvEndpoint_RenameFileError_Trigger(t *testing.T) {
 		t.Errorf("expected 500, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
+
+// ---------------------------------------------------------------------------
+// syncProviders / checkMissingProviders
+// ---------------------------------------------------------------------------
+
+// fakeRCServer creates a mock rclone RC HTTP server that handles the endpoints
+// needed by syncProviders and checkMissingProviders.
+func fakeRCServer(t *testing.T, remotes map[string]string, quotas map[string][2]int64) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/config/listremotes":
+			names := make([]string, 0, len(remotes))
+			for name := range remotes {
+				names = append(names, name)
+			}
+			json.NewEncoder(w).Encode(map[string]interface{}{"remotes": names})
+		case "/config/get":
+			var body map[string]interface{}
+			json.NewDecoder(r.Body).Decode(&body)
+			name, _ := body["name"].(string)
+			typ, ok := remotes[name]
+			if !ok {
+				http.Error(w, "not found", 404)
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]interface{}{"type": typ})
+		case "/operations/about":
+			var body map[string]interface{}
+			json.NewDecoder(r.Body).Decode(&body)
+			fs, _ := body["fs"].(string)
+			remote := strings.TrimSuffix(fs, ":")
+			q, ok := quotas[remote]
+			if !ok {
+				http.Error(w, "no quota", 500)
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]interface{}{"total": q[0], "free": q[1]})
+		default:
+			w.WriteHeader(200)
+			w.Write([]byte("{}"))
+		}
+	}))
+}
+
+func newDaemonWithFakeRC(t *testing.T, srv *httptest.Server) (*Daemon, *metadata.DB) {
+	t.Helper()
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	db, err := metadata.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	addr := strings.TrimPrefix(srv.URL, "http://")
+	rm := NewRcloneManager("", "", addr)
+
+	d := &Daemon{
+		config: Config{ConfigDir: dir},
+		db:     db,
+		rclone: rm,
+	}
+	return d, db
+}
+
+func TestSyncProviders_RegistersRemotes(t *testing.T) {
+	remotes := map[string]string{"gdrive": "drive", "mybox": "dropbox"}
+	quotas := map[string][2]int64{"gdrive": {100e9, 80e9}, "mybox": {50e9, 30e9}}
+	srv := fakeRCServer(t, remotes, quotas)
+	defer srv.Close()
+
+	d, db := newDaemonWithFakeRC(t, srv)
+
+	// DB starts empty.
+	providers, _ := db.GetAllProviders()
+	if len(providers) != 0 {
+		t.Fatalf("expected 0 providers, got %d", len(providers))
+	}
+
+	d.syncProviders()
+
+	providers, err := db.GetAllProviders()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(providers) != 2 {
+		t.Fatalf("expected 2 providers, got %d", len(providers))
+	}
+
+	// Verify one provider's data.
+	p, _ := db.GetProviderByRemote("gdrive")
+	if p == nil {
+		t.Fatal("expected gdrive provider")
+	}
+	if p.Type != "drive" {
+		t.Errorf("Type = %q, want %q", p.Type, "drive")
+	}
+	if p.QuotaTotalBytes == nil || *p.QuotaTotalBytes != int64(100e9) {
+		t.Errorf("QuotaTotalBytes = %v, want %d", p.QuotaTotalBytes, int64(100e9))
+	}
+	if p.QuotaFreeBytes == nil || *p.QuotaFreeBytes != int64(80e9) {
+		t.Errorf("QuotaFreeBytes = %v, want %d", p.QuotaFreeBytes, int64(80e9))
+	}
+}
+
+func TestSyncProviders_UpdatesExisting(t *testing.T) {
+	remotes := map[string]string{"gdrive": "drive"}
+	quotas := map[string][2]int64{"gdrive": {100e9, 60e9}}
+	srv := fakeRCServer(t, remotes, quotas)
+	defer srv.Close()
+
+	d, db := newDaemonWithFakeRC(t, srv)
+
+	// Pre-existing provider with old quota.
+	oldTotal, oldFree := int64(50e9), int64(10e9)
+	db.UpsertProvider(&metadata.Provider{
+		ID: "gdrive", Type: "drive", DisplayName: "gdrive",
+		RcloneRemote: "gdrive", QuotaTotalBytes: &oldTotal, QuotaFreeBytes: &oldFree,
+	})
+
+	d.syncProviders()
+
+	p, _ := db.GetProviderByRemote("gdrive")
+	if p == nil {
+		t.Fatal("expected provider")
+	}
+	// Quota should be refreshed.
+	if *p.QuotaTotalBytes != int64(100e9) {
+		t.Errorf("QuotaTotalBytes = %d, want %d", *p.QuotaTotalBytes, int64(100e9))
+	}
+	if *p.QuotaFreeBytes != int64(60e9) {
+		t.Errorf("QuotaFreeBytes = %d, want %d", *p.QuotaFreeBytes, int64(60e9))
+	}
+}
+
+func TestSyncProviders_NoRemotes(t *testing.T) {
+	remotes := map[string]string{}
+	quotas := map[string][2]int64{}
+	srv := fakeRCServer(t, remotes, quotas)
+	defer srv.Close()
+
+	d, db := newDaemonWithFakeRC(t, srv)
+	d.syncProviders()
+
+	providers, _ := db.GetAllProviders()
+	if len(providers) != 0 {
+		t.Fatalf("expected 0 providers, got %d", len(providers))
+	}
+}
+
+func TestCheckMissingProviders_AllPresent(t *testing.T) {
+	remotes := map[string]string{"gdrive": "drive", "mybox": "dropbox"}
+	quotas := map[string][2]int64{}
+	srv := fakeRCServer(t, remotes, quotas)
+	defer srv.Close()
+
+	d, db := newDaemonWithFakeRC(t, srv)
+
+	total, free := int64(100e9), int64(50e9)
+	db.UpsertProvider(&metadata.Provider{ID: "p1", Type: "drive", DisplayName: "gdrive", RcloneRemote: "gdrive", QuotaTotalBytes: &total, QuotaFreeBytes: &free})
+	db.UpsertProvider(&metadata.Provider{ID: "p2", Type: "dropbox", DisplayName: "mybox", RcloneRemote: "mybox", QuotaTotalBytes: &total, QuotaFreeBytes: &free})
+
+	missing := d.checkMissingProviders()
+	if len(missing) != 0 {
+		t.Errorf("expected 0 missing, got %v", missing)
+	}
+}
+
+func TestCheckMissingProviders_SomeMissing(t *testing.T) {
+	// Machine B only has gdrive configured, but DB has gdrive + dropbox + s3.
+	remotes := map[string]string{"gdrive": "drive"}
+	quotas := map[string][2]int64{}
+	srv := fakeRCServer(t, remotes, quotas)
+	defer srv.Close()
+
+	d, db := newDaemonWithFakeRC(t, srv)
+
+	total, free := int64(100e9), int64(50e9)
+	db.UpsertProvider(&metadata.Provider{ID: "p1", Type: "drive", DisplayName: "gdrive", RcloneRemote: "gdrive", QuotaTotalBytes: &total, QuotaFreeBytes: &free})
+	db.UpsertProvider(&metadata.Provider{ID: "p2", Type: "dropbox", DisplayName: "mybox", RcloneRemote: "mybox", QuotaTotalBytes: &total, QuotaFreeBytes: &free})
+	db.UpsertProvider(&metadata.Provider{ID: "p3", Type: "s3", DisplayName: "aws", RcloneRemote: "aws", QuotaTotalBytes: &total, QuotaFreeBytes: &free})
+
+	missing := d.checkMissingProviders()
+	if len(missing) != 2 {
+		t.Fatalf("expected 2 missing, got %v", missing)
+	}
+	// Should contain mybox and aws.
+	found := map[string]bool{}
+	for _, m := range missing {
+		found[m] = true
+	}
+	if !found["mybox"] || !found["aws"] {
+		t.Errorf("expected mybox and aws in missing, got %v", missing)
+	}
+}
+
+func TestCheckMissingProviders_EmptyDB(t *testing.T) {
+	remotes := map[string]string{"gdrive": "drive"}
+	quotas := map[string][2]int64{}
+	srv := fakeRCServer(t, remotes, quotas)
+	defer srv.Close()
+
+	d, _ := newDaemonWithFakeRC(t, srv)
+	missing := d.checkMissingProviders()
+	if len(missing) != 0 {
+		t.Errorf("expected 0 missing for empty DB, got %v", missing)
+	}
+}
