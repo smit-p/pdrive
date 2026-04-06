@@ -36,6 +36,7 @@ func TestIntegration_UploadDownloadRoundTrip(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("upload: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
+	eng.WaitUploads()
 
 	// Download the same file.
 	req = httptest.NewRequest("GET", "/api/download?path=/integration/roundtrip.txt", nil)
@@ -69,7 +70,7 @@ func TestIntegration_UploadDownloadRoundTrip(t *testing.T) {
 // ── Upload → List → Delete → List (file disappears) ────────────────────────
 
 func TestIntegration_UploadListDeleteList(t *testing.T) {
-	h, _, _ := newTestHandlerWithCloud(t)
+	h, eng, _ := newTestHandlerWithCloud(t)
 	content := []byte("file to be deleted")
 
 	// Upload.
@@ -86,6 +87,7 @@ func TestIntegration_UploadListDeleteList(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("upload: %d", rec.Code)
 	}
+	eng.WaitUploads()
 
 	// List directory — should contain the file.
 	req = httptest.NewRequest("GET", "/api/ls?path=/temp", nil)
@@ -141,6 +143,7 @@ func TestIntegration_DedupSameContentTwice(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Fatalf("upload %s/%s: %d – %s", dir, name, rec.Code, rec.Body.String())
 		}
+		eng.WaitUploads()
 	}
 
 	upload("/dedup", "first.txt")
@@ -176,7 +179,7 @@ func TestIntegration_DedupSameContentTwice(t *testing.T) {
 // ── Upload → Rename → Download at new path ─────────────────────────────────
 
 func TestIntegration_UploadRenameThenDownload(t *testing.T) {
-	h, _, _ := newTestHandlerWithCloud(t)
+	h, eng, _ := newTestHandlerWithCloud(t)
 	content := []byte("move me around")
 
 	// Upload.
@@ -193,6 +196,7 @@ func TestIntegration_UploadRenameThenDownload(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("upload: %d", rec.Code)
 	}
+	eng.WaitUploads()
 
 	// Rename via API.
 	req = httptest.NewRequest("POST", "/api/mv?src=/mv-test/old-name.txt&dst=/mv-test/new-name.txt", nil)
@@ -226,7 +230,7 @@ func TestIntegration_UploadRenameThenDownload(t *testing.T) {
 // ── Upload multiple files → Tree → DiskUsage ───────────────────────────────
 
 func TestIntegration_MultiFileTreeAndDu(t *testing.T) {
-	h, _, _ := newTestHandlerWithCloud(t)
+	h, eng, _ := newTestHandlerWithCloud(t)
 
 	files := []struct{ dir, name, body string }{
 		{"/project", "readme.md", "# Readme"},
@@ -248,6 +252,7 @@ func TestIntegration_MultiFileTreeAndDu(t *testing.T) {
 			t.Fatalf("upload %s/%s: %d", f.dir, f.name, rec.Code)
 		}
 	}
+	eng.WaitUploads()
 
 	// Tree should return all 3 files.
 	req := httptest.NewRequest("GET", "/api/tree?path=/project", nil)
@@ -287,7 +292,7 @@ func TestIntegration_MultiFileTreeAndDu(t *testing.T) {
 // ── Mkdir → Upload into it → Ls ─────────────────────────────────────────────
 
 func TestIntegration_MkdirUploadLs(t *testing.T) {
-	h, _, _ := newTestHandlerWithCloud(t)
+	h, eng, _ := newTestHandlerWithCloud(t)
 
 	// Create directory via API.
 	req := httptest.NewRequest("POST", "/api/mkdir?path=/new-dir", nil)
@@ -311,6 +316,7 @@ func TestIntegration_MkdirUploadLs(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("upload: %d", rec.Code)
 	}
+	eng.WaitUploads()
 
 	// Ls the directory.
 	req = httptest.NewRequest("GET", "/api/ls?path=/new-dir", nil)
@@ -329,7 +335,7 @@ func TestIntegration_MkdirUploadLs(t *testing.T) {
 // ── Upload → Delete dedup original → clone survives ────────────────────────
 
 func TestIntegration_DeleteDedupOriginal_CloneSurvives(t *testing.T) {
-	h, _, _ := newTestHandlerWithCloud(t)
+	h, eng, _ := newTestHandlerWithCloud(t)
 	content := []byte("clone survivor test data")
 
 	// Upload original.
@@ -347,6 +353,7 @@ func TestIntegration_DeleteDedupOriginal_CloneSurvives(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Fatalf("upload %s/%s: %d", dir, name, rec.Code)
 		}
+		eng.WaitUploads()
 	}
 
 	upload("/clone", "original.txt")
@@ -376,7 +383,7 @@ func TestIntegration_DeleteDedupOriginal_CloneSurvives(t *testing.T) {
 // ── Upload → Overwrite → Download (latest version) ─────────────────────────
 
 func TestIntegration_OverwriteReturnsLatest(t *testing.T) {
-	h, _, _ := newTestHandlerWithCloud(t)
+	h, eng, _ := newTestHandlerWithCloud(t)
 
 	upload := func(body string) {
 		var buf bytes.Buffer
@@ -392,6 +399,7 @@ func TestIntegration_OverwriteReturnsLatest(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Fatalf("upload: %d", rec.Code)
 		}
+		eng.WaitUploads()
 	}
 
 	upload("version 1")
@@ -412,7 +420,7 @@ func TestIntegration_OverwriteReturnsLatest(t *testing.T) {
 // ── Find across directories ─────────────────────────────────────────────────
 
 func TestIntegration_FindAcrossDirectories(t *testing.T) {
-	h, _, _ := newTestHandlerWithCloud(t)
+	h, eng, _ := newTestHandlerWithCloud(t)
 
 	files := []struct{ dir, name string }{
 		{"/a", "report.pdf"},
@@ -434,6 +442,7 @@ func TestIntegration_FindAcrossDirectories(t *testing.T) {
 			t.Fatalf("upload %s/%s: %d", f.dir, f.name, rec.Code)
 		}
 	}
+	eng.WaitUploads()
 
 	req := httptest.NewRequest("GET", "/api/find?path=/&pattern=report", nil)
 	rec := httptest.NewRecorder()
@@ -453,7 +462,7 @@ func TestIntegration_FindAcrossDirectories(t *testing.T) {
 // ── Metrics reflect upload/download activity ────────────────────────────────
 
 func TestIntegration_MetricsTrackActivity(t *testing.T) {
-	h, _, _ := newTestHandlerWithCloud(t)
+	h, eng, _ := newTestHandlerWithCloud(t)
 
 	// Check initial metrics.
 	req := httptest.NewRequest("GET", "/api/metrics", nil)
@@ -482,6 +491,7 @@ func TestIntegration_MetricsTrackActivity(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("upload: %d", rec.Code)
 	}
+	eng.WaitUploads()
 
 	// Download the file.
 	req = httptest.NewRequest("GET", "/api/download?path=/metrics/m.txt", nil)
@@ -511,7 +521,7 @@ func TestIntegration_MetricsTrackActivity(t *testing.T) {
 // ── Delete directory cleans up all children ─────────────────────────────────
 
 func TestIntegration_DeleteDirCleansChildren(t *testing.T) {
-	h, _, _ := newTestHandlerWithCloud(t)
+	h, eng, _ := newTestHandlerWithCloud(t)
 
 	// Upload 3 files into /cleanup/.
 	for _, name := range []string{"a.txt", "b.txt", "c.txt"} {
@@ -529,6 +539,7 @@ func TestIntegration_DeleteDirCleansChildren(t *testing.T) {
 			t.Fatalf("upload %s: %d", name, rec.Code)
 		}
 	}
+	eng.WaitUploads()
 
 	// Delete the whole directory.
 	req := httptest.NewRequest("POST", "/api/delete?path=/cleanup", nil)
@@ -552,7 +563,7 @@ func TestIntegration_DeleteDirCleansChildren(t *testing.T) {
 // ── Info endpoint returns chunk details for uploaded file ────────────────────
 
 func TestIntegration_InfoAfterUpload(t *testing.T) {
-	h, _, _ := newTestHandlerWithCloud(t)
+	h, eng, _ := newTestHandlerWithCloud(t)
 
 	// Upload.
 	var buf bytes.Buffer
@@ -568,6 +579,7 @@ func TestIntegration_InfoAfterUpload(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("upload: %d", rec.Code)
 	}
+	eng.WaitUploads()
 
 	// Info.
 	req = httptest.NewRequest("GET", "/api/info?path=/info/info-check.txt", nil)
@@ -602,7 +614,7 @@ func TestIntegration_InfoAfterUpload(t *testing.T) {
 // ── Activity log records all operations ─────────────────────────────────────
 
 func TestIntegration_ActivityLogChain(t *testing.T) {
-	h, _, _ := newTestHandlerWithCloud(t)
+	h, eng, _ := newTestHandlerWithCloud(t)
 
 	// Upload.
 	var buf bytes.Buffer
@@ -618,6 +630,7 @@ func TestIntegration_ActivityLogChain(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("upload: %d", rec.Code)
 	}
+	eng.WaitUploads()
 
 	// Download.
 	req = httptest.NewRequest("GET", "/api/download?path=/act/activity.txt", nil)
@@ -663,7 +676,7 @@ func TestIntegration_ActivityLogChain(t *testing.T) {
 // ── Upload → HEAD download (no body) ────────────────────────────────────────
 
 func TestIntegration_HeadDownload(t *testing.T) {
-	h, _, _ := newTestHandlerWithCloud(t)
+	h, eng, _ := newTestHandlerWithCloud(t)
 	content := []byte("head request test data — 123")
 
 	var buf bytes.Buffer
@@ -679,6 +692,7 @@ func TestIntegration_HeadDownload(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("upload: %d", rec.Code)
 	}
+	eng.WaitUploads()
 
 	// HEAD should return headers but no body.
 	req = httptest.NewRequest("HEAD", "/api/download?path=/head/head.txt", nil)

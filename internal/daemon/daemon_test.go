@@ -2981,7 +2981,6 @@ func TestUploadEndpoint_NoFile(t *testing.T) {
 
 func TestUploadEndpoint_Success(t *testing.T) {
 	h, eng, db := newTestHandlerWithCloud(t)
-	_ = eng
 
 	// Build multipart form
 	var buf bytes.Buffer
@@ -2999,6 +2998,8 @@ func TestUploadEndpoint_Success(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
+
+	eng.WaitUploads()
 
 	// Verify file was created.
 	f, err := db.GetCompleteFileByPath("/docs/test.txt")
@@ -3026,7 +3027,7 @@ func TestUploadEndpoint_Success(t *testing.T) {
 }
 
 func TestUploadEndpoint_DefaultDir(t *testing.T) {
-	h, _, db := newTestHandlerWithCloud(t)
+	h, eng, db := newTestHandlerWithCloud(t)
 
 	var buf bytes.Buffer
 	writer := multipartWriter(&buf)
@@ -3042,6 +3043,7 @@ func TestUploadEndpoint_DefaultDir(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
+	eng.WaitUploads()
 	f, _ := db.GetCompleteFileByPath("/root.txt")
 	if f == nil {
 		t.Fatal("uploaded file not found at /root.txt")

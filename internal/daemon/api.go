@@ -4,6 +4,7 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/http"
 	"os"
@@ -68,6 +69,7 @@ type browserHandler struct {
 	syncDir      *vfs.SyncDir // may be nil if sync is disabled
 	startTime    time.Time
 	configDir    string
+	spoolDir     string // temp dir for in-progress upload spool files
 	rcloneClient interface {
 		ListRemotes() ([]string, error)
 		GetRemoteType(string) (string, error)
@@ -701,11 +703,37 @@ func (h *browserHandler) serveAPIUpload(w http.ResponseWriter, r *http.Request) 
 		h.ensureParentDirs(dir)
 	}
 
-	if err := h.engine.WriteFileStream(virtualPath, file, header.Size); err != nil {
+	// Spool the multipart data to a temp file so WriteFileAsync can take
+	// ownership and upload chunks in the background. This lets the HTTP
+	// request finish quickly and gives server-side progress tracking +
+	// resume on daemon restart.
+	spoolDir := h.spoolDir
+	if spoolDir == "" {
+		spoolDir = os.TempDir()
+	}
+	tmpFile, err := os.CreateTemp(spoolDir, "upload-*")
+	if err != nil {
+		http.Error(w, "failed to create temp file: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if _, err := io.Copy(tmpFile, file); err != nil {
+		tmpFile.Close()
+		os.Remove(tmpFile.Name())
+		http.Error(w, "failed to spool upload: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
+		tmpFile.Close()
+		os.Remove(tmpFile.Name())
+		http.Error(w, "failed to rewind temp file: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// WriteFileAsync takes ownership of tmpFile (caller must not close it).
+	if err := h.engine.WriteFileAsync(virtualPath, tmpFile, tmpFile.Name(), header.Size); err != nil {
 		http.Error(w, "upload failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	h.engine.DB().InsertActivity("upload", virtualPath, fmt.Sprintf("%d bytes", header.Size)) //nolint:errcheck
 	w.Header().Set("Content-Type", "application/json")
 	fmt.Fprintf(w, `{"status":"ok","path":%q,"size":%d}`, virtualPath, header.Size)
 }

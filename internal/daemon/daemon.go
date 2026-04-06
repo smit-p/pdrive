@@ -236,6 +236,7 @@ func (d *Daemon) Start(ctx context.Context) error {
 			syncDir:         d.syncDir,
 			startTime:       time.Now(),
 			configDir:       d.config.ConfigDir,
+			spoolDir:        spoolDir,
 			rcloneClient:    d.rclone.Client(),
 			activeRemotes:   d.config.Remotes,
 			resyncProviders: func() { d.syncProviders() },

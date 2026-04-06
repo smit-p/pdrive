@@ -224,6 +224,10 @@ func (e *Engine) Close() {
 // need to inspect or mutate DB state alongside engine operations.
 func (e *Engine) DB() *metadata.DB { return e.db }
 
+// WaitUploads blocks until all in-flight async uploads have completed.
+// Intended for tests; production code should use Shutdown().
+func (e *Engine) WaitUploads() { e.asyncWG.Wait() }
+
 // SetChunkSize overrides the dynamic chunk-size calculation with a fixed value.
 // Pass 0 to revert to the default dynamic behaviour.
 func (e *Engine) SetChunkSize(bytes int) { e.overrideChunkSize = bytes }
@@ -464,6 +468,19 @@ func (e *Engine) WriteFileAsync(virtualPath string, tmpFile *os.File, tmpPath st
 		}
 	}
 
+	// Content-hash dedup: if a completed file with the same SHA256 already
+	// exists, clone its chunk metadata instead of re-uploading.
+	if donor, _ := e.db.GetCompleteFileByHash(fullHashStr); donor != nil {
+		tmpFile.Close()
+		os.Remove(tmpPath)
+		fileID := uuid.New().String()
+		err := e.cloneFileFromDonor(donor, fileID, virtualPath, size, fullHashStr)
+		if err == nil {
+			e.db.InsertActivity("upload", virtualPath, fmt.Sprintf("%d bytes", size)) //nolint:errcheck
+		}
+		return err
+	}
+
 	fileID := uuid.New().String()
 	now := time.Now().Unix()
 	dbTmpPath := tmpPath
@@ -519,6 +536,7 @@ func (e *Engine) WriteFileAsync(virtualPath string, tmpFile *os.File, tmpPath st
 		slog.Info("file written", "path", virtualPath, "size", size, "chunks", len(metas))
 		e.filesUploaded.Add(1)
 		e.bytesUploaded.Add(size)
+		e.db.InsertActivity("upload", virtualPath, fmt.Sprintf("%d bytes", size)) //nolint:errcheck
 		e.scheduleBackup()
 	}()
 	return nil
