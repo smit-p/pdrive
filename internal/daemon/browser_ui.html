@@ -1128,15 +1128,24 @@ function readEntryRecursive(entry,basePath,results,done){
       done();
     },function(){done()});
   } else if(entry.isDirectory){
-    var reader=entry.createReader();
     var dirPath=basePath?basePath+'/'+entry.name:entry.name;
-    reader.readEntries(function(entries){
-      if(!entries.length){done();return;}
-      var pending=entries.length;
-      entries.forEach(function(child){
-        readEntryRecursive(child,dirPath,results,function(){pending--;if(!pending)done();});
-      });
-    },function(){done()});
+    var reader=entry.createReader();
+    var allEntries=[];
+    // readEntries may return partial results; call repeatedly until empty.
+    (function readBatch(){
+      reader.readEntries(function(batch){
+        if(!batch.length){
+          if(!allEntries.length){done();return;}
+          var pending=allEntries.length;
+          allEntries.forEach(function(child){
+            readEntryRecursive(child,dirPath,results,function(){pending--;if(!pending)done();});
+          });
+          return;
+        }
+        allEntries=allEntries.concat(Array.from(batch));
+        readBatch();
+      },function(){done()});
+    })();
   } else {done();}
 }
 
@@ -1544,23 +1553,24 @@ document.addEventListener('change',function(e){
   main.addEventListener('drop',function(e){
     e.preventDefault();dragCounter=0;main.classList.remove('drag-over');
     if(S.page!=='browse'||!e.dataTransfer)return;
-    // Check if any dropped items are directories via webkitGetAsEntry
+    // Collect all entries in a single pass (webkitGetAsEntry is only valid synchronously during drop).
     var items=e.dataTransfer.items;
+    var entries=[];
     var hasDir=false;
     if(items){
       for(var i=0;i<items.length;i++){
         var entry=items[i].webkitGetAsEntry&&items[i].webkitGetAsEntry();
-        if(entry&&entry.isDirectory){hasDir=true;break;}
+        if(entry){
+          entries.push(entry);
+          if(entry.isDirectory)hasDir=true;
+        }
       }
     }
-    if(hasDir&&items){
-      var results=[];var pending=items.length;
-      for(var i=0;i<items.length;i++){
-        var entry=items[i].webkitGetAsEntry();
-        if(entry){
-          readEntryRecursive(entry,'',results,function(){pending--;if(!pending)doUploadWithPaths(results);});
-        } else {pending--;if(!pending)doUploadWithPaths(results);}
-      }
+    if(hasDir&&entries.length){
+      var results=[];var pending=entries.length;
+      entries.forEach(function(entry){
+        readEntryRecursive(entry,'',results,function(){pending--;if(!pending)doUploadWithPaths(results);});
+      });
     } else if(e.dataTransfer.files.length){
       doUploadFiles(e.dataTransfer.files);
     }
