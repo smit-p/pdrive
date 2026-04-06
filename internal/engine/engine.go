@@ -26,6 +26,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -41,6 +42,10 @@ import (
 	"github.com/smit-p/pdrive/internal/metadata"
 	"github.com/smit-p/pdrive/internal/rclonerc"
 )
+
+// ErrInsufficientSpace is returned when the total file size exceeds the
+// aggregate free space across all providers.
+var ErrInsufficientSpace = errors.New("file size exceeds available storage space")
 
 // CloudStorage is the interface the Engine uses to talk to cloud providers.
 // *rclonerc.Client satisfies this interface in production; tests inject a fake.
@@ -249,6 +254,40 @@ func (e *Engine) EnsureRemoteDirs() {
 }
 func (e *Engine) SetMaxChunkRetries(n int) { e.maxChunkRetries = n }
 
+// CheckSpace returns a non-nil error if fileSize (in plain bytes) exceeds the
+// aggregate free space across all eligible providers. The comparison uses an
+// overhead factor of ~1.08 to account for AES-GCM encryption expansion (nonce +
+// tag per chunk).
+func (e *Engine) CheckSpace(fileSize int64) error {
+	free, err := e.broker.TotalFreeSpace()
+	if err != nil {
+		return fmt.Errorf("checking free space: %w", err)
+	}
+	// Encryption adds a 28-byte overhead (12-byte nonce + 16-byte GCM tag) per
+	// chunk.  Conservatively assume 8% overhead so the check is never overly
+	// optimistic.
+	needed := fileSize + fileSize/12
+	if needed > free {
+		return fmt.Errorf("%w: need ~%s but only %s available",
+			ErrInsufficientSpace, fmtBytes(needed), fmtBytes(free))
+	}
+	return nil
+}
+
+// fmtBytes formats a byte count as a human-readable string.
+func fmtBytes(b int64) string {
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(b)/float64(div), "KMGTPE"[exp])
+}
+
 // MetricsSnapshot is a point-in-time snapshot of engine telemetry counters.
 type MetricsSnapshot struct {
 	FilesUploaded   int64 `json:"files_uploaded"`
@@ -326,6 +365,11 @@ type chunkMeta struct {
 
 // WriteFileStream writes a file from a stream synchronously (hash + upload + metadata).
 func (e *Engine) WriteFileStream(virtualPath string, r io.ReadSeeker, size int64) error {
+	// Pre-upload space check: reject early if the file won't fit.
+	if err := e.CheckSpace(size); err != nil {
+		return err
+	}
+
 	// Delete any existing record (complete or pending) at this path so the
 	// INSERT below never hits a UNIQUE constraint on virtual_path.
 	existing, _ := e.db.GetFileByPath(virtualPath)
@@ -389,6 +433,13 @@ func (e *Engine) WriteFileStream(virtualPath string, r io.ReadSeeker, size int64
 // until the upload completes (ListFiles/GetFileByPath filter pending records).
 // The caller must NOT close or remove tmpFile; the engine takes ownership.
 func (e *Engine) WriteFileAsync(virtualPath string, tmpFile *os.File, tmpPath string, size int64) error {
+	// Pre-upload space check: reject early if the file won't fit.
+	if err := e.CheckSpace(size); err != nil {
+		tmpFile.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+
 	// Hash synchronously so we can write the pending DB record now.
 	hasher := sha256.New()
 	if _, err := io.Copy(hasher, tmpFile); err != nil {
@@ -490,6 +541,9 @@ func (e *Engine) uploadChunks(r io.ReadSeeker, fileID string, fileSize int64, on
 		firstErr error
 		wg       sync.WaitGroup
 		sem      = make(chan struct{}, workers)
+		// uploaded tracks metas whose cloud upload succeeded, so we can
+		// clean them up if a later chunk fails.
+		uploaded []chunkMeta
 	)
 
 	for chunkCount := 0; ; chunkCount++ {
@@ -541,7 +595,7 @@ func (e *Engine) uploadChunks(r io.ReadSeeker, fileID string, fileSize int64, on
 
 		sem <- struct{}{}
 		wg.Add(1)
-		go func(enc []byte, remote string, prov *metadata.Provider, seq int) {
+		go func(enc []byte, remote string, prov *metadata.Provider, seq int, cm chunkMeta) {
 			defer func() { <-sem; wg.Done() }()
 			retries := maxUploadRetries
 			if e.maxChunkRetries > 0 {
@@ -550,6 +604,10 @@ func (e *Engine) uploadChunks(r io.ReadSeeker, fileID string, fileSize int64, on
 			var lastErr error
 			for attempt := 0; attempt < retries; attempt++ {
 				if attempt > 0 {
+					// Don't retry quota-exceeded errors — they won't succeed.
+					if rclonerc.IsQuotaExceeded(lastErr) {
+						break
+					}
 					backoff := time.Duration(1<<uint(attempt)) * time.Second
 					// Triple backoff when the provider is rate-limiting us.
 					if rclonerc.IsRateLimited(lastErr) {
@@ -574,6 +632,12 @@ func (e *Engine) uploadChunks(r io.ReadSeeker, fileID string, fileSize int64, on
 				}
 				slog.Debug("chunk uploaded", "seq", seq, "provider", prov.DisplayName)
 				e.chunksUploaded.Add(1)
+				// Deduct the encrypted size from the provider's free-space counter
+				// so the broker's view stays fresh between full quota syncs.
+				_ = e.db.DeductProviderFreeBytes(prov.ID, int64(len(enc)))
+				mu.Lock()
+				uploaded = append(uploaded, cm)
+				mu.Unlock()
 				if onChunkUploaded != nil {
 					onChunkUploaded()
 				}
@@ -585,12 +649,25 @@ func (e *Engine) uploadChunks(r io.ReadSeeker, fileID string, fileSize int64, on
 					seq, prov.DisplayName, retries, lastErr)
 			}
 			mu.Unlock()
-		}(encrypted, remotePath, provider, chunk.Sequence)
+		}(encrypted, remotePath, provider, chunk.Sequence, metas[len(metas)-1])
 	}
 
 	wg.Wait()
 
 	if firstErr != nil {
+		// Clean up chunks that were successfully uploaded before the failure.
+		if len(uploaded) > 0 {
+			locs := make([]metadata.ChunkLocation, len(uploaded))
+			for i, m := range uploaded {
+				locs[i] = metadata.ChunkLocation{
+					ChunkID:    m.chunkID,
+					ProviderID: m.providerID,
+					RemotePath: m.remotePath,
+				}
+			}
+			slog.Info("cleaning up partial upload", "uploaded_chunks", len(uploaded))
+			go e.deleteCloudChunks(locs)
+		}
 		return nil, firstErr
 	}
 

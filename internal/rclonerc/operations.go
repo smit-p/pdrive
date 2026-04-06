@@ -26,6 +26,26 @@ func IsRateLimited(err error) bool {
 		strings.Contains(msg, "ratelimitexceeded")
 }
 
+// IsQuotaExceeded checks if an error from rclone indicates the cloud provider
+// rejected the operation because of insufficient storage quota.
+func IsQuotaExceeded(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "quota") ||
+		strings.Contains(msg, "storagelimitexceeded") ||
+		strings.Contains(msg, "storage limit") ||
+		strings.Contains(msg, "insufficient storage") ||
+		strings.Contains(msg, "not enough space") ||
+		strings.Contains(msg, "disk full") ||
+		strings.Contains(msg, "no space left") ||
+		strings.Contains(msg, "enospc") ||
+		strings.Contains(msg, "413") ||
+		strings.Contains(msg, "over quota") ||
+		strings.Contains(msg, "account full")
+}
+
 // ensureColon normalizes a remote name to always end with a colon.
 func ensureColon(remote string) string {
 	return strings.TrimSuffix(remote, ":") + ":"

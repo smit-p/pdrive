@@ -128,8 +128,8 @@ func TestFUSE_ReadAtMultipleOffsets(t *testing.T) {
 		{0, 10, "0123456789"},
 		{10, 6, "ABCDEF"},
 		{36, 5, "abcde"},
-		{60, 100, "yz"},       // past end
-		{62, 10, ""},          // at exact end
+		{60, 100, "yz"}, // past end
+		{62, 10, ""},    // at exact end
 	}
 	for _, tc := range tests {
 		rh := &fuseFileHandle{eng: eng, vpath: "/offsets.txt", writable: false, spoolDir: spoolDir}

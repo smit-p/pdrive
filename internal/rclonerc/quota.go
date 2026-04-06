@@ -64,6 +64,14 @@ func (qc *QuotaCache) Invalidate(remote string) {
 	qc.mu.Unlock()
 }
 
+// InvalidateAll clears all cached quota entries, forcing a fresh fetch on the
+// next GetQuota call. Useful before uploads to avoid stale free-space data.
+func (qc *QuotaCache) InvalidateAll() {
+	qc.mu.Lock()
+	clear(qc.cache)
+	qc.mu.Unlock()
+}
+
 func (qc *QuotaCache) fetchQuota(remote string) (QuotaInfo, error) {
 	result, err := qc.client.call("operations/about", map[string]interface{}{
 		"fs": remote + ":",

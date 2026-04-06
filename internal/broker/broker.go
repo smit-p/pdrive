@@ -124,3 +124,23 @@ func (b *Broker) pickPFRD(candidates []metadata.Provider) string {
 	}
 	return candidates[len(candidates)-1].ID
 }
+
+// TotalFreeSpace returns the aggregate free space across all eligible providers.
+// Providers that are rate-limited or below the min free-space threshold are excluded.
+func (b *Broker) TotalFreeSpace() (int64, error) {
+	providers, err := b.db.GetAllProviders()
+	if err != nil {
+		return 0, err
+	}
+	var total int64
+	now := time.Now().Unix()
+	for _, p := range providers {
+		if p.RateLimitedUntil != nil && *p.RateLimitedUntil > now {
+			continue
+		}
+		if p.QuotaFreeBytes != nil {
+			total += *p.QuotaFreeBytes
+		}
+	}
+	return total, nil
+}

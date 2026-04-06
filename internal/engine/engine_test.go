@@ -4217,8 +4217,8 @@ func TestWriteFileAsync_HashError(t *testing.T) {
 	}
 }
 
-// TestUploadChunks_AssignChunkError covers the broker.AssignChunk error (line 477)
-// when no providers have free space.
+// TestUploadChunks_AssignChunkError covers the pre-upload space check and
+// broker.AssignChunk error when no providers have free space.
 func TestUploadChunks_AssignChunkError(t *testing.T) {
 	eng, _ := newTestEngine(t)
 
@@ -4238,8 +4238,9 @@ func TestUploadChunks_AssignChunkError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when broker cannot assign chunk")
 	}
-	if !strings.Contains(err.Error(), "assigning chunk") {
-		t.Fatalf("expected 'assigning chunk' error, got: %v", err)
+	// Pre-upload space check now rejects before reaching AssignChunk.
+	if !strings.Contains(err.Error(), "exceeds available storage") && !strings.Contains(err.Error(), "assigning chunk") {
+		t.Fatalf("expected insufficient-space or assigning-chunk error, got: %v", err)
 	}
 }
 

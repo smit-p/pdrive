@@ -429,6 +429,17 @@ func (db *DB) GetProviderByRemote(rcloneRemote string) (*Provider, error) {
 	return p, err
 }
 
+// DeductProviderFreeBytes atomically decreases a provider's quota_free_bytes
+// by delta. Used after each chunk upload to keep the broker's space view fresh
+// between full quota syncs.
+func (db *DB) DeductProviderFreeBytes(providerID string, delta int64) error {
+	_, err := db.conn.Exec(
+		`UPDATE providers SET quota_free_bytes = MAX(quota_free_bytes - ?, 0) WHERE id = ? AND quota_free_bytes IS NOT NULL`,
+		delta, providerID,
+	)
+	return err
+}
+
 // GetChunkLocationsForFile returns all chunk locations for every chunk belonging to a file.
 func (db *DB) GetChunkLocationsForFile(fileID string) ([]ChunkLocation, error) {
 	rows, err := db.conn.Query(

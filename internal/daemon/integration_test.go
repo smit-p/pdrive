@@ -56,7 +56,9 @@ func TestIntegration_UploadDownloadRoundTrip(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("verify: expected 200, got %d", rec.Code)
 	}
-	var vr struct{ OK bool `json:"ok"` }
+	var vr struct {
+		OK bool `json:"ok"`
+	}
 	json.NewDecoder(rec.Body).Decode(&vr)
 	if !vr.OK {
 		t.Error("verify: expected ok=true")
@@ -254,7 +256,9 @@ func TestIntegration_MultiFileTreeAndDu(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("tree: %d", rec.Code)
 	}
-	var entries []struct{ Path string `json:"path"` }
+	var entries []struct {
+		Path string `json:"path"`
+	}
 	json.NewDecoder(rec.Body).Decode(&entries)
 	if len(entries) != 3 {
 		t.Errorf("tree: expected 3 entries, got %d", len(entries))
@@ -437,7 +441,9 @@ func TestIntegration_FindAcrossDirectories(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("find: %d", rec.Code)
 	}
-	var entries []struct{ Path string `json:"path"` }
+	var entries []struct {
+		Path string `json:"path"`
+	}
 	json.NewDecoder(rec.Body).Decode(&entries)
 	if len(entries) != 2 {
 		t.Errorf("find: expected 2 matches, got %d", len(entries))

@@ -303,13 +303,13 @@ func TestIntegration_SearchAcrossFiles(t *testing.T) {
 	eng, _ := newTestEngine(t)
 
 	files := map[string][]byte{
-		"/docs/readme.md":      []byte("# Readme"),
-		"/docs/guide.md":       []byte("# Guide"),
-		"/src/main.go":         []byte("package main"),
-		"/src/util.go":         []byte("package main"),
-		"/images/photo.jpg":    []byte{0xFF, 0xD8},
-		"/images/logo.png":     []byte{0x89, 0x50},
-		"/project/readme.txt":  []byte("project readme"),
+		"/docs/readme.md":     []byte("# Readme"),
+		"/docs/guide.md":      []byte("# Guide"),
+		"/src/main.go":        []byte("package main"),
+		"/src/util.go":        []byte("package main"),
+		"/images/photo.jpg":   []byte{0xFF, 0xD8},
+		"/images/logo.png":    []byte{0x89, 0x50},
+		"/project/readme.txt": []byte("project readme"),
 	}
 	for p, data := range files {
 		eng.WriteFile(p, data)
