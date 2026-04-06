@@ -81,14 +81,14 @@ func (db *DB) GetProviderChunkBytes() (map[string]int64, error) {
 	return out, rows.Err()
 }
 
-// InsertFile inserts a new file record.
+// InsertFile inserts or replaces a file record.
 func (db *DB) InsertFile(f *File) error {
 	state := f.UploadState
 	if state == "" {
 		state = "complete"
 	}
 	_, err := db.conn.Exec(
-		`INSERT INTO files (id, virtual_path, size_bytes, created_at, modified_at, sha256_full, upload_state, tmp_path)
+		`INSERT OR REPLACE INTO files (id, virtual_path, size_bytes, created_at, modified_at, sha256_full, upload_state, tmp_path)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		f.ID, f.VirtualPath, f.SizeBytes, f.CreatedAt, f.ModifiedAt, f.SHA256Full, state, f.TmpPath,
 	)
