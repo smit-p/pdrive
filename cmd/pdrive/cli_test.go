@@ -2582,7 +2582,7 @@ func TestRunLs_SortMultipleFiles(t *testing.T) {
 	if alphaIdx < 0 || middleIdx < 0 || zebraIdx < 0 {
 		t.Fatalf("missing files in output:\n%s", output)
 	}
-	if !(alphaIdx < middleIdx && middleIdx < zebraIdx) {
+	if alphaIdx >= middleIdx || middleIdx >= zebraIdx {
 		t.Errorf("files not sorted: alpha@%d middle@%d zebra@%d\n%s", alphaIdx, middleIdx, zebraIdx, output)
 	}
 }
