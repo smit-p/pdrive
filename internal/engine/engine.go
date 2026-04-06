@@ -1,3 +1,25 @@
+// Package engine is the core orchestrator for all pdrive file operations:
+// upload, download, delete, rename, deduplication, and metadata management.
+//
+// Upload pipeline:
+//  1. File is hashed (SHA-256) for content-hash deduplication.
+//  2. If a matching file already exists, chunk metadata is cloned (zero upload).
+//  3. Otherwise the file is split into chunks via [chunker.ChunkReader],
+//     each chunk is AES-256-GCM encrypted, then uploaded concurrently with
+//     retry and exponential backoff through the [CloudStorage] interface.
+//  4. Files larger than [AsyncWriteThreshold] upload in the background so
+//     WebDAV PUT returns quickly.
+//
+// Download pipeline:
+//  1. Chunks are downloaded sequentially, decrypted, SHA-256 verified,
+//     and written to a temp file.
+//  2. A full-file hash check is performed before returning.
+//
+// The engine also manages:
+//   - Debounced encrypted metadata DB backup to all providers
+//   - Orphan GC (cloud objects with no DB record, and vice versa)
+//   - Failed-deletion retry queue
+//   - Telemetry counters (files/chunks/bytes uploaded, downloads, dedup hits)
 package engine
 
 import (

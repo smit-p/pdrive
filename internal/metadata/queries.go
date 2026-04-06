@@ -516,7 +516,8 @@ func (db *DB) PathIsDir(dirPath string) (bool, error) {
 	return fileCount > 0, err
 }
 
-// VirtualDir returns the parent directory of a path.
+// VirtualDir returns the parent directory of a virtual path.
+// Returns "/" for top-level paths.
 func VirtualDir(virtualPath string) string {
 	dir := path.Dir(virtualPath)
 	if dir == "." {
@@ -627,6 +628,8 @@ func (db *DB) RenameDirectoriesUnder(oldDir, newDir string) error {
 }
 
 // FailedDeletion represents a cloud chunk deletion that failed and must be retried.
+// Each record lives in the failed_deletions table until the retry succeeds or
+// the maximum retry count is reached.
 type FailedDeletion struct {
 	ID         int64
 	ProviderID string
@@ -781,7 +784,8 @@ func (db *DB) DiskUsage(root string) (int64, int64, error) {
 	return count, total, err
 }
 
-// ActivityEntry represents a row in the activity_log table.
+// ActivityEntry represents a row in the activity_log table, which tracks
+// user-visible actions (uploads, downloads, deletes, etc.) for the UI.
 type ActivityEntry struct {
 	ID        int64
 	Action    string

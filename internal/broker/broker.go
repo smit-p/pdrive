@@ -1,3 +1,12 @@
+// Package broker assigns chunks to cloud storage providers based on
+// available free space.  Two placement policies are supported:
+//   - PFRD (Proportional Free-space Random Distribution) — weighted random
+//     selection biased toward providers with more free space.
+//   - MFS (Most Free Space) — always picks the provider with the most
+//     free space.
+//
+// The broker queries provider quotas from the metadata DB and filters out
+// providers that are rate-limited or below the minimum free-space threshold.
 package broker
 
 import (
@@ -8,6 +17,7 @@ import (
 	"github.com/smit-p/pdrive/internal/metadata"
 )
 
+// ErrNoSpace is returned when no provider has sufficient free space for a chunk.
 var ErrNoSpace = errors.New("no provider has enough free space")
 
 // Policy controls how the broker selects a provider for new chunks.

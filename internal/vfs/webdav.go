@@ -1,3 +1,14 @@
+// Package vfs provides the virtual filesystem layers for pdrive:
+//
+//   - [WebDAVFS] implements [webdav.FileSystem] so that macOS Finder and
+//     other WebDAV clients can read/write files transparently.  Writes
+//     are spooled to a temp file and uploaded on Close.
+//   - [SyncDir] watches a local directory with fsnotify and syncs
+//     changes (create, modify, rename, delete) to the cloud via the
+//     [engine.Engine].  Cloud-only files appear as stub placeholders
+//     (0-byte files with xattr markers) that can be pinned/unpinned.
+//   - Stub files are POSIX-only (macOS/Linux) — they use extended
+//     attributes (xattr) to store the cloud-only flag and real size.
 package vfs
 
 import (

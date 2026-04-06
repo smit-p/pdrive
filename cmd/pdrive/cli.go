@@ -1156,6 +1156,7 @@ func runDu(addr, configDir string, args []string) {
 
 // --- formatting helpers ---
 
+// fmtSize formats a byte count as a human-readable string (B / KB / MB / GB).
 func fmtSize(b int64) string {
 	switch {
 	case b < 1024:
@@ -1169,6 +1170,7 @@ func fmtSize(b int64) string {
 	}
 }
 
+// fmtAge formats a Unix timestamp as a relative-time string ("just now", "3h ago", etc.).
 func fmtAge(unixSec int64) string {
 	if unixSec == 0 {
 		return "-"
@@ -1188,6 +1190,7 @@ func fmtAge(unixSec int64) string {
 	}
 }
 
+// fmtDuration formats a duration in seconds as a human-readable string (e.g. "2d 5h 30m").
 func fmtDuration(seconds float64) string {
 	d := time.Duration(seconds * float64(time.Second))
 	days := int(d.Hours() / 24)
@@ -1206,6 +1209,7 @@ func fmtDuration(seconds float64) string {
 	}
 }
 
+// stateLabel converts a file sync state into a user-friendly label.
 func stateLabel(state string) string {
 	switch state {
 	case "local":
@@ -1255,6 +1259,8 @@ Info:
 
 Management:
   pdrive stop                     Stop the daemon
+  pdrive mount [--mountpoint=PATH] Switch to FUSE backend (default: ~/pdrive)
+  pdrive unmount                  Unmount FUSE and stop the daemon
   pdrive help                     Show all daemon flags
 
 Hints:
@@ -1264,6 +1270,8 @@ Hints:
 
 Flags:
   --password      Encryption password (derives AES-256 key via Argon2id)
+  --backend       Mount backend: webdav (default) or fuse
+  --mountpoint    FUSE mount point path (default: ~/pdrive)
   --remotes       Override remote selection (comma-separated; prefer remotes add/remove)
   --webdav-addr   Daemon address (default 127.0.0.1:8765)
   --foreground    Run in foreground (for systemd/debugging)

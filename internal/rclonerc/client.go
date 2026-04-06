@@ -1,3 +1,14 @@
+// Package rclonerc provides a Go client for the rclone RC (remote control)
+// HTTP API.  It is used by the pdrive engine to upload, download, and
+// delete encrypted file chunks on any rclone-supported cloud backend
+// (Google Drive, Dropbox, OneDrive, S3, etc.).
+//
+// Key capabilities:
+//   - Async file upload via operations/copyfile + job polling
+//   - Streaming file download to temp files (no full-file memory allocation)
+//   - Quota fetching with a TTL cache ([QuotaCache])
+//   - Account identity detection for display labels ([FetchAccountIdentity])
+//   - Rate-limit detection via error message heuristics ([IsRateLimited])
 package rclonerc
 
 import (

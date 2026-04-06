@@ -1,3 +1,11 @@
+// Package daemon ties all pdrive subsystems together into a single long-running
+// process: it starts the rclone RC child process, opens the metadata DB,
+// creates the engine, launches the WebDAV + HTTP API server, watches the
+// local sync directory, and runs periodic background tasks (orphan GC,
+// failed-deletion retry, metadata backup).
+//
+// The daemon is started by the CLI (cmd/pdrive) and can be stopped via
+// "pdrive stop" (SIGTERM to the PID file).
 package daemon
 
 import (
@@ -17,6 +25,8 @@ import (
 	"github.com/smit-p/pdrive/internal/broker"
 	"github.com/smit-p/pdrive/internal/chunker"
 	"github.com/smit-p/pdrive/internal/engine"
+	"github.com/smit-p/pdrive/internal/fusefs"
+	"github.com/smit-p/pdrive/internal/junkfile"
 	"github.com/smit-p/pdrive/internal/metadata"
 	"github.com/smit-p/pdrive/internal/vfs"
 	"golang.org/x/net/webdav"
@@ -71,6 +81,8 @@ type Config struct {
 	ChunkSize    int      // override chunk size (bytes); 0 uses dynamic sizing
 	RatePerSec   int      // API rate limit (tokens per second); 0 uses default (8/s)
 	Remotes      []string // rclone remote names to use; empty means all
+	MountBackend string   // "webdav" (default) or "fuse"
+	MountPoint   string   // FUSE mount point path (e.g. /Volumes/pdrive)
 }
 
 // Daemon is the main pdrive daemon that ties everything together.
@@ -81,6 +93,7 @@ type Daemon struct {
 	engine       *engine.Engine
 	webdavServer *http.Server
 	syncDir      *vfs.SyncDir
+	fuseServer   *fusefs.Server // non-nil when MountBackend == "fuse"
 }
 
 // New creates a new daemon with the given configuration.
@@ -201,6 +214,10 @@ func (d *Daemon) Start(ctx context.Context) error {
 		d.engine.SetSaltPath(saltPath)
 	}
 
+	// Purge OS-generated junk files (e.g. .DS_Store, ._* resource forks)
+	// that may have been synced before the skip filter was in place.
+	d.purgeJunkFiles()
+
 	// Start local sync dir if configured.
 	if d.config.SyncDir != "" {
 		if err := os.MkdirAll(d.config.SyncDir, 0755); err != nil {
@@ -212,7 +229,28 @@ func (d *Daemon) Start(ctx context.Context) error {
 		}
 	}
 
+	// Start FUSE mount if backend is "fuse".
+	if d.config.MountBackend == "fuse" {
+		mp := d.config.MountPoint
+		if mp == "" {
+			// Default mount point: ~/pdrive
+			if home, err := os.UserHomeDir(); err == nil {
+				mp = filepath.Join(home, "pdrive")
+				slog.Info("no --mountpoint specified, using default", "mountpoint", mp)
+			} else {
+				return fmt.Errorf("--mountpoint is required (could not determine home directory)")
+			}
+		}
+		srv, err := fusefs.Mount(mp, d.engine, spoolDir)
+		if err != nil {
+			return fmt.Errorf("mounting FUSE filesystem: %w", err)
+		}
+		d.fuseServer = srv
+	}
+
 	// Start HTTP server — includes WebDAV + status/upload APIs.
+	// The HTTP API server always runs (for CLI commands), but WebDAV
+	// file operations only serve when backend is "webdav" (default).
 	davFS := vfs.NewWebDAVFS(d.engine, spoolDir)
 	handler := &webdav.Handler{
 		FileSystem: davFS,
@@ -246,9 +284,14 @@ func (d *Daemon) Start(ctx context.Context) error {
 		}
 	}()
 
+	backend := d.config.MountBackend
+	if backend == "" {
+		backend = "webdav"
+	}
 	slog.Info("pdrive daemon started",
 		"configDir", d.config.ConfigDir,
 		"syncDir", d.config.SyncDir,
+		"backend", backend,
 		"http", d.config.WebDAVAddr,
 		"rclone", d.config.RcloneAddr,
 	)
@@ -302,6 +345,11 @@ func (d *Daemon) Stop() {
 
 	if d.syncDir != nil {
 		d.syncDir.Stop()
+	}
+	if d.fuseServer != nil {
+		if err := d.fuseServer.Unmount(); err != nil {
+			slog.Warn("FUSE unmount error", "error", err)
+		}
 	}
 	if d.webdavServer != nil {
 		d.webdavServer.Close()
@@ -668,6 +716,30 @@ func (d *Daemon) checkMissingProviders() []string {
 	return missing
 }
 
+// purgeJunkFiles removes OS-generated junk files (.DS_Store, ._* resource
+// forks, Thumbs.db, etc.) from the metadata DB. These files are harmless but
+// waste storage quota and clutter the UI.
+func (d *Daemon) purgeJunkFiles() {
+	all, err := d.engine.DB().ListAllFiles("/")
+	if err != nil {
+		slog.Warn("junk purge: could not list files", "error", err)
+		return
+	}
+	var purged int
+	for _, f := range all {
+		if isJunkFile(f.VirtualPath) {
+			if err := d.engine.DeleteFile(f.VirtualPath); err != nil {
+				slog.Warn("junk purge: delete failed", "path", f.VirtualPath, "error", err)
+			} else {
+				purged++
+			}
+		}
+	}
+	if purged > 0 {
+		slog.Info("junk purge: removed OS-generated files", "count", purged)
+	}
+}
+
 // browserHandler wraps the WebDAV handler to serve HTML directory listings
 // for browser GET requests, while passing WebDAV methods through normally.
 type browserHandler struct {
@@ -690,6 +762,12 @@ type browserHandler struct {
 func cleanPath(raw string) string {
 	p := path.Clean("/" + raw)
 	return p
+}
+
+// isJunkFile returns true for OS-generated hidden files that should never be
+// stored (macOS .DS_Store, AppleDouble resource forks, Windows Thumbs.db, etc.).
+func isJunkFile(virtualPath string) bool {
+	return junkfile.IsOSJunk(path.Base(virtualPath))
 }
 
 func (h *browserHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -789,6 +867,9 @@ func (h *browserHandler) serveAPILs(w http.ResponseWriter, r *http.Request) {
 	}
 	resp.Dirs = append(resp.Dirs, dirs...)
 	for _, f := range files {
+		if isJunkFile(f.VirtualPath) {
+			continue
+		}
 		state := "local"
 		if h.syncDir != nil && h.syncDir.IsStub(f.VirtualPath) {
 			state = "stub"
@@ -1274,6 +1355,12 @@ func (h *browserHandler) serveAPIUpload(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	virtualPath := path.Join(dir, baseName)
+
+	if isJunkFile(virtualPath) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"status":"skipped","path":%q,"reason":"OS-generated junk file"}`, virtualPath)
+		return
+	}
 
 	if err := h.engine.WriteFileStream(virtualPath, file, header.Size); err != nil {
 		http.Error(w, "upload failed: "+err.Error(), http.StatusInternalServerError)

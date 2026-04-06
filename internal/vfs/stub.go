@@ -7,10 +7,12 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// xattr keys used to mark stub (cloud-only) files.
+// xattr keys used to mark stub (cloud-only) files on the local filesystem.
+// These use the com.pdrive.* reverse-DNS namespace to avoid conflicts with
+// other tools.  Values are plain UTF-8 strings stored via setxattr(2).
 const (
-	xattrStub = "com.pdrive.stub" // "1" if file is a cloud-only stub
-	xattrSize = "com.pdrive.size" // real file size as decimal string
+	xattrStub = "com.pdrive.stub" // "1" when the file is a cloud-only placeholder
+	xattrSize = "com.pdrive.size" // real file size in bytes as a decimal string
 )
 
 // createStubFile creates a 0-byte placeholder file with xattrs indicating

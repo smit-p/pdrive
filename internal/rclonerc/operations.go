@@ -82,12 +82,14 @@ func (c *Client) PutFile(remote, remotePath string, data io.Reader) error {
 }
 
 // waitForJob polls rclone job/status until the async job completes or fails.
-// Uses exponential backoff starting at 500ms, capped at 10s between polls.
+// Uses exponential backoff starting at 100ms, capped at 5s between polls.
+// Gives up after maxJobPollIterations to prevent infinite loops on stuck jobs.
 func (c *Client) waitForJob(jobID int) error {
-	backoff := 500 * time.Millisecond
-	const maxBackoff = 10 * time.Second
+	backoff := 100 * time.Millisecond
+	const maxBackoff = 5 * time.Second
+	const maxIterations = 720 // ~1 hour at 5 s ceiling
 
-	for {
+	for i := 0; i < maxIterations; i++ {
 		time.Sleep(backoff)
 
 		result, err := c.call("job/status", map[string]interface{}{
@@ -115,6 +117,8 @@ func (c *Client) waitForJob(jobID int) error {
 
 		backoff = min(backoff*2, maxBackoff)
 	}
+
+	return fmt.Errorf("rclone job %d: timed out after %d poll iterations", jobID, maxIterations)
 }
 
 // tempFileReadCloser wraps an os.File and removes its parent temp directory

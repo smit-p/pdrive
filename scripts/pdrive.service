@@ -1,0 +1,36 @@
+# systemd service file for pdrive daemon.
+#
+# Install:
+#   sudo cp pdrive.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable pdrive
+#   sudo systemctl start pdrive
+#
+# Or as a user service:
+#   cp pdrive.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable pdrive
+#   systemctl --user start pdrive
+#
+# Adjust ExecStart path, password, and flags to match your setup.
+
+[Unit]
+Description=pdrive — unified cloud storage daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/pdrive --foreground --password=YOUR_PASSWORD_HERE
+Restart=on-failure
+RestartSec=10
+
+# Security hardening.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.pdrive %h/pdrive
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

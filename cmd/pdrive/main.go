@@ -19,7 +19,9 @@ import (
 	"time"
 
 	"github.com/smit-p/pdrive/internal/chunker"
+	"github.com/smit-p/pdrive/internal/config"
 	"github.com/smit-p/pdrive/internal/daemon"
+	"github.com/smit-p/pdrive/internal/fusefs"
 	"github.com/smit-p/pdrive/internal/rclonebin"
 	"golang.org/x/term"
 )
@@ -56,7 +58,54 @@ func main() {
 	remotesFlag := flag.String("remotes", "", "Comma-separated list of rclone remote names to use (default: all)")
 	debug := flag.Bool("debug", false, "Enable debug logging")
 	foreground := flag.Bool("foreground", false, "Run daemon in the foreground instead of backgrounding (useful with systemd or for debugging)")
+	backend := flag.String("backend", "", "Mount backend: webdav (default) or fuse")
+	mountPoint := flag.String("mountpoint", "", "FUSE mount point (e.g. /Volumes/pdrive); required when --backend=fuse")
 	flag.Parse()
+
+	// Load config file — CLI flags override config values.
+	fileCfg, cfgErr := config.Load(*configDir)
+	if cfgErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not load config file: %v\n", cfgErr)
+	}
+	applyConfigDefaults := func() {
+		if fileCfg.SyncDir != "" && *syncDir == filepath.Join(homeDir, "pdrive") {
+			*syncDir = fileCfg.SyncDir
+		}
+		if fileCfg.RcloneAddr != "" && *rcloneAddr == "127.0.0.1:5572" {
+			*rcloneAddr = fileCfg.RcloneAddr
+		}
+		if fileCfg.WebDAVAddr != "" && *webdavAddr == "127.0.0.1:8765" {
+			*webdavAddr = fileCfg.WebDAVAddr
+		}
+		if fileCfg.RcloneBin != "" && *rcloneBinFlag == "" {
+			*rcloneBinFlag = fileCfg.RcloneBin
+		}
+		if fileCfg.BrokerPolicy != "" && *brokerPolicy == "pfrd" {
+			*brokerPolicy = fileCfg.BrokerPolicy
+		}
+		if fileCfg.MinFreeSpace > 0 && *minFreeSpace == 256*1024*1024 {
+			*minFreeSpace = fileCfg.MinFreeSpace
+		}
+		if fileCfg.ChunkSize > 0 && *chunkSize == 0 {
+			*chunkSize = fileCfg.ChunkSize
+		}
+		if fileCfg.RateLimit > 0 && *rateLimit == 0 {
+			*rateLimit = fileCfg.RateLimit
+		}
+		if fileCfg.Debug && !*debug {
+			*debug = true
+		}
+		if fileCfg.Remotes != "" && *remotesFlag == "" {
+			*remotesFlag = fileCfg.Remotes
+		}
+		if fileCfg.MountBackend != "" && *backend == "" {
+			*backend = fileCfg.MountBackend
+		}
+		if fileCfg.MountPoint != "" && *mountPoint == "" {
+			*mountPoint = fileCfg.MountPoint
+		}
+	}
+	applyConfigDefaults()
 
 	// Configure logging.
 	logLevel := slog.LevelInfo
@@ -141,6 +190,12 @@ func main() {
 		case "du":
 			runDu(*webdavAddr, *configDir, args[1:])
 			return
+		case "mount":
+			runMount(*webdavAddr, *configDir, *mountPoint)
+			return
+		case "unmount":
+			runUnmount(*webdavAddr, *configDir)
+			return
 		case "stop":
 			stopDaemon(*configDir)
 			return
@@ -169,13 +224,30 @@ func main() {
 	// skips this block and runs directly. Using a flag (not an env var) avoids
 	// the risk of a leaked env var causing every invocation to skip daemonizing.
 	if !*foreground {
+		// Pre-flight: check FUSE availability before daemonizing so the user
+		// sees the error right away instead of it being buried in daemon.log.
+		if *backend == "fuse" {
+			if err := fusefs.CheckFUSEAvailable(); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+		}
+
 		// Probe the API — if it responds the daemon is already running.
 		hc := &http.Client{Timeout: 2 * time.Second}
 		if resp, err := hc.Get("http://" + *webdavAddr + "/api/health"); err == nil {
 			resp.Body.Close()
-			fmt.Printf("pdrive daemon is already running at http://%s\n\n", *webdavAddr)
-			printCLIUsage()
-			return
+			// If user is requesting a specific backend, auto-restart.
+			if *backend != "" {
+				fmt.Println("Restarting pdrive daemon with new backend...")
+				stopDaemon(*configDir)
+				// Give the old daemon a moment to release ports.
+				time.Sleep(500 * time.Millisecond)
+			} else {
+				fmt.Printf("pdrive daemon is already running at http://%s\n\n", *webdavAddr)
+				printCLIUsage()
+				return
+			}
 		}
 
 		if err := os.MkdirAll(*configDir, 0700); err != nil {
@@ -209,9 +281,32 @@ func main() {
 			os.Exit(1)
 		}
 		logFile.Close()
-		fmt.Printf("pdrive daemon started (PID %d)\n", cmd.Process.Pid)
-		fmt.Printf("  Logs: %s\n", logPath)
-		fmt.Printf("  Stop: pdrive stop\n")
+
+		// Verify the daemon actually started successfully by polling /api/health.
+		startOK := false
+		for i := 0; i < 30; i++ {
+			time.Sleep(500 * time.Millisecond)
+			if resp, err := hc.Get("http://" + *webdavAddr + "/api/health"); err == nil {
+				resp.Body.Close()
+				startOK = true
+				break
+			}
+			// Check if the child process already exited (startup failure).
+			if cmd.ProcessState != nil {
+				break
+			}
+		}
+
+		if startOK {
+			fmt.Printf("pdrive daemon started (PID %d)\n", cmd.Process.Pid)
+			fmt.Printf("  Logs: %s\n", logPath)
+			fmt.Printf("  Stop: pdrive stop\n")
+		} else {
+			// Daemon failed to start — show the tail of the log.
+			fmt.Fprintf(os.Stderr, "Error: daemon failed to start. Recent log output:\n\n")
+			showRecentLogErrors(logPath)
+			os.Exit(1)
+		}
 		return
 	}
 
@@ -336,6 +431,8 @@ func main() {
 		ChunkSize:    *chunkSize,
 		RatePerSec:   *rateLimit,
 		Remotes:      remotes,
+		MountBackend: *backend,
+		MountPoint:   *mountPoint,
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -389,6 +486,77 @@ func stopDaemon(configDir string) {
 		os.Exit(1)
 	}
 	fmt.Printf("pdrive daemon stopped (PID %d)\n", pid)
+}
+
+// runMount stops any running daemon and restarts with the FUSE backend.
+func runMount(addr, configDir, mountPoint string) {
+	// Pre-flight: check FUSE availability before doing anything.
+	if err := fusefs.CheckFUSEAvailable(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Stop existing daemon if running.
+	hc := &http.Client{Timeout: 2 * time.Second}
+	if resp, err := hc.Get("http://" + addr + "/api/health"); err == nil {
+		resp.Body.Close()
+		fmt.Println("Stopping existing daemon...")
+		stopDaemon(configDir)
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	// Re-exec ourselves with --backend=fuse.
+	exe, err := os.Executable()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	args := []string{"--backend=fuse"}
+	if mountPoint != "" {
+		args = append(args, "--mountpoint="+mountPoint)
+	}
+	// Pass through any other flags from os.Args that aren't subcommands.
+	for _, a := range os.Args[1:] {
+		if a == "mount" || strings.HasPrefix(a, "--mountpoint") || strings.HasPrefix(a, "--backend") {
+			continue
+		}
+		args = append(args, a)
+	}
+	cmd := exec.Command(exe, args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Stdin = os.Stdin
+	if err := cmd.Run(); err != nil {
+		os.Exit(1)
+	}
+}
+
+// runUnmount tells the daemon to stop (which unmounts FUSE).
+func runUnmount(addr, configDir string) {
+	// Unmounting is equivalent to stopping the daemon — the daemon's
+	// Stop() method takes care of FUSE unmount.
+	stopDaemon(configDir)
+}
+
+// showRecentLogErrors prints the last few ERROR/WARN lines from the daemon log.
+func showRecentLogErrors(logPath string) {
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "  (could not read %s)\n", logPath)
+		return
+	}
+	lines := strings.Split(string(data), "\n")
+	// Show last 10 lines that contain useful info.
+	start := len(lines) - 10
+	if start < 0 {
+		start = 0
+	}
+	for _, line := range lines[start:] {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			fmt.Fprintf(os.Stderr, "  %s\n", line)
+		}
+	}
 }
 
 // readPassword reads a password from stdin. Hides input when stdin is a terminal.

@@ -1,3 +1,13 @@
+// Package chunker handles splitting files into fixed-size chunks,
+// computing per-chunk SHA-256 hashes, and reassembling them.  It also
+// provides AES-256-GCM encryption (with Argon2id key derivation) used
+// to encrypt each chunk before upload and decrypt after download.
+//
+// Two chunking modes are provided:
+//   - [Split] — reads the entire file into memory (suitable for tests or
+//     small files).
+//   - [ChunkReader] — streaming mode that reads one chunk at a time,
+//     keeping peak memory bounded to chunkSize.
 package chunker
 
 import (

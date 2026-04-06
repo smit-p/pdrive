@@ -86,6 +86,9 @@ func (rm *RcloneManager) spawn(ctx context.Context) error {
 		"--rc-no-auth",
 		"--config", rm.configPath,
 		"--drive-use-trash=false",
+		"--drive-chunk-size=256M",
+		"--transfers=8",
+		"--drive-pacer-min-sleep=10ms",
 	)
 	rm.cmd.Stdout = os.Stdout
 	rm.cmd.Stderr = os.Stderr

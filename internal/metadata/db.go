@@ -1,3 +1,11 @@
+// Package metadata manages the SQLite database that stores all pdrive
+// state: files, chunks, chunk locations, providers, directories, activity
+// logs, and failed-deletion retry queues.
+//
+// The database runs in WAL mode with a single connection (standard SQLite/Go
+// pattern) and uses foreign keys with ON DELETE CASCADE for referential
+// integrity.  Schema is embedded via go:embed and incremental ALTER TABLE
+// migrations are applied on every Open call.
 package metadata
 
 import (

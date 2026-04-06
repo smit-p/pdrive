@@ -16,6 +16,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/smit-p/pdrive/internal/engine"
+	"github.com/smit-p/pdrive/internal/junkfile"
 	"github.com/smit-p/pdrive/internal/metadata"
 )
 
@@ -513,8 +514,7 @@ func (s *SyncDir) suppressEvent(absPath string) {
 
 func shouldSkipPath(vp string) bool {
 	base := filepath.Base(vp)
-	return base == ".DS_Store" ||
-		strings.HasPrefix(base, "._") ||
+	return junkfile.IsOSJunk(base) ||
 		base == ".pdrive" ||
 		strings.HasPrefix(base, ".pdrive-")
 }

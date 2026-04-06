@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- macOS LaunchAgent for pdrive daemon.
+         Install: cp com.pdrive.daemon.plist ~/Library/LaunchAgents/
+         Load:    launchctl load ~/Library/LaunchAgents/com.pdrive.daemon.plist
+         Unload:  launchctl unload ~/Library/LaunchAgents/com.pdrive.daemon.plist
+
+         Adjust ProgramArguments paths and flags to match your setup.
+    -->
+    <key>Label</key>
+    <string>com.pdrive.daemon</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/pdrive</string>
+        <string>--foreground</string>
+        <string>--password</string>
+        <string>YOUR_PASSWORD_HERE</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/pdrive.stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/tmp/pdrive.stderr.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/Users/YOUR_USER</string>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+</dict>
+</plist>
