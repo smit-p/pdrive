@@ -38,7 +38,7 @@ Create a virtual directory.
 
 ## Search & Navigation
 
-### `GET /api/find?q=<query>`
+### `GET /api/find?pattern=<query>`
 Search files by name.
 
 ### `GET /api/tree?path=<dir>`
@@ -100,6 +100,6 @@ The daemon also serves a WebDAV interface at `http://127.0.0.1:8765/dav/`. This 
 **Command line:**
 ```bash
 # Mount via mount_webdav (macOS)
-mkdir ~/pdrive-mount
-mount_webdav http://127.0.0.1:8765/dav/ ~/pdrive-mount
+mkdir ~/pdrive
+mount_webdav http://127.0.0.1:8765/dav/ ~/pdrive
 ```

@@ -24,7 +24,7 @@ pdrive stop
 Mount the pdrive FUSE filesystem at the configured mountpoint. Requires a running daemon with `--backend fuse`.
 
 ```bash
-pdrive mount                        # Mount at default ~/pdrive-fuse
+pdrive mount                        # Mount at default ~/pdrive
 pdrive mount --mountpoint /mnt/pd   # Mount at custom path
 ```
 
@@ -230,10 +230,10 @@ pdrive verify /critical-data.bin
 
 | Flag           | Default            | Description                             |
 | -------------- | ------------------ | --------------------------------------- |
-| `--config-dir` | `~/.config/pdrive` | Path to pdrive data directory           |
+| `--config-dir` | `~/.pdrive`        | Path to pdrive data directory           |
 | `--sync-dir`   | `~/pdrive`         | Local sync directory path               |
 | `--backend`    | `webdav`           | Mount backend: `webdav` or `fuse`       |
-| `--mountpoint` | `~/pdrive-fuse`    | FUSE mountpoint (when `--backend fuse`) |
+| `--mountpoint` | `~/pdrive`         | FUSE mountpoint (when `--backend fuse`) |
 | `--foreground` | `false`            | Run daemon in foreground                |
 | `--debug`      | `false`            | Enable debug logging                    |
 

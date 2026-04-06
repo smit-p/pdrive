@@ -66,4 +66,4 @@ Files smaller than 4 MB (`AsyncWriteThreshold`) are uploaded synchronously — t
 
 - **Rate limiting:** Detected by string matching on rclone error messages (`IsRateLimited`). Triggers exponential backoff.
 - **Upload failure:** Retried up to 5 times with exponential backoff. After 5 failures, the upload is abandoned and the error is reported.
-- **Partial upload:** If some chunks succeed but others fail, the engine does not roll back uploaded chunks — they become orphans, cleaned up by the periodic GC (every 30 min).
+- **Partial upload:** If some chunks succeed but others fail, the engine does not roll back uploaded chunks — they become orphans, cleaned up by the periodic GC (60 s after startup, then every 24 h).

@@ -81,7 +81,7 @@ Daemon process that ties everything together.
 
 **HTTP API endpoints:** `/api/ls`, `/api/status`, `/api/uploads`, `/api/remotes`, `/api/pin`, `/api/unpin`, `/api/health`, `/api/metrics`, `/api/download`, `/api/delete`, `/api/tree`, `/api/find`, `/api/mv`, `/api/mkdir`, `/api/info`, `/api/du`, `/api/upload`, `/api/verify`, `/api/activity`
 
-**Background tasks:** Orphan GC (every 30 min), failed deletion retry (every 10 min), metadata backup (debounced 30 s)
+**Background tasks:** Orphan GC (60 s after startup, then every 24 h), failed deletion retry (every hour), metadata backup (debounced 30 s)
 
 ### `internal/fusefs`
 
