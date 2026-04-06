@@ -170,8 +170,10 @@ func (h *browserHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Serve embedded static assets (CSS, JS).
+	// Serve embedded static assets (CSS, JS) with no-cache so updates
+	// are picked up immediately after a binary rebuild.
 	if strings.HasPrefix(r.URL.Path, "/static/") {
+		w.Header().Set("Cache-Control", "no-cache, must-revalidate")
 		staticFS.ServeHTTP(w, r)
 		return
 	}

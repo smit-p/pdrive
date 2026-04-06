@@ -67,8 +67,8 @@ type uploadProgress struct {
 	TotalChunks    int
 	ChunksUploaded int
 	SizeBytes      int64
-	BytesDone      int64  // encrypted bytes of completed chunks
-	BytesTotal     int64  // total encrypted size (all chunks)
+	BytesDone      int64 // encrypted bytes of completed chunks
+	BytesTotal     int64 // total encrypted size (all chunks)
 	StartedAt      time.Time
 	Failed         bool
 	Preparing      bool // true while hashing / spooling, before chunks start
@@ -79,16 +79,16 @@ type uploadProgress struct {
 
 // UploadProgressInfo is the exported snapshot of an in-flight upload.
 type UploadProgressInfo struct {
-	VirtualPath    string  `json:"VirtualPath"`
-	TotalChunks    int     `json:"TotalChunks"`
-	ChunksUploaded int     `json:"ChunksUploaded"`
-	SizeBytes      int64   `json:"SizeBytes"`
-	BytesDone      int64   `json:"BytesDone"`
-	BytesTotal     int64   `json:"BytesTotal"`
-	SpeedBPS       float64 `json:"SpeedBPS"`
+	VirtualPath    string    `json:"VirtualPath"`
+	TotalChunks    int       `json:"TotalChunks"`
+	ChunksUploaded int       `json:"ChunksUploaded"`
+	SizeBytes      int64     `json:"SizeBytes"`
+	BytesDone      int64     `json:"BytesDone"`
+	BytesTotal     int64     `json:"BytesTotal"`
+	SpeedBPS       float64   `json:"SpeedBPS"`
 	StartedAt      time.Time `json:"StartedAt"`
-	Failed         bool    `json:"Failed"`
-	Preparing      bool    `json:"Preparing"`
+	Failed         bool      `json:"Failed"`
+	Preparing      bool      `json:"Preparing"`
 }
 
 // Engine orchestrates file write and read operations.

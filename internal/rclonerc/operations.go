@@ -310,8 +310,8 @@ func (c *Client) GetRemoteType(remote string) (string, error) {
 
 // TransferProgress holds the current aggregate transfer stats from rclone.
 type TransferProgress struct {
-	SpeedBytes   float64            // aggregate upload speed in bytes/sec
-	Transferring map[string]int64   // name → bytes transferred so far
+	SpeedBytes   float64          // aggregate upload speed in bytes/sec
+	Transferring map[string]int64 // name → bytes transferred so far
 }
 
 // TransferStats queries rclone core/stats and returns the current transfer
