@@ -72,7 +72,8 @@ type browserHandler struct {
 		ListRemotes() ([]string, error)
 		GetRemoteType(string) (string, error)
 	}
-	activeRemotes []string // from --remotes flag; empty = all
+	activeRemotes   []string // from --remotes flag; empty = all
+	resyncProviders func()   // triggers immediate provider re-sync
 }
 
 // cleanPath sanitises a user-supplied virtual path: it cleans ".." segments
@@ -151,6 +152,13 @@ func (h *browserHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	case "/api/activity":
 		h.serveAPIActivity(w, r)
+		return
+	case "/api/resync":
+		if h.resyncProviders != nil {
+			go h.resyncProviders()
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"ok":true}`)) //nolint:errcheck
 		return
 	}
 

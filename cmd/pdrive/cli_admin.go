@@ -3,12 +3,14 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
 	"strings"
 	"text/tabwriter"
+	"time"
 )
 
 // --- status ---
@@ -133,7 +135,7 @@ func listRcloneRemotes() ([]string, error) {
 	return remotes, nil
 }
 
-func runRemotes(configDir string, args []string) {
+func runRemotes(configDir, daemonAddr string, args []string) {
 	if len(args) == 0 {
 		// pdrive remotes — list all remotes and show enabled ones.
 		runRemotesList(configDir)
@@ -146,15 +148,15 @@ func runRemotes(configDir string, args []string) {
 			fmt.Fprintf(os.Stderr, "Usage: pdrive remotes add <name> [name...]\n")
 			os.Exit(1)
 		}
-		runRemotesAdd(configDir, args[1:])
+		runRemotesAdd(configDir, daemonAddr, args[1:])
 	case "remove":
 		if len(args) < 2 {
 			fmt.Fprintf(os.Stderr, "Usage: pdrive remotes remove <name> [name...]\n")
 			os.Exit(1)
 		}
-		runRemotesRemove(configDir, args[1:])
+		runRemotesRemove(configDir, daemonAddr, args[1:])
 	case "reset":
-		runRemotesReset(configDir)
+		runRemotesReset(configDir, daemonAddr)
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown remotes subcommand: %s\n", args[0])
 		fmt.Fprintf(os.Stderr, "Usage: pdrive remotes [add|remove|reset]\n")
@@ -207,7 +209,7 @@ func runRemotesList(configDir string) {
 	fmt.Println("  pdrive remotes reset            Use all remotes (clear selection)")
 }
 
-func runRemotesAdd(configDir string, names []string) {
+func runRemotesAdd(configDir, daemonAddr string, names []string) {
 	// Validate names against actual rclone remotes.
 	allRemotes, err := listRcloneRemotes()
 	if err != nil {
@@ -249,10 +251,10 @@ func runRemotesAdd(configDir string, names []string) {
 		fmt.Fprintf(os.Stderr, "Error saving config: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Println("\nRestart pdrive for changes to take effect.")
+	notifyDaemonResync(daemonAddr)
 }
 
-func runRemotesRemove(configDir string, names []string) {
+func runRemotesRemove(configDir, daemonAddr string, names []string) {
 	enabled, err := loadRemotesConfig(configDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -307,17 +309,31 @@ func runRemotesRemove(configDir string, names []string) {
 		fmt.Fprintf(os.Stderr, "Error saving config: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Println("\nRestart pdrive for changes to take effect.")
+	notifyDaemonResync(daemonAddr)
 }
 
-func runRemotesReset(configDir string) {
+func runRemotesReset(configDir, daemonAddr string) {
 	p := remotesConfigPath(configDir)
 	if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 	fmt.Println("Remote selection cleared — pdrive will use all rclone remotes.")
-	fmt.Println("\nRestart pdrive for changes to take effect.")
+	notifyDaemonResync(daemonAddr)
+}
+
+// notifyDaemonResync tells the running daemon to re-sync providers immediately.
+// If the daemon is not running, it silently does nothing.
+func notifyDaemonResync(addr string) {
+	hc := &http.Client{Timeout: 5 * time.Second}
+	resp, err := hc.Post("http://"+addr+"/api/resync", "", nil)
+	if err != nil {
+		// Daemon not running — changes will take effect on next start.
+		fmt.Println("\nDaemon is not running. Changes will take effect on next start.")
+		return
+	}
+	resp.Body.Close()
+	fmt.Println("\nProvider sync triggered — new remotes will be available shortly.")
 }
 
 // --- uploads ---

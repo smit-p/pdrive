@@ -210,7 +210,7 @@ func main() {
 			fmt.Printf("pdrive %s (commit %s, built %s)\n", version, commit, date)
 			return
 		case "remotes":
-			runRemotes(*configDir, args[1:])
+			runRemotes(*configDir, *webdavAddr, args[1:])
 			return
 		case "help":
 			printCLIUsage()

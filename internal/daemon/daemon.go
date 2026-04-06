@@ -238,6 +238,7 @@ func (d *Daemon) Start(ctx context.Context) error {
 			configDir:     d.config.ConfigDir,
 			rcloneClient:  d.rclone.Client(),
 			activeRemotes: d.config.Remotes,
+			resyncProviders: func() { d.syncProviders() },
 		},
 	}
 
@@ -262,6 +263,21 @@ func (d *Daemon) Start(ctx context.Context) error {
 
 	// Resume any uploads interrupted by a prior daemon restart.
 	go d.engine.ResumeUploads()
+
+	// Periodically re-sync rclone remotes so newly added accounts appear
+	// without a daemon restart.
+	go func() {
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				d.syncProviders()
+			}
+		}
+	}()
 
 	// Run orphan GC: first pass after 60s (let any in-progress uploads settle),
 	// then every 24h. Runs entirely in the background.
