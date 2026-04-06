@@ -228,13 +228,13 @@ pdrive verify /critical-data.bin
 
 ## Global Flags
 
-| Flag           | Default            | Description                             |
-| -------------- | ------------------ | --------------------------------------- |
-| `--config-dir` | `~/.pdrive`        | Path to pdrive data directory           |
-| `--sync-dir`   | `~/pdrive`         | Local sync directory path               |
-| `--backend`    | `webdav`           | Mount backend: `webdav` or `fuse`       |
-| `--mountpoint` | `~/pdrive`         | FUSE mountpoint (when `--backend fuse`) |
-| `--foreground` | `false`            | Run daemon in foreground                |
-| `--debug`      | `false`            | Enable debug logging                    |
+| Flag           | Default     | Description                             |
+| -------------- | ----------- | --------------------------------------- |
+| `--config-dir` | `~/.pdrive` | Path to pdrive data directory           |
+| `--sync-dir`   | `~/pdrive`  | Local sync directory path               |
+| `--backend`    | `webdav`    | Mount backend: `webdav` or `fuse`       |
+| `--mountpoint` | `~/pdrive`  | FUSE mountpoint (when `--backend fuse`) |
+| `--foreground` | `false`     | Run daemon in foreground                |
+| `--debug`      | `false`     | Enable debug logging                    |
 
 Flags can also be set persistently in `~/.pdrive/config.toml`. CLI flags override config file values.

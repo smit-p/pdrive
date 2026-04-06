@@ -145,7 +145,6 @@ func resolveLsArg(arg, configDir string) resolveResult {
 	return resolveResult{Path: arg}
 }
 
-
 // --- formatting helpers ---
 
 // fmtSize formats a byte count as a human-readable string (B / KB / MB / GB).

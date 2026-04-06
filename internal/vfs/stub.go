@@ -7,13 +7,9 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// xattr keys used to mark stub (cloud-only) files on the local filesystem.
-// These use the com.pdrive.* reverse-DNS namespace to avoid conflicts with
-// other tools.  Values are plain UTF-8 strings stored via setxattr(2).
-const (
-	xattrStub = "com.pdrive.stub" // "1" when the file is a cloud-only placeholder
-	xattrSize = "com.pdrive.size" // real file size in bytes as a decimal string
-)
+// xattr key constants (xattrStub, xattrSize) are defined in
+// stub_xattr_darwin.go and stub_xattr_linux.go to handle the
+// platform-specific namespace requirements.
 
 // createStubFile creates a 0-byte placeholder file with xattrs indicating
 // it's a cloud-only stub. The Finder tag is set to gray.
