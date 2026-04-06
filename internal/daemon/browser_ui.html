@@ -198,6 +198,31 @@ input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 2px var(--a
 .spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--bg3);border-top-color:var(--accent);border-radius:50%;animation:spin .6s linear infinite}
 .loading-center{display:flex;align-items:center;justify-content:center;padding:60px;gap:8px;color:var(--fg3)}
 
+/* Upload Drawer */
+.upload-drawer{position:fixed;bottom:0;right:20px;width:380px;max-height:420px;background:var(--bg);border:1px solid var(--border);border-bottom:none;border-radius:10px 10px 0 0;box-shadow:var(--shadow-lg);z-index:55;display:flex;flex-direction:column;transform:translateY(100%);transition:transform .3s cubic-bezier(.4,0,.2,1);overflow:hidden}
+.upload-drawer.visible{transform:translateY(0)}
+.upload-drawer.minimized .upload-drawer-body{display:none}
+.upload-drawer-header{display:flex;align-items:center;gap:8px;padding:10px 14px;background:var(--bg2);border-bottom:1px solid var(--border);cursor:pointer;user-select:none;flex-shrink:0}
+.upload-drawer-header:hover{background:var(--bg3)}
+.upload-drawer-title{font-size:13px;font-weight:600;color:var(--fg);flex:1;display:flex;align-items:center;gap:6px}
+.upload-drawer-count{font-size:11px;font-weight:500;color:var(--fg2);background:var(--bg3);padding:1px 7px;border-radius:10px}
+.upload-drawer-actions{display:flex;gap:2px}
+.upload-drawer-actions button{background:none;border:none;color:var(--fg2);font-size:14px;padding:2px 6px;border-radius:4px;cursor:pointer;line-height:1}
+.upload-drawer-actions button:hover{background:var(--bg3);color:var(--fg)}
+.upload-drawer-body{overflow-y:auto;flex:1;max-height:320px}
+.upload-drawer-item{display:flex;align-items:center;gap:8px;padding:8px 14px;border-bottom:1px solid var(--border);font-size:12px;transition:background .15s}
+.upload-drawer-item:last-child{border-bottom:none}
+.upload-drawer-item:hover{background:var(--bg2)}
+.upload-drawer-icon{width:18px;height:18px;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:13px}
+.upload-drawer-fname{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--fg)}
+.upload-drawer-fname.fail{color:var(--danger)}
+.upload-drawer-fsize{font-size:11px;color:var(--fg3);flex-shrink:0;font-variant-numeric:tabular-nums}
+.upload-drawer-spinner{width:14px;height:14px;border:2px solid var(--bg3);border-top-color:var(--accent);border-radius:50%;animation:spin .6s linear infinite}
+.upload-drawer-summary{padding:8px 14px;font-size:11px;color:var(--fg2);background:var(--bg2);border-top:1px solid var(--border);display:flex;align-items:center;gap:6px}
+.upload-drawer-progress{flex:1;height:4px;background:var(--bg3);border-radius:2px;overflow:hidden}
+.upload-drawer-progress-fill{height:100%;background:var(--success);border-radius:2px;transition:width .3s}
+.upload-drawer-progress-fill.has-errors{background:var(--warning)}
+
 /* Responsive */
 @media(max-width:768px){
   .app{grid-template-columns:1fr}
@@ -209,6 +234,7 @@ input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 2px var(--a
   .selection-bar{left:8px;right:8px;transform:translateX(0) translateY(80px)}
   .selection-bar.visible{transform:translateX(0) translateY(0)}
   --panel-w:100vw;
+  .upload-drawer{left:8px;right:8px;width:auto}
 }
 
 /* Keyboard focus ring */
@@ -252,6 +278,7 @@ input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 2px var(--a
 <div class="modal-overlay" id="modal-overlay"></div>
 <div class="selection-bar" id="selection-bar"></div>
 <div class="toast-container" id="toasts"></div>
+<div class="upload-drawer" id="upload-drawer"></div>
 
 <script>
 (function(){
@@ -1087,23 +1114,151 @@ function doDuHere(){
 
 var _uploadInProgress=false;
 
+// ── Upload Progress Drawer ─────────────────────────────────────────────────
+
+var uploadTracker={
+  items:[],       // {name,size,status:'queued'|'uploading'|'done'|'fail',error:null}
+  minimized:false,
+  visible:false,
+  _closeTimer:null,
+
+  start:function(fileList){
+    // fileList: [{name,size}]
+    if(this._closeTimer){clearTimeout(this._closeTimer);this._closeTimer=null;}
+    this.items=fileList.map(function(f){return{name:f.name,size:f.size,status:'queued',error:null}});
+    this.minimized=false;
+    this.visible=true;
+    this.render();
+  },
+  markUploading:function(idx){
+    if(this.items[idx])this.items[idx].status='uploading';
+    this.render();
+  },
+  markDone:function(idx){
+    if(this.items[idx])this.items[idx].status='done';
+    this.render();
+  },
+  markFailed:function(idx,err){
+    if(this.items[idx]){this.items[idx].status='fail';this.items[idx].error=err;}
+    this.render();
+  },
+  counts:function(){
+    var d=0,f=0,q=0,u=0;
+    this.items.forEach(function(it){
+      if(it.status==='done')d++;
+      else if(it.status==='fail')f++;
+      else if(it.status==='uploading')u++;
+      else q++;
+    });
+    return{done:d,fail:f,queued:q,uploading:u,total:this.items.length};
+  },
+  toggle:function(){
+    this.minimized=!this.minimized;
+    this.render();
+  },
+  close:function(){
+    this.visible=false;
+    this.items=[];
+    if(this._closeTimer){clearTimeout(this._closeTimer);this._closeTimer=null;}
+    var el=document.getElementById('upload-drawer');
+    el.classList.remove('visible');
+  },
+  scheduleAutoMinimize:function(){
+    var self=this;
+    this._closeTimer=setTimeout(function(){
+      self.minimized=true;
+      self.render();
+    },3000);
+  },
+  render:function(){
+    var el=document.getElementById('upload-drawer');
+    if(!this.visible||!this.items.length){el.classList.remove('visible');el.innerHTML='';return;}
+    el.classList.add('visible');
+    el.classList.toggle('minimized',this.minimized);
+
+    var c=this.counts();
+    var pct=c.total>0?Math.round((c.done+c.fail)/c.total*100):0;
+
+    // Header
+    var html='<div class="upload-drawer-header" id="upload-drawer-toggle">';
+    html+='<div class="upload-drawer-title">';
+    if(c.done+c.fail<c.total){
+      html+='<span class="upload-drawer-spinner"></span> Uploading…';
+    } else if(c.fail>0){
+      html+='⚠️ Upload complete with errors';
+    } else {
+      html+='✅ Upload complete';
+    }
+    html+='</div>';
+    html+='<span class="upload-drawer-count">'+(c.done+c.fail)+'/'+c.total+'</span>';
+    html+='<div class="upload-drawer-actions">';
+    html+='<button id="upload-drawer-min" title="'+(this.minimized?'Expand':'Minimize')+'">'+(this.minimized?'▲':'▼')+'</button>';
+    if(c.done+c.fail>=c.total)html+='<button id="upload-drawer-close" title="Close">✕</button>';
+    html+='</div></div>';
+
+    // Progress summary bar
+    html+='<div class="upload-drawer-summary">';
+    html+='<span>'+(c.done+c.fail)+' of '+c.total+' complete'+(c.fail?' · '+c.fail+' failed':'')+'</span>';
+    html+='<div class="upload-drawer-progress"><div class="upload-drawer-progress-fill'+(c.fail?' has-errors':'')+'" style="width:'+pct+'%"></div></div>';
+    html+='</div>';
+
+    // File list body
+    html+='<div class="upload-drawer-body">';
+    this.items.forEach(function(it){
+      var icon='';
+      if(it.status==='done')icon='<span style="color:var(--success)">✓</span>';
+      else if(it.status==='fail')icon='<span style="color:var(--danger)">✗</span>';
+      else if(it.status==='uploading')icon='<span class="upload-drawer-spinner"></span>';
+      else icon='<span style="color:var(--fg3)">○</span>';
+
+      html+='<div class="upload-drawer-item">';
+      html+='<div class="upload-drawer-icon">'+icon+'</div>';
+      html+='<div class="upload-drawer-fname'+(it.status==='fail'?' fail':'')+'">'+esc(it.name)+(it.error?' — '+esc(it.error):'')+'</div>';
+      html+='<div class="upload-drawer-fsize">'+fmtSize(it.size)+'</div>';
+      html+='</div>';
+    });
+    html+='</div>';
+
+    el.innerHTML=html;
+
+    // Wire up toggle/close
+    var self=this;
+    var toggleBtn=document.getElementById('upload-drawer-min');
+    if(toggleBtn)toggleBtn.addEventListener('click',function(e){e.stopPropagation();self.toggle()});
+    var closeBtn=document.getElementById('upload-drawer-close');
+    if(closeBtn)closeBtn.addEventListener('click',function(e){e.stopPropagation();self.close()});
+    document.getElementById('upload-drawer-toggle').addEventListener('click',function(){self.toggle()});
+  }
+};
+
 function doUploadFiles(files){
   if(!files||!files.length)return;
   if(_uploadInProgress){toast('Upload already in progress…','info');return;}
   _uploadInProgress=true;
   var dir=S.path||'/';
-  var todo=Array.from(files).map(function(f){return{file:f,dir:dir}});
-  var total=todo.length,done=0,failed=0;
-  toast('Uploading '+total+' file'+(total>1?'s':'')+'…','info');
+  var todo=[];
+  for(var i=0;i<files.length;i++){todo.push({file:files[i],dir:dir})}
+  var total=todo.length,idx=0,done=0,failed=0;
+  uploadTracker.start(todo.map(function(t){return{name:t.file.name,size:t.file.size}}));
   function next(){
-    if(!todo.length){
+    if(idx>=total){
       _uploadInProgress=false;
-      if(done)toast('Uploaded '+done+'/'+total+' file'+(total>1?'s':'')+(failed?' ('+failed+' failed)':''),'success');
+      uploadTracker.scheduleAutoMinimize();
       if(S.page==='browse')loadBrowse(S.path);
       return;
     }
-    var item=todo.shift();
-    api.upload(item.file,item.dir).then(function(){done++;next()}).catch(function(e){failed++;toast('Failed: '+item.file.name+': '+e.message,'error');next()});
+    var cur=idx;
+    idx++;
+    uploadTracker.markUploading(cur);
+    api.upload(todo[cur].file,todo[cur].dir).then(function(){
+      done++;
+      uploadTracker.markDone(cur);
+      next();
+    }).catch(function(e){
+      failed++;
+      uploadTracker.markFailed(cur,e.message);
+      next();
+    });
   }
   next();
 }
@@ -1115,17 +1270,27 @@ function doUploadWithPaths(entries){
   _uploadInProgress=true;
   var baseDir=S.path||'/';
   var todo=entries.map(function(e){return{file:e.file,dir:baseDir==="/"?baseDir+e.relDir:baseDir+"/"+e.relDir}});
-  var total=todo.length,done=0,failed=0;
-  toast('Uploading '+total+' file'+(total>1?'s':'')+'…','info');
+  var total=todo.length,idx=0,done=0,failed=0;
+  uploadTracker.start(todo.map(function(t){return{name:t.file.name,size:t.file.size}}));
   function next(){
-    if(!todo.length){
+    if(idx>=total){
       _uploadInProgress=false;
-      if(done)toast('Uploaded '+done+'/'+total+' file'+(total>1?'s':'')+(failed?' ('+failed+' failed)':''),'success');
+      uploadTracker.scheduleAutoMinimize();
       if(S.page==='browse')loadBrowse(S.path);
       return;
     }
-    var item=todo.shift();
-    api.upload(item.file,item.dir).then(function(){done++;next()}).catch(function(e){failed++;toast('Failed: '+item.file.name+': '+e.message,'error');next()});
+    var cur=idx;
+    idx++;
+    uploadTracker.markUploading(cur);
+    api.upload(todo[cur].file,todo[cur].dir).then(function(){
+      done++;
+      uploadTracker.markDone(cur);
+      next();
+    }).catch(function(e){
+      failed++;
+      uploadTracker.markFailed(cur,e.message);
+      next();
+    });
   }
   next();
 }
