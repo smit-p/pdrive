@@ -89,7 +89,7 @@ func (f *fakeCloud) ListDir(remote, p string) ([]rclonerc.ListItem, error) {
 	return items, nil
 }
 
-func (f *fakeCloud) Cleanup(remote string) error { return nil }
+func (f *fakeCloud) Cleanup(remote string) error     { return nil }
 func (f *fakeCloud) Mkdir(remote, path string) error { return nil }
 
 // newTestServer creates a fully wired WebDAV HTTP test server.

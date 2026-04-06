@@ -1,9 +1,10 @@
 package daemon
 
 import (
-	_ "embed"
+	"embed"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"os"
 	"path"
@@ -17,8 +18,16 @@ import (
 	"github.com/smit-p/pdrive/internal/vfs"
 )
 
-//go:embed browser_ui.html
-var browserUIHTML string
+//go:embed web/index.html web/styles.css web/app.js
+var webFS embed.FS
+
+// staticFS serves files from the embedded web/ directory at /static/.
+var staticFS http.Handler
+
+func init() {
+	sub, _ := fs.Sub(webFS, "web")
+	staticFS = http.StripPrefix("/static/", http.FileServer(http.FS(sub)))
+}
 
 // API response types.
 
@@ -148,6 +157,12 @@ func (h *browserHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Only intercept GET/HEAD with a browser-like Accept header.
 	if (r.Method == "GET" || r.Method == "HEAD") && strings.Contains(r.Header.Get("Accept"), "text/html") {
 		h.serveBrowser(w, r)
+		return
+	}
+
+	// Serve embedded static assets (CSS, JS).
+	if strings.HasPrefix(r.URL.Path, "/static/") {
+		staticFS.ServeHTTP(w, r)
 		return
 	}
 	if h.davHandler == nil {
@@ -755,6 +770,7 @@ func (h *browserHandler) serveBrowser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Otherwise serve the SPA shell — JS handles listing and navigation.
+	indexHTML, _ := webFS.ReadFile("web/index.html")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprint(w, browserUIHTML)
+	w.Write(indexHTML) //nolint:errcheck
 }
