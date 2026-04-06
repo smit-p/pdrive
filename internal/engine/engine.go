@@ -68,6 +68,7 @@ type uploadProgress struct {
 	SizeBytes      int64
 	StartedAt      time.Time
 	Failed         bool
+	Preparing      bool // true while hashing / spooling, before chunks start
 }
 
 // UploadProgressInfo is the exported snapshot of an in-flight upload.
@@ -78,6 +79,7 @@ type UploadProgressInfo struct {
 	SizeBytes      int64
 	StartedAt      time.Time
 	Failed         bool
+	Preparing      bool
 }
 
 // Engine orchestrates file write and read operations.
@@ -444,15 +446,31 @@ func (e *Engine) WriteFileAsync(virtualPath string, tmpFile *os.File, tmpPath st
 		return err
 	}
 
+	// Generate the file ID early so we can register progress immediately.
+	fileID := uuid.New().String()
+
+	// Register in the uploads map right away so the UI shows the file
+	// as "Preparing..." while we hash and spool.
+	e.uploadsMu.Lock()
+	e.uploads[fileID] = &uploadProgress{
+		VirtualPath: virtualPath,
+		SizeBytes:   size,
+		StartedAt:   time.Now(),
+		Preparing:   true,
+	}
+	e.uploadsMu.Unlock()
+
 	// Hash synchronously so we can write the pending DB record now.
 	hasher := sha256.New()
 	if _, err := io.Copy(hasher, tmpFile); err != nil {
+		e.removeUploadProgress(fileID)
 		tmpFile.Close()
 		os.Remove(tmpPath)
 		return fmt.Errorf("hashing file: %w", err)
 	}
 	fullHashStr := hex.EncodeToString(hasher.Sum(nil))
 	if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
+		e.removeUploadProgress(fileID)
 		tmpFile.Close()
 		os.Remove(tmpPath)
 		return fmt.Errorf("rewinding after hash: %w", err)
@@ -471,9 +489,9 @@ func (e *Engine) WriteFileAsync(virtualPath string, tmpFile *os.File, tmpPath st
 	// Content-hash dedup: if a completed file with the same SHA256 already
 	// exists, clone its chunk metadata instead of re-uploading.
 	if donor, _ := e.db.GetCompleteFileByHash(fullHashStr); donor != nil {
+		e.removeUploadProgress(fileID)
 		tmpFile.Close()
 		os.Remove(tmpPath)
-		fileID := uuid.New().String()
 		err := e.cloneFileFromDonor(donor, fileID, virtualPath, size, fullHashStr)
 		if err == nil {
 			e.db.InsertActivity("upload", virtualPath, fmt.Sprintf("%d bytes", size)) //nolint:errcheck
@@ -481,7 +499,6 @@ func (e *Engine) WriteFileAsync(virtualPath string, tmpFile *os.File, tmpPath st
 		return err
 	}
 
-	fileID := uuid.New().String()
 	now := time.Now().Unix()
 	dbTmpPath := tmpPath
 	if err := e.db.InsertFile(&metadata.File{
@@ -494,6 +511,7 @@ func (e *Engine) WriteFileAsync(virtualPath string, tmpFile *os.File, tmpPath st
 		UploadState: "pending",
 		TmpPath:     &dbTmpPath,
 	}); err != nil {
+		e.removeUploadProgress(fileID)
 		tmpFile.Close()
 		os.Remove(tmpPath)
 		return fmt.Errorf("inserting pending file record: %w", err)
@@ -803,11 +821,19 @@ func (e *Engine) uploadChunksTracked(r io.ReadSeeker, fileID, virtualPath string
 	estimated := int(fileSize/int64(chunkSize)) + 1
 
 	e.uploadsMu.Lock()
-	e.uploads[fileID] = &uploadProgress{
-		VirtualPath: virtualPath,
-		TotalChunks: estimated,
-		SizeBytes:   fileSize,
-		StartedAt:   time.Now(),
+	if p, ok := e.uploads[fileID]; ok {
+		// Entry was pre-registered by WriteFileAsync with Preparing=true;
+		// transition to active upload.
+		p.TotalChunks = estimated
+		p.Preparing = false
+	} else {
+		// Fallback: WriteFileStream path (no pre-registration).
+		e.uploads[fileID] = &uploadProgress{
+			VirtualPath: virtualPath,
+			TotalChunks: estimated,
+			SizeBytes:   fileSize,
+			StartedAt:   time.Now(),
+		}
 	}
 	e.uploadsMu.Unlock()
 
@@ -851,9 +877,17 @@ func (e *Engine) UploadProgress() []UploadProgressInfo {
 			SizeBytes:      p.SizeBytes,
 			StartedAt:      p.StartedAt,
 			Failed:         p.Failed,
+			Preparing:      p.Preparing,
 		})
 	}
 	return out
+}
+
+// removeUploadProgress removes the given file from the in-flight uploads map.
+func (e *Engine) removeUploadProgress(fileID string) {
+	e.uploadsMu.Lock()
+	delete(e.uploads, fileID)
+	e.uploadsMu.Unlock()
 }
 
 // ResumeUploads re-queues any uploads that were interrupted by a prior daemon

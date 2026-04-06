@@ -167,6 +167,8 @@ input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 2px var(--a
 .upload-bar{height:6px;background:var(--bg3);border-radius:3px;overflow:hidden;margin:8px 0 4px}
 .upload-bar-fill{height:100%;background:var(--success);border-radius:3px;transition:width .4s}
 .upload-bar-fill.fail{background:var(--danger)}
+.upload-bar-fill.preparing{width:100%;background:linear-gradient(90deg,var(--bg3) 25%,var(--accent) 50%,var(--bg3) 75%);background-size:200% 100%;animation:preparing-pulse 1.5s ease-in-out infinite}
+@keyframes preparing-pulse{0%{background-position:200% 0}100%{background-position:-200% 0}}
 .upload-meta{display:flex;justify-content:space-between;font-size:11px;color:var(--fg2)}
 
 /* Tree */

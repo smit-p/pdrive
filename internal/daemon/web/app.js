@@ -513,12 +513,19 @@ function refreshUploads(){
       var pct=u.TotalChunks>0?Math.min(100,Math.round(u.ChunksUploaded/u.TotalChunks*100)):0;
       var name=u.VirtualPath.split('/').pop();
       var dir=u.VirtualPath.substring(0,u.VirtualPath.lastIndexOf('/'));
+      var statusLabel=u.Failed?'✗ failed':u.Preparing?'Preparing…':'';
       html+='<div class="upload-card">'
-        +'<div class="upload-name'+(u.Failed?' fail':'')+'">'+esc(name)+(u.Failed?' ✗ failed':'')+'</div>';
+        +'<div class="upload-name'+(u.Failed?' fail':'')+'">'+esc(name)+(statusLabel?' '+statusLabel:'')+'</div>';
       if(dir)html+='<div class="upload-dir">'+esc(dir)+'</div>';
-      html+='<div class="upload-bar"><div class="upload-bar-fill'+(u.Failed?' fail':'')+'" style="width:'+pct+'%"></div></div>'
-        +'<div class="upload-meta"><span>'+pct+'% · '+u.ChunksUploaded+'/'+u.TotalChunks+' chunks</span>'
-        +'<span>'+fmtSize(u.SizeBytes)+'</span></div></div>';
+      if(u.Preparing){
+        html+='<div class="upload-bar"><div class="upload-bar-fill preparing"></div></div>'
+          +'<div class="upload-meta"><span>Preparing… hashing file</span>'
+          +'<span>'+fmtSize(u.SizeBytes)+'</span></div></div>';
+      } else {
+        html+='<div class="upload-bar"><div class="upload-bar-fill'+(u.Failed?' fail':'')+'" style="width:'+pct+'%"></div></div>'
+          +'<div class="upload-meta"><span>'+pct+'% · '+u.ChunksUploaded+'/'+u.TotalChunks+' chunks</span>'
+          +'<span>'+fmtSize(u.SizeBytes)+'</span></div></div>';
+      }
     });
     el.innerHTML=html;
   }).catch(function(){});
