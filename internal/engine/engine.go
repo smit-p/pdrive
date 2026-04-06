@@ -133,15 +133,15 @@ const (
 	// uploadRatePerSec is the maximum number of chunk-upload API calls per second
 	// across all providers. With operations/copyfile + _async, each call just
 	// starts a lightweight rclone job; the actual cloud API calls (with their
-	// own backoff) run inside rclone.  6/s lets us saturate fast connections
-	// without overwhelming the local rclone RC server.
-	uploadRatePerSec = 6
-	uploadRateBurst  = 10 // initial burst before the ticker kicks in
+	// own backoff) run inside rclone.  12/s saturates high-bandwidth connections
+	// while still being well within rclone RC limits.
+	uploadRatePerSec = 12
+	uploadRateBurst  = 20 // initial burst before the ticker kicks in
 )
 
 // NewEngine creates a new engine backed by an rclone RC client.
 func NewEngine(db *metadata.DB, dbPath string, rc *rclonerc.Client, b *broker.Broker, encKey []byte) *Engine {
-	const burst = 10
+	const burst = 20
 	e := newEngine(db, dbPath, rc, b, encKey, burst, uploadRatePerSec)
 	return e
 }
@@ -149,7 +149,7 @@ func NewEngine(db *metadata.DB, dbPath string, rc *rclonerc.Client, b *broker.Br
 // NewEngineWithRate creates an Engine with a custom API rate limit (tokens per second).
 // A ratePerSec of 0 or less uses the default (6/s).
 func NewEngineWithRate(db *metadata.DB, dbPath string, rc *rclonerc.Client, b *broker.Broker, encKey []byte, ratePerSec int) *Engine {
-	const burst = 10
+	const burst = 20
 	if ratePerSec <= 0 {
 		ratePerSec = uploadRatePerSec
 	}
@@ -319,6 +319,7 @@ func (e *Engine) Metrics() MetricsSnapshot {
 }
 
 // chunkSize returns the chunk size to use for a file of the given size.
+// Used by WriteFileStream (fixed-size path) and as fallback.
 func (e *Engine) chunkSize(fileSize int64) int {
 	if e.overrideChunkSize > 0 {
 		return e.overrideChunkSize
@@ -326,19 +327,23 @@ func (e *Engine) chunkSize(fileSize int64) int {
 	return chunker.ChunkSizeForFile(fileSize)
 }
 
-// workersForChunkSize returns an appropriate concurrency level for the given
-// chunk size.  PutFile writes data to a temp file and delegates the actual
-// upload to rclone (operations/copyfile + _async), so peak memory is low;
-// the limit is tuned to saturate typical broadband connections.
-func workersForChunkSize(chunkSize int) int {
-	switch {
-	case chunkSize >= 32*1024*1024: // ≥ 32 MB → 6 workers
-		return 6
-	case chunkSize >= 8*1024*1024: // ≥ 8 MB → 8 workers
-		return 8
-	default: // < 8 MB → 10 workers
-		return maxUploadWorkers
+// chunkSchedule returns a variable chunk schedule for the given file size.
+// When an override chunk size is set (tests, CLI flag) a single-tier schedule
+// is returned so the override is respected.
+func (e *Engine) chunkSchedule(fileSize int64) *chunker.ChunkSchedule {
+	if e.overrideChunkSize > 0 {
+		return &chunker.ChunkSchedule{Tiers: []chunker.ChunkTier{
+			{Count: 0, Size: e.overrideChunkSize},
+		}}
 	}
+	return chunker.ScheduleForFile(fileSize)
+}
+
+// uploadWorkers returns the number of concurrent upload workers.
+// With the ramp-up chunk schedule the pipeline benefits from higher
+// concurrency since early chunks are small.
+func uploadWorkers() int {
+	return maxUploadWorkers
 }
 
 // WriteFile writes a file to the virtual filesystem, chunking and encrypting it.
@@ -348,9 +353,10 @@ func (e *Engine) WriteFile(virtualPath string, data []byte) error {
 }
 
 const (
-	// maxUploadWorkers is the default (small-chunk) concurrency limit; see
-	// workersForChunkSize for how this scales down for larger chunks.
-	maxUploadWorkers = 10
+	// maxUploadWorkers is the concurrency limit for chunk upload goroutines.
+	// Matches rclone --transfers=12 so every worker can have a transfer in
+	// flight simultaneously.
+	maxUploadWorkers = 12
 	// maxUploadRetries is the number of retry attempts for a failed chunk upload.
 	maxUploadRetries = 5
 	// AsyncWriteThreshold: files larger than this are uploaded in the background
@@ -561,15 +567,16 @@ func (e *Engine) WriteFileAsync(virtualPath string, tmpFile *os.File, tmpPath st
 }
 
 // uploadChunks reads, encrypts, and uploads chunks concurrently with retry.
-// Chunk size is chosen dynamically based on fileSize to keep the total chunk
-// count near ~100, reducing cloud API calls for large files.
+// Uses a variable chunk schedule (small→large ramp) to fill the upload pipeline
+// quickly and maintain high throughput for large files.
 // onChunkUploaded, if non-nil, is called after each successful chunk upload.
 // Returns the ordered slice of chunk metadata on success.
 func (e *Engine) uploadChunks(r io.ReadSeeker, fileID string, fileSize int64, onChunkUploaded func()) ([]chunkMeta, error) {
-	chunkSize := e.chunkSize(fileSize)
-	workers := workersForChunkSize(chunkSize)
-	slog.Debug("upload plan", "fileSize", fileSize, "chunkSize", chunkSize, "workers", workers)
-	cr := chunker.NewChunkReader(r, chunkSize)
+	schedule := e.chunkSchedule(fileSize)
+	workers := uploadWorkers()
+	slog.Debug("upload plan", "fileSize", fileSize, "workers", workers,
+		"tiers", len(schedule.Tiers), "maxChunk", schedule.MaxSize())
+	cr := chunker.NewVariableChunkReader(r, schedule)
 
 	var (
 		metas    []chunkMeta
@@ -818,7 +825,10 @@ func (e *Engine) uploadChunksTracked(r io.ReadSeeker, fileID, virtualPath string
 	defer e.uploading.Add(-1)
 
 	chunkSize := e.chunkSize(fileSize)
-	estimated := int(fileSize/int64(chunkSize)) + 1
+	estimated := e.chunkSchedule(fileSize).EstimateChunks(fileSize)
+	if estimated == 0 {
+		estimated = int(fileSize/int64(chunkSize)) + 1
+	}
 
 	e.uploadsMu.Lock()
 	if p, ok := e.uploads[fileID]; ok {

@@ -87,7 +87,7 @@ func (rm *RcloneManager) spawn(ctx context.Context) error {
 		"--config", rm.configPath,
 		"--drive-use-trash=false",
 		"--drive-chunk-size=256M",
-		"--transfers=8",
+		"--transfers=12",
 		"--drive-pacer-min-sleep=10ms",
 	)
 	rm.cmd.Stdout = os.Stdout

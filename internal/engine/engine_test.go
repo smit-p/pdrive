@@ -1293,25 +1293,11 @@ func TestBackupDB_RoundTrip(t *testing.T) {
 	}
 }
 
-// TestWorkersForChunkSize verifies the concurrency levels for different chunk sizes.
-func TestWorkersForChunkSize(t *testing.T) {
-	cases := []struct {
-		chunkSize int
-		want      int
-	}{
-		{128 * 1024 * 1024, 6}, // 128 MB → 6 workers
-		{32 * 1024 * 1024, 6},  // 32 MB → 6 workers
-		{16 * 1024 * 1024, 8},  // 16 MB → 8 workers
-		{8 * 1024 * 1024, 8},   // 8 MB → 8 workers
-		{4 * 1024 * 1024, 10},  // 4 MB → 10 workers (max)
-		{1 * 1024 * 1024, 10},  // 1 MB → 10 workers
-	}
-	for _, tc := range cases {
-		got := workersForChunkSize(tc.chunkSize)
-		if got != tc.want {
-			t.Errorf("workersForChunkSize(%d MB) = %d, want %d",
-				tc.chunkSize/(1024*1024), got, tc.want)
-		}
+// TestUploadWorkers verifies the fixed concurrency level.
+func TestUploadWorkers(t *testing.T) {
+	got := uploadWorkers()
+	if got != 12 {
+		t.Errorf("uploadWorkers() = %d, want 12", got)
 	}
 }
 
