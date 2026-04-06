@@ -177,6 +177,11 @@ func (d *Daemon) Start(ctx context.Context) error {
 	// that may have been synced before the skip filter was in place.
 	d.purgeJunkFiles()
 
+	// Ensure pdrive-chunks and pdrive-meta directories exist on every
+	// provider. This recovers gracefully when a user deletes the remote
+	// folders manually (or on a fresh install).
+	d.engine.EnsureRemoteDirs()
+
 	// Start local sync dir if configured.
 	if d.config.SyncDir != "" {
 		if err := os.MkdirAll(d.config.SyncDir, 0755); err != nil {

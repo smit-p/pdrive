@@ -178,6 +178,19 @@ func (c *Client) DeleteFile(remote, remotePath string) error {
 	return nil
 }
 
+// Mkdir creates a directory on the remote via rclone RC operations/mkdir.
+// It is a no-op if the directory already exists.
+func (c *Client) Mkdir(remote, remotePath string) error {
+	_, err := c.call("operations/mkdir", map[string]interface{}{
+		"fs":     ensureColon(remote),
+		"remote": remotePath,
+	})
+	if err != nil {
+		return fmt.Errorf("mkdir %s: %w", remotePath, err)
+	}
+	return nil
+}
+
 // Cleanup empties the trash on the given remote (e.g. Google Drive).
 func (c *Client) Cleanup(remote string) error {
 	_, err := c.call("operations/cleanup", map[string]interface{}{

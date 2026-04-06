@@ -129,6 +129,11 @@ func (f *fakeCloud) ListDir(remote, path string) ([]rclonerc.ListItem, error) {
 
 func (f *fakeCloud) Cleanup(remote string) error { return f.cleanupErr }
 
+func (f *fakeCloud) Mkdir(remote, path string) error {
+	// In fakeCloud, mkdir is a no-op (PutFile auto-creates parent structure).
+	return nil
+}
+
 // ── test helpers ─────────────────────────────────────────────────────────────
 
 // newTestEngine creates a fully wired Engine backed by a temp-dir SQLite DB
@@ -1186,6 +1191,38 @@ func TestGCOrphanedChunks_RemovesBrokenDBRecord(t *testing.T) {
 	f, _ := eng.db.GetFileByPath("/doomed.txt")
 	if f != nil {
 		t.Error("file with missing cloud chunks should have been removed from DB")
+	}
+}
+
+// TestGCOrphanedChunks_SafetyThreshold verifies that GC does NOT mass-delete
+// file records when the majority of cloud chunks are missing (indicating a
+// bulk remote deletion rather than individual corruption).
+func TestGCOrphanedChunks_SafetyThreshold(t *testing.T) {
+	eng, cloud := newTestEngine(t)
+	eng.SetChunkSize(4) // tiny chunks so each file gets multiple
+
+	// Upload enough files to exceed the safety threshold (>10 chunks).
+	for i := 0; i < 15; i++ {
+		name := fmt.Sprintf("/file-%02d.txt", i)
+		data := []byte(fmt.Sprintf("content-%02d", i))
+		eng.WriteFileStream(name, bytes.NewReader(data), int64(len(data)))
+	}
+
+	// Nuke all cloud objects to simulate remote folder deletion.
+	cloud.mu.Lock()
+	clear(cloud.objects)
+	cloud.mu.Unlock()
+
+	eng.GCOrphanedChunks()
+
+	// Files should NOT have been deleted — safety threshold should protect them.
+	var count int
+	eng.db.Conn().QueryRow("SELECT COUNT(*) FROM files").Scan(&count)
+	if count == 0 {
+		t.Error("GC safety threshold failed: all files were deleted despite mass-missing chunks")
+	}
+	if count < 15 {
+		t.Errorf("GC safety threshold partially failed: %d/15 files survived", count)
 	}
 }
 

@@ -212,10 +212,32 @@ func (e *Engine) GCOrphanedChunks() {
 		}
 
 		// Inverse check: DB records for this provider with no matching cloud object.
+		// Safety threshold: if more than 80% of known chunks are missing from
+		// the cloud listing, treat this as a bulk-deletion or folder-loss event
+		// rather than individual corruption. Deleting all files would be
+		// catastrophic — warn loudly and skip deletion for this provider.
 		cloudPaths := make(map[string]bool, len(items))
 		for _, item := range items {
 			cloudPaths[item.Path] = true
 			cloudPaths[path.Join(chunkRemoteDir, item.Name)] = true
+		}
+		var providerMissing int
+		for remotePath := range known {
+			if !cloudPaths[remotePath] && !cloudPaths[path.Base(remotePath)] {
+				providerMissing++
+			}
+		}
+		if len(known) > 0 && providerMissing > 0 {
+			missingPct := float64(providerMissing) / float64(len(known))
+			if providerMissing > 10 && missingPct > 0.5 {
+				slog.Error("gc: SAFETY STOP — majority of cloud chunks missing, skipping file deletion",
+					"provider", p.DisplayName,
+					"db_chunks", len(known),
+					"missing", providerMissing,
+					"pct", fmt.Sprintf("%.0f%%", missingPct*100))
+				slog.Error("gc: this usually means the remote folder was deleted or the cloud account was wiped — run 'pdrive stop' and investigate before restarting")
+				continue // skip inverse deletion for this provider
+			}
 		}
 		for remotePath := range known {
 			if !cloudPaths[remotePath] && !cloudPaths[path.Base(remotePath)] {

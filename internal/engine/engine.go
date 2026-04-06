@@ -50,6 +50,7 @@ type CloudStorage interface {
 	DeleteFile(remote, remotePath string) error
 	ListDir(remote, remotePath string) ([]rclonerc.ListItem, error)
 	Cleanup(remote string) error
+	Mkdir(remote, remotePath string) error
 }
 
 const chunkRemoteDir = "pdrive-chunks"
@@ -227,6 +228,25 @@ func (e *Engine) SetChunkSize(bytes int) { e.overrideChunkSize = bytes }
 func (e *Engine) SetSaltPath(p string) { e.saltPath = p }
 
 // SetMaxChunkRetries overrides the default retry count for chunk uploads.
+
+// EnsureRemoteDirs creates the pdrive-chunks and pdrive-meta directories on
+// every configured provider. This is a no-op when the directories already
+// exist and is essential after a user deletes the remote folders manually.
+func (e *Engine) EnsureRemoteDirs() {
+	providers, err := e.db.GetAllProviders()
+	if err != nil || len(providers) == 0 {
+		return
+	}
+	for _, p := range providers {
+		if err := e.rc.Mkdir(p.RcloneRemote, "pdrive-chunks"); err != nil {
+			slog.Warn("ensure remote dir failed", "provider", p.DisplayName, "dir", "pdrive-chunks", "error", err)
+		}
+		if err := e.rc.Mkdir(p.RcloneRemote, "pdrive-meta"); err != nil {
+			slog.Warn("ensure remote dir failed", "provider", p.DisplayName, "dir", "pdrive-meta", "error", err)
+		}
+	}
+	slog.Info("remote directories ensured on all providers")
+}
 func (e *Engine) SetMaxChunkRetries(n int) { e.maxChunkRetries = n }
 
 // MetricsSnapshot is a point-in-time snapshot of engine telemetry counters.
