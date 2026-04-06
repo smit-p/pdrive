@@ -15,14 +15,19 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
+	"slices"
 
 	"github.com/google/uuid"
 )
 
 const (
-	DefaultChunkSize = 32 * 1024 * 1024  // 32 MB — default / minimum
-	MaxChunkSize     = 128 * 1024 * 1024 // 128 MB — upper bound
-	targetChunkCount = 25                // aim for ~25 chunks per file
+	DefaultChunkSize = 32 * 1024 * 1024       // 32 MB — default / minimum
+	MaxChunkSize     = 4 * 1024 * 1024 * 1024 // 4 GiB — practical upper bound (in-memory encryption)
+	targetChunkCount = 25                     // aim for ~25 chunks per file (legacy)
+
+	// EncOverheadPerChunk is the fixed byte overhead AES-256-GCM adds to
+	// each chunk: 12-byte nonce + 16-byte authentication tag.
+	EncOverheadPerChunk = 28
 )
 
 // ChunkSizeForFile returns an appropriate fixed chunk size for the given file
@@ -116,24 +121,112 @@ func (s *ChunkSchedule) EstimateChunks(fileSize int64) int {
 	return count
 }
 
-// ScheduleForFile returns a variable chunk schedule optimised for the given
-// file size.  Small files (≤ 256 MB) get a single fixed tier.  Larger files
-// use a ramp-up strategy:
-//
-//	Tier 1:  4 × 16 MB  — fill the worker pipeline quickly
-//	Tier 2:  8 × 32 MB  — warm up
-//	Tier 3:  ∞ × 64 MB  — steady-state (good throughput with moderate API calls)
+// ScheduleForFile returns a fixed chunk schedule using DefaultChunkSize.
+// Kept as a fallback when remote capacity information is unavailable.
 func ScheduleForFile(fileSize int64) *ChunkSchedule {
-	if fileSize <= 256*1024*1024 {
-		return &ChunkSchedule{Tiers: []ChunkTier{
-			{Count: 0, Size: DefaultChunkSize},
-		}}
-	}
 	return &ChunkSchedule{Tiers: []ChunkTier{
-		{Count: 4, Size: 16 * 1024 * 1024},  // 64 MB total
-		{Count: 8, Size: 32 * 1024 * 1024},  // 256 MB total
-		{Count: 0, Size: 64 * 1024 * 1024},  // rest of file
+		{Count: 0, Size: DefaultChunkSize},
 	}}
+}
+
+// PlanChunks returns a chunk schedule that minimises the number of chunks for
+// the given file size, using the supplied per-remote free-space values (bytes).
+//
+// Strategy:
+//  1. If the file fits on a single remote and is within MaxChunkSize → 1 chunk.
+//  2. If the file fits on one remote but exceeds MaxChunkSize → uniform
+//     MaxChunkSize chunks (all on that remote).
+//  3. Otherwise, greedily fill remotes largest-first: each chunk is sized to
+//     use as much of the best available remote as possible, capped at
+//     MaxChunkSize to keep memory bounded during encryption.
+//
+// Encryption overhead (EncOverheadPerChunk bytes per chunk) is accounted for
+// so that the encrypted chunk fits within the remote's free space.
+func PlanChunks(fileSize int64, remoteFreeBytes []int64) *ChunkSchedule {
+	if fileSize <= 0 {
+		return &ChunkSchedule{Tiers: []ChunkTier{{Count: 0, Size: DefaultChunkSize}}}
+	}
+
+	// Sort free spaces descending; discard remotes too small to hold even
+	// the encryption overhead.
+	spaces := slices.Clone(remoteFreeBytes)
+	slices.SortFunc(spaces, func(a, b int64) int {
+		if b > a {
+			return 1
+		}
+		if b < a {
+			return -1
+		}
+		return 0
+	})
+	var usable []int64
+	for _, s := range spaces {
+		if s > EncOverheadPerChunk {
+			usable = append(usable, s)
+		}
+	}
+	if len(usable) == 0 {
+		return &ChunkSchedule{Tiers: []ChunkTier{{Count: 0, Size: DefaultChunkSize}}}
+	}
+
+	largest := usable[0] - EncOverheadPerChunk // max plaintext on biggest remote
+
+	// Case 1 & 2: file fits on a single remote.
+	if largest >= fileSize {
+		size := fileSize
+		if size > int64(MaxChunkSize) {
+			size = int64(MaxChunkSize)
+		}
+		return &ChunkSchedule{Tiers: []ChunkTier{{Count: 0, Size: int(size)}}}
+	}
+
+	// Case 3: file spans multiple remotes — greedy fill.
+	avail := slices.Clone(usable)
+	remaining := fileSize
+	var tiers []ChunkTier
+
+	for remaining > 0 {
+		// Pick the remote with the most available space.
+		bestIdx := -1
+		var bestSpace int64
+		for i, s := range avail {
+			if s > bestSpace {
+				bestSpace = s
+				bestIdx = i
+			}
+		}
+		if bestIdx < 0 || bestSpace <= EncOverheadPerChunk {
+			// Safety fallback — shouldn't happen if CheckSpace passed.
+			tiers = append(tiers, ChunkTier{Count: 0, Size: DefaultChunkSize})
+			break
+		}
+
+		plain := bestSpace - EncOverheadPerChunk
+		if plain > int64(MaxChunkSize) {
+			plain = int64(MaxChunkSize)
+		}
+		if plain > remaining {
+			plain = remaining
+		}
+
+		tiers = append(tiers, ChunkTier{Count: 1, Size: int(plain)})
+		avail[bestIdx] -= plain + EncOverheadPerChunk
+		remaining -= plain
+	}
+
+	// Collapse identical tiers into a single unlimited tier.
+	allSame := true
+	for i := 1; i < len(tiers); i++ {
+		if tiers[i].Size != tiers[0].Size {
+			allSame = false
+			break
+		}
+	}
+	if allSame && len(tiers) > 0 {
+		return &ChunkSchedule{Tiers: []ChunkTier{{Count: 0, Size: tiers[0].Size}}}
+	}
+
+	return &ChunkSchedule{Tiers: tiers}
 }
 
 // Chunk represents a single piece of a split file.

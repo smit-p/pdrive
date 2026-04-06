@@ -304,9 +304,13 @@ func (s *SyncDir) upload(absPath, vp string) {
 		return
 	}
 
+	// Register immediately so the UI shows "Preparing…" while we hash/spool.
+	queueKey := s.engine.RegisterQueuedUpload(vp, size)
+
 	// Skip if already uploaded with same content (hash-based dedup).
 	if existing, _ := s.engine.Stat(vp); existing != nil && existing.SizeBytes == size {
 		if localHash, err := hashLocalFile(absPath); err == nil && localHash == existing.SHA256Full {
+			s.engine.UnregisterQueuedUpload(queueKey)
 			return
 		}
 	}
@@ -315,6 +319,7 @@ func (s *SyncDir) upload(absPath, vp string) {
 		// Large file — copy to spool then upload in background.
 		tmp, err := os.CreateTemp(s.spoolDir, "pdrive-sync-*")
 		if err != nil {
+			s.engine.UnregisterQueuedUpload(queueKey)
 			slog.Error("sync: spool create failed", "path", vp, "error", err)
 			return
 		}
@@ -322,6 +327,7 @@ func (s *SyncDir) upload(absPath, vp string) {
 		if err != nil {
 			tmp.Close()
 			os.Remove(tmp.Name())
+			s.engine.UnregisterQueuedUpload(queueKey)
 			slog.Error("sync: open failed", "path", vp, "error", err)
 			return
 		}
@@ -330,16 +336,20 @@ func (s *SyncDir) upload(absPath, vp string) {
 		if cpErr != nil || n != size {
 			tmp.Close()
 			os.Remove(tmp.Name())
+			s.engine.UnregisterQueuedUpload(queueKey)
 			slog.Error("sync: spool copy failed", "path", vp, "error", cpErr)
 			return
 		}
 		tmp.Seek(0, io.SeekStart)
+		// WriteFileAsync adopts the queued entry — don't unregister here.
 		if err := s.engine.WriteFileAsync(vp, tmp, tmp.Name(), size); err != nil {
 			slog.Error("sync: async upload failed", "path", vp, "error", err)
 			return
 		}
 		slog.Info("sync: upload started", "path", vp, "size", size)
 	} else {
+		// Small file — synchronous upload; remove queued entry when done.
+		s.engine.UnregisterQueuedUpload(queueKey)
 		data, err := os.ReadFile(absPath)
 		if err != nil {
 			slog.Error("sync: read failed", "path", vp, "error", err)
@@ -347,6 +357,7 @@ func (s *SyncDir) upload(absPath, vp string) {
 		}
 		if err := s.engine.WriteFile(vp, data); err != nil {
 			slog.Error("sync: upload failed", "path", vp, "error", err)
+			return
 			return
 		}
 		slog.Info("sync: uploaded", "path", vp, "size", size)

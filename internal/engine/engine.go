@@ -336,14 +336,30 @@ func (e *Engine) chunkSchedule(fileSize int64) *chunker.ChunkSchedule {
 			{Count: 0, Size: e.overrideChunkSize},
 		}}
 	}
-	return chunker.ScheduleForFile(fileSize)
+	freeSpaces, err := e.broker.EligibleFreeSpaces()
+	if err != nil || len(freeSpaces) == 0 {
+		return chunker.ScheduleForFile(fileSize)
+	}
+	return chunker.PlanChunks(fileSize, freeSpaces)
 }
 
-// uploadWorkers returns the number of concurrent upload workers.
-// With the ramp-up chunk schedule the pipeline benefits from higher
-// concurrency since early chunks are small.
-func uploadWorkers() int {
-	return maxUploadWorkers
+// uploadWorkersForSchedule returns the number of concurrent upload workers,
+// scaled inversely with the maximum chunk size to keep peak memory bounded.
+// Peak in-flight memory ≈ workers × maxChunkSize.
+func uploadWorkersForSchedule(s *chunker.ChunkSchedule) int {
+	const memBudget = 6 << 30 // 6 GiB target for in-flight encrypted data
+	maxChunk := int64(s.MaxSize())
+	if maxChunk <= 0 {
+		return maxUploadWorkers
+	}
+	w := int(memBudget / maxChunk)
+	if w < 2 {
+		w = 2
+	}
+	if w > maxUploadWorkers {
+		w = maxUploadWorkers
+	}
+	return w
 }
 
 // WriteFile writes a file to the virtual filesystem, chunking and encrypting it.
@@ -409,7 +425,7 @@ func (e *Engine) WriteFileStream(virtualPath string, r io.ReadSeeker, size int64
 		return e.cloneFileFromDonor(donor, fileID, virtualPath, size, fullHashStr)
 	}
 
-	metas, err := e.uploadChunks(r, fileID, size, nil)
+	metas, err := e.uploadChunks(r, fileID, size, nil, nil)
 	if err != nil {
 		return err
 	}
@@ -445,26 +461,19 @@ func (e *Engine) WriteFileStream(virtualPath string, r io.ReadSeeker, size int64
 // until the upload completes (ListFiles/GetFileByPath filter pending records).
 // The caller must NOT close or remove tmpFile; the engine takes ownership.
 func (e *Engine) WriteFileAsync(virtualPath string, tmpFile *os.File, tmpPath string, size int64) error {
+	// Generate the file ID early so we can register progress immediately.
+	fileID := uuid.New().String()
+
+	// Adopt the queued placeholder (set by SyncDir) or create a fresh entry.
+	e.adoptQueuedUpload(virtualPath, fileID, size)
+
 	// Pre-upload space check: reject early if the file won't fit.
 	if err := e.CheckSpace(size); err != nil {
+		e.removeUploadProgress(fileID)
 		tmpFile.Close()
 		os.Remove(tmpPath)
 		return err
 	}
-
-	// Generate the file ID early so we can register progress immediately.
-	fileID := uuid.New().String()
-
-	// Register in the uploads map right away so the UI shows the file
-	// as "Preparing..." while we hash and spool.
-	e.uploadsMu.Lock()
-	e.uploads[fileID] = &uploadProgress{
-		VirtualPath: virtualPath,
-		SizeBytes:   size,
-		StartedAt:   time.Now(),
-		Preparing:   true,
-	}
-	e.uploadsMu.Unlock()
 
 	// Hash synchronously so we can write the pending DB record now.
 	hasher := sha256.New()
@@ -571,9 +580,11 @@ func (e *Engine) WriteFileAsync(virtualPath string, tmpFile *os.File, tmpPath st
 // quickly and maintain high throughput for large files.
 // onChunkUploaded, if non-nil, is called after each successful chunk upload.
 // Returns the ordered slice of chunk metadata on success.
-func (e *Engine) uploadChunks(r io.ReadSeeker, fileID string, fileSize int64, onChunkUploaded func()) ([]chunkMeta, error) {
-	schedule := e.chunkSchedule(fileSize)
-	workers := uploadWorkers()
+func (e *Engine) uploadChunks(r io.ReadSeeker, fileID string, fileSize int64, schedule *chunker.ChunkSchedule, onChunkUploaded func()) ([]chunkMeta, error) {
+	if schedule == nil {
+		schedule = e.chunkSchedule(fileSize)
+	}
+	workers := uploadWorkersForSchedule(schedule)
 	slog.Debug("upload plan", "fileSize", fileSize, "workers", workers,
 		"tiers", len(schedule.Tiers), "maxChunk", schedule.MaxSize())
 	cr := chunker.NewVariableChunkReader(r, schedule)
@@ -636,6 +647,11 @@ func (e *Engine) uploadChunks(r io.ReadSeeker, fileID string, fileSize int64, on
 			remotePath:    remotePath,
 		})
 
+		// Optimistically reserve space so subsequent AssignChunk calls see
+		// reduced free space for this provider (prevents over-assignment
+		// when chunks are large relative to remote capacity).
+		_ = e.db.DeductProviderFreeBytes(providerID, int64(len(encrypted)))
+
 		sem <- struct{}{}
 		wg.Add(1)
 		go func(enc []byte, remote string, prov *metadata.Provider, seq int, cm chunkMeta) {
@@ -675,9 +691,6 @@ func (e *Engine) uploadChunks(r io.ReadSeeker, fileID string, fileSize int64, on
 				}
 				slog.Debug("chunk uploaded", "seq", seq, "provider", prov.DisplayName)
 				e.chunksUploaded.Add(1)
-				// Deduct the encrypted size from the provider's free-space counter
-				// so the broker's view stays fresh between full quota syncs.
-				_ = e.db.DeductProviderFreeBytes(prov.ID, int64(len(enc)))
 				mu.Lock()
 				uploaded = append(uploaded, cm)
 				mu.Unlock()
@@ -686,6 +699,9 @@ func (e *Engine) uploadChunks(r io.ReadSeeker, fileID string, fileSize int64, on
 				}
 				return // success
 			}
+			// Credit back the optimistic space reservation that was
+			// deducted when this chunk was assigned.
+			_ = e.db.CreditProviderFreeBytes(prov.ID, int64(len(enc)))
 			mu.Lock()
 			if firstErr == nil {
 				firstErr = fmt.Errorf("uploading chunk %d to %s after %d retries: %w",
@@ -698,6 +714,11 @@ func (e *Engine) uploadChunks(r io.ReadSeeker, fileID string, fileSize int64, on
 	wg.Wait()
 
 	if firstErr != nil {
+		// Credit back space for chunks that were successfully uploaded —
+		// they're about to be deleted from the cloud.
+		for _, m := range uploaded {
+			_ = e.db.CreditProviderFreeBytes(m.providerID, int64(m.encryptedSize))
+		}
 		// Clean up chunks that were successfully uploaded before the failure.
 		if len(uploaded) > 0 {
 			locs := make([]metadata.ChunkLocation, len(uploaded))
@@ -824,10 +845,10 @@ func (e *Engine) uploadChunksTracked(r io.ReadSeeker, fileID, virtualPath string
 	e.uploading.Add(1)
 	defer e.uploading.Add(-1)
 
-	chunkSize := e.chunkSize(fileSize)
-	estimated := e.chunkSchedule(fileSize).EstimateChunks(fileSize)
+	schedule := e.chunkSchedule(fileSize)
+	estimated := schedule.EstimateChunks(fileSize)
 	if estimated == 0 {
-		estimated = int(fileSize/int64(chunkSize)) + 1
+		estimated = 1
 	}
 
 	e.uploadsMu.Lock()
@@ -858,7 +879,7 @@ func (e *Engine) uploadChunksTracked(r io.ReadSeeker, fileID, virtualPath string
 		e.uploadsMu.Unlock()
 	}
 
-	metas, err := e.uploadChunks(r, fileID, fileSize, callback)
+	metas, err := e.uploadChunks(r, fileID, fileSize, schedule, callback)
 	if err != nil {
 		return nil, err
 	}
@@ -897,6 +918,55 @@ func (e *Engine) UploadProgress() []UploadProgressInfo {
 func (e *Engine) removeUploadProgress(fileID string) {
 	e.uploadsMu.Lock()
 	delete(e.uploads, fileID)
+	e.uploadsMu.Unlock()
+}
+
+// RegisterQueuedUpload inserts a "Preparing" entry keyed by a path-based
+// placeholder so the UI shows immediate feedback.  SyncDir calls this at the
+// very start of upload() — before hashing or spooling.  WriteFileAsync later
+// adopts the entry by calling adoptQueuedUpload.
+// Returns the placeholder key (caller must pass it to UnregisterQueuedUpload
+// if the upload is abandoned before WriteFileAsync is reached).
+func (e *Engine) RegisterQueuedUpload(virtualPath string, size int64) string {
+	key := "queued:" + virtualPath
+	e.uploadsMu.Lock()
+	e.uploads[key] = &uploadProgress{
+		VirtualPath: virtualPath,
+		SizeBytes:   size,
+		StartedAt:   time.Now(),
+		Preparing:   true,
+	}
+	e.uploadsMu.Unlock()
+	return key
+}
+
+// UnregisterQueuedUpload removes a queued placeholder (e.g. when the upload is
+// skipped due to dedup or error before WriteFileAsync is called).
+func (e *Engine) UnregisterQueuedUpload(key string) {
+	e.uploadsMu.Lock()
+	delete(e.uploads, key)
+	e.uploadsMu.Unlock()
+}
+
+// adoptQueuedUpload moves the queued entry (if any) to the real fileID key,
+// keeping the original StartedAt timestamp so elapsed time is accurate.
+func (e *Engine) adoptQueuedUpload(virtualPath, fileID string, size int64) {
+	queueKey := "queued:" + virtualPath
+	e.uploadsMu.Lock()
+	if p, ok := e.uploads[queueKey]; ok {
+		// Re-key from placeholder to real fileID.
+		delete(e.uploads, queueKey)
+		p.SizeBytes = size // update in case stat changed
+		e.uploads[fileID] = p
+	} else {
+		// No queued entry (direct WriteFileAsync call, e.g. browser upload).
+		e.uploads[fileID] = &uploadProgress{
+			VirtualPath: virtualPath,
+			SizeBytes:   size,
+			StartedAt:   time.Now(),
+			Preparing:   true,
+		}
+	}
 	e.uploadsMu.Unlock()
 }
 

@@ -1559,6 +1559,6 @@ document.addEventListener('change',function(e){
 goPage('browse',{path:'/'});
 pollStorage();
 setInterval(pollStorage,15000);
-setInterval(pollUploads,3000);
+setInterval(pollUploads,1000);
 
 })();

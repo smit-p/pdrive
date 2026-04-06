@@ -1293,11 +1293,29 @@ func TestBackupDB_RoundTrip(t *testing.T) {
 	}
 }
 
-// TestUploadWorkers verifies the fixed concurrency level.
+// TestUploadWorkers verifies that worker count scales with chunk size.
 func TestUploadWorkers(t *testing.T) {
-	got := uploadWorkers()
-	if got != 12 {
-		t.Errorf("uploadWorkers() = %d, want 12", got)
+	tests := []struct {
+		name      string
+		chunkSize int
+		wantMin   int
+		wantMax   int
+	}{
+		{"small_32MB", 32 << 20, 12, 12},              // 6 GiB / 32 MiB = 192, capped at 12
+		{"medium_1GB", 1 << 30, 6, 6},                 // 6 GiB / 1 GiB = 6
+		{"large_4GB", 4 * 1024 * 1024 * 1024, 2, 2},  // 6 GiB / 4 GiB = 1, clamped to 2
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &chunker.ChunkSchedule{Tiers: []chunker.ChunkTier{
+				{Count: 0, Size: tt.chunkSize},
+			}}
+			got := uploadWorkersForSchedule(s)
+			if got < tt.wantMin || got > tt.wantMax {
+				t.Errorf("uploadWorkersForSchedule(%d) = %d, want [%d, %d]",
+					tt.chunkSize, got, tt.wantMin, tt.wantMax)
+			}
+		})
 	}
 }
 
@@ -4288,7 +4306,7 @@ func TestUploadChunks_ReadError(t *testing.T) {
 	// errSeeker fails on the second read.
 	r := &errSeeker{failAfter: 1}
 
-	_, err := eng.uploadChunks(r, "test-file-id", 1024, nil)
+	_, err := eng.uploadChunks(r, "test-file-id", 1024, nil, nil)
 	if err == nil {
 		t.Fatal("expected error from bad reader")
 	}

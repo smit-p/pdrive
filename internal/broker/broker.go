@@ -125,6 +125,31 @@ func (b *Broker) pickPFRD(candidates []metadata.Provider) string {
 	return candidates[len(candidates)-1].ID
 }
 
+// EligibleFreeSpaces returns the free-space values (bytes) for every provider
+// that is currently eligible for chunk placement.  Rate-limited providers and
+// those below the minimum free-space threshold are excluded.
+func (b *Broker) EligibleFreeSpaces() ([]int64, error) {
+	providers, err := b.db.GetAllProviders()
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().Unix()
+	var spaces []int64
+	for _, p := range providers {
+		if p.RateLimitedUntil != nil && *p.RateLimitedUntil > now {
+			continue
+		}
+		if p.QuotaFreeBytes == nil {
+			continue
+		}
+		if *p.QuotaFreeBytes <= b.minFreeSpace {
+			continue
+		}
+		spaces = append(spaces, *p.QuotaFreeBytes)
+	}
+	return spaces, nil
+}
+
 // TotalFreeSpace returns the aggregate free space across all eligible providers.
 // Providers that are rate-limited or below the min free-space threshold are excluded.
 func (b *Broker) TotalFreeSpace() (int64, error) {

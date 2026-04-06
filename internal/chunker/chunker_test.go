@@ -208,7 +208,8 @@ func TestChunkSizeForFile(t *testing.T) {
 		{"500 MB", 500 * 1024 * 1024, DefaultChunkSize, DefaultChunkSize},
 		{"1 GB", 1024 * 1024 * 1024, DefaultChunkSize, MaxChunkSize},
 		{"2 GB", 2 * 1024 * 1024 * 1024, DefaultChunkSize, MaxChunkSize},
-		{"10 GB", 10 * 1024 * 1024 * 1024, MaxChunkSize, MaxChunkSize},
+		{"10 GB", 10 * 1024 * 1024 * 1024, DefaultChunkSize, MaxChunkSize},
+		{"200 GB", 200 * 1024 * 1024 * 1024, MaxChunkSize, MaxChunkSize},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -656,7 +657,7 @@ func TestChunkSizeForFile_Negative(t *testing.T) {
 
 // TestChunkSizeForFile_VeryLarge tests capping at MaxChunkSize.
 func TestChunkSizeForFile_VeryLarge(t *testing.T) {
-	s := ChunkSizeForFile(10 * 1024 * 1024 * 1024) // 10 GB
+	s := ChunkSizeForFile(200 * 1024 * 1024 * 1024) // 200 GB
 	if s != MaxChunkSize {
 		t.Errorf("expected MaxChunkSize (%d), got %d", MaxChunkSize, s)
 	}
@@ -719,5 +720,90 @@ func TestDecrypt_InvalidKeyLength(t *testing.T) {
 	_, err := Decrypt([]byte("short"), blob)
 	if err == nil {
 		t.Fatal("expected error for invalid key length")
+	}
+}
+
+// ── PlanChunks tests ─────────────────────────────────────────────────────────
+
+func TestPlanChunks_FitsOnOneRemote_SmallFile(t *testing.T) {
+	// 100 MB file, one remote with 1 GB free → single chunk = whole file.
+	s := PlanChunks(100*1024*1024, []int64{1024 * 1024 * 1024})
+	est := s.EstimateChunks(100 * 1024 * 1024)
+	if est != 1 {
+		t.Fatalf("expected 1 chunk, got %d", est)
+	}
+	if s.MaxSize() != 100*1024*1024 {
+		t.Fatalf("expected chunk size = file size (100 MB), got %d", s.MaxSize())
+	}
+}
+
+func TestPlanChunks_FitsOnOneRemote_LargeFile(t *testing.T) {
+	// 8 GiB file, one remote with 20 GiB free → chunks capped at MaxChunkSize.
+	fileSize := int64(8) * 1024 * 1024 * 1024
+	s := PlanChunks(fileSize, []int64{20 * 1024 * 1024 * 1024})
+	est := s.EstimateChunks(fileSize)
+	if est != 2 {
+		t.Fatalf("expected 2 chunks (8 GiB / 4 GiB cap), got %d", est)
+	}
+	if s.MaxSize() != MaxChunkSize {
+		t.Fatalf("expected MaxChunkSize, got %d", s.MaxSize())
+	}
+}
+
+func TestPlanChunks_SpansMultipleRemotes(t *testing.T) {
+	// 5 GiB file, remotes: [3 GiB, 3 GiB]. Must span both.
+	gib := int64(1024 * 1024 * 1024)
+	fileSize := 5 * gib
+	s := PlanChunks(fileSize, []int64{3 * gib, 3 * gib})
+	est := s.EstimateChunks(fileSize)
+	if est != 2 {
+		t.Fatalf("expected 2 chunks, got %d", est)
+	}
+}
+
+func TestPlanChunks_GreedyFillsLargestFirst(t *testing.T) {
+	// 10 GiB file, remotes: [6 GiB, 3 GiB, 2 GiB].
+	// Greedy: 6 GiB-overhead on r1, 3 GiB-overhead on r2, ~1 GiB on r3.
+	gib := int64(1024 * 1024 * 1024)
+	fileSize := 10 * gib
+	freeSpaces := []int64{6 * gib, 3 * gib, 2 * gib}
+	s := PlanChunks(fileSize, freeSpaces)
+	est := s.EstimateChunks(fileSize)
+	// Should use 3 remotes with chunks close to their capacity.
+	if est < 3 || est > 4 {
+		t.Fatalf("expected 3-4 chunks for 10 GiB across [6,3,2] GiB remotes, got %d", est)
+	}
+}
+
+func TestPlanChunks_UniformCollapse(t *testing.T) {
+	// 20 GiB file, all remotes have plenty of space.
+	// All chunks should be MaxChunkSize (4 GiB), collapsed to one tier.
+	gib := int64(1024 * 1024 * 1024)
+	fileSize := 20 * gib
+	s := PlanChunks(fileSize, []int64{50 * gib, 30 * gib})
+	if len(s.Tiers) != 1 {
+		t.Fatalf("expected 1 collapsed tier, got %d tiers", len(s.Tiers))
+	}
+	if s.Tiers[0].Size != MaxChunkSize {
+		t.Fatalf("expected tier size %d, got %d", MaxChunkSize, s.Tiers[0].Size)
+	}
+	est := s.EstimateChunks(fileSize)
+	if est != 5 {
+		t.Fatalf("expected 5 chunks (20 GiB / 4 GiB), got %d", est)
+	}
+}
+
+func TestPlanChunks_NoUsableRemotes(t *testing.T) {
+	// No remotes with space → fallback to DefaultChunkSize.
+	s := PlanChunks(1024*1024, []int64{0, 10})
+	if s.MaxSize() != DefaultChunkSize {
+		t.Fatalf("expected DefaultChunkSize fallback, got %d", s.MaxSize())
+	}
+}
+
+func TestPlanChunks_ZeroFileSize(t *testing.T) {
+	s := PlanChunks(0, []int64{1024 * 1024 * 1024})
+	if s.MaxSize() != DefaultChunkSize {
+		t.Fatalf("expected DefaultChunkSize for zero-size file, got %d", s.MaxSize())
 	}
 }

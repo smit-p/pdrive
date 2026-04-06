@@ -440,6 +440,17 @@ func (db *DB) DeductProviderFreeBytes(providerID string, delta int64) error {
 	return err
 }
 
+// CreditProviderFreeBytes atomically increases a provider's quota_free_bytes
+// by delta.  Used to roll back an optimistic space reservation when a chunk
+// upload fails.
+func (db *DB) CreditProviderFreeBytes(providerID string, delta int64) error {
+	_, err := db.conn.Exec(
+		`UPDATE providers SET quota_free_bytes = quota_free_bytes + ? WHERE id = ? AND quota_free_bytes IS NOT NULL`,
+		delta, providerID,
+	)
+	return err
+}
+
 // GetChunkLocationsForFile returns all chunk locations for every chunk belonging to a file.
 func (db *DB) GetChunkLocationsForFile(fileID string) ([]ChunkLocation, error) {
 	rows, err := db.conn.Query(
