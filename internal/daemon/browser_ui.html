@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>pdrive</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💾</text></svg>">
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 :root{
@@ -38,6 +39,10 @@ input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 2px var(--a
 .sidebar{grid-column:1;grid-row:2;background:var(--bg2);border-right:1px solid var(--border);padding:8px 0;overflow-y:auto;display:flex;flex-direction:column;gap:2px}
 .main{grid-column:2;grid-row:2;overflow-y:auto;display:flex;flex-direction:column;position:relative}
 .main.drag-over{outline:3px dashed var(--accent);outline-offset:-6px;background:rgba(59,130,246,0.06)}
+.drop-overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:8px;background:rgba(37,99,235,0.06);z-index:10;pointer-events:none;opacity:0;transition:opacity .2s}
+.main.drag-over .drop-overlay{opacity:1}
+.drop-overlay-icon{font-size:40px;opacity:.6}
+.drop-overlay-text{font-size:14px;font-weight:600;color:var(--accent);opacity:.8}
 
 /* Topbar */
 .logo{font-weight:700;font-size:15px;color:var(--accent);letter-spacing:-.3px;cursor:pointer;flex-shrink:0;padding:0 4px}
@@ -93,6 +98,7 @@ input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 2px var(--a
 .cell-size,.cell-date{color:var(--fg2);font-size:12px;font-variant-numeric:tabular-nums}
 .cell-actions{width:80px;text-align:right;opacity:0;transition:opacity .15s}
 .file-row:hover .cell-actions{opacity:1}
+@media(hover:none){.cell-actions{opacity:1}}
 .empty-state{padding:60px 20px;text-align:center;color:var(--fg3)}
 .empty-state .empty-icon{font-size:40px;margin-bottom:12px;opacity:.5}
 .empty-state p{font-size:13px}
@@ -223,6 +229,21 @@ input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 2px var(--a
 .upload-drawer-progress-fill{height:100%;background:var(--success);border-radius:2px;transition:width .3s}
 .upload-drawer-progress-fill.has-errors{background:var(--warning)}
 
+/* Keyboard help modal */
+.kbd-overlay{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:70;display:none;align-items:center;justify-content:center}
+.kbd-overlay.open{display:flex}
+.kbd-modal{background:var(--bg);border-radius:12px;box-shadow:var(--shadow-lg);width:480px;max-width:90vw;max-height:80vh;overflow:hidden;display:flex;flex-direction:column}
+.kbd-modal-header{display:flex;align-items:center;justify-content:space-between;padding:16px 20px 12px;border-bottom:1px solid var(--border)}
+.kbd-modal-header h3{font-size:15px;font-weight:600}
+.kbd-modal-body{padding:12px 20px 20px;overflow-y:auto}
+.kbd-section{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;color:var(--fg3);margin:12px 0 6px}
+.kbd-section:first-child{margin-top:0}
+.kbd-row{display:flex;align-items:center;justify-content:space-between;padding:4px 0;font-size:12px;color:var(--fg2)}
+.kbd-key{display:inline-block;background:var(--bg2);border:1px solid var(--border);border-radius:4px;padding:1px 6px;font-family:'SF Mono',Menlo,Monaco,monospace;font-size:11px;color:var(--fg);min-width:22px;text-align:center}
+
+/* Browse footer */
+.browse-footer{padding:6px 20px 12px;font-size:11px;color:var(--fg3);border-top:1px solid var(--border)}
+
 /* Responsive */
 @media(max-width:768px){
   .app{grid-template-columns:1fr}
@@ -270,7 +291,9 @@ input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 2px var(--a
     <a class="nav-item" data-action="goPage" data-page="metrics"><span class="nav-icon">📈</span>Metrics</a>
   </nav>
 
-  <main class="main" id="main"></main>
+  <main class="main" id="main">
+    <div class="drop-overlay"><div class="drop-overlay-icon">📂</div><div class="drop-overlay-text">Drop files or folders here to upload</div></div>
+  </main>
 </div>
 
 <div class="panel-overlay" id="panel-overlay"></div>
@@ -279,6 +302,7 @@ input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 2px var(--a
 <div class="selection-bar" id="selection-bar"></div>
 <div class="toast-container" id="toasts"></div>
 <div class="upload-drawer" id="upload-drawer"></div>
+<div class="kbd-overlay" id="kbd-overlay"></div>
 
 <script>
 (function(){
@@ -672,6 +696,9 @@ function renderBrowse(){
         html+='</tr>';
       });
       html+='</tbody></table></div>';
+
+      // Browse footer with counts
+      html+='<div class="browse-footer">'+dirs.length+' folder'+(dirs.length!==1?'s':'')+', '+files.length+' file'+(files.length!==1?'s':'')+'</div>';
     }
   }
   return html;
@@ -817,13 +844,14 @@ function renderSearch(){
     if(!S.searchResults.length){
       html+='<div class="empty-state"><p>No files found</p></div>';
     } else {
-      html+='<table class="file-table"><thead><tr><th>Name</th><th>Path</th><th class="r">Size</th></tr></thead><tbody>';
+      html+='<table class="file-table"><thead><tr><th>Name</th><th>Path</th><th class="r">Size</th><th style="width:60px"></th></tr></thead><tbody>';
       S.searchResults.forEach(function(f){
         var name=pathBasename(f.path);
         html+='<tr class="file-row"><td class="cell-name"><a data-action="showInfo" data-path="'+esc(f.path)+'">'
           +'<span class="file-icon">'+fileIcon(name,false)+'</span>'+esc(name)+'</a></td>'
           +'<td style="font-size:11px;color:var(--fg2)">'+esc(f.path)+'</td>'
-          +'<td class="r cell-size">'+fmtSize(f.size)+'</td></tr>';
+          +'<td class="r cell-size">'+fmtSize(f.size)+'</td>'
+          +'<td class="cell-actions" style="opacity:1"><button class="btn-icon" data-action="navigate" data-path="'+esc(pathParent(f.path))+'" title="Open in folder">📂</button></td></tr>';
       });
       html+='</tbody></table>';
       html+='<div style="padding:8px 0;font-size:11px;color:var(--fg3)">'+S.searchResults.length+' result(s)</div>';
@@ -1033,6 +1061,7 @@ function goPage(page,opts){
   S.selected.clear();
   updateSelectionBar();
   closeInfoPanel();
+  updateTitle();
   switch(page){
     case'browse':loadBrowse(opts&&opts.path);break;
     case'dashboard':loadDashboard();break;
@@ -1043,6 +1072,13 @@ function goPage(page,opts){
     case'activity':loadActivity();break;
     default:renderPage();
   }
+}
+
+function updateTitle(){
+  var t='pdrive';
+  if(S.page==='browse'&&S.path&&S.path!=='/')t='pdrive — '+S.path;
+  else if(S.page!=='browse')t='pdrive — '+S.page.charAt(0).toUpperCase()+S.page.slice(1);
+  document.title=t;
 }
 
 // ─── Actions ────────────────────────────────────────────────────────────────
@@ -1113,6 +1149,7 @@ function doDuHere(){
 }
 
 var _uploadInProgress=false;
+var _uploadCancelled=false;
 
 // ── Upload Progress Drawer ─────────────────────────────────────────────────
 
@@ -1192,6 +1229,7 @@ var uploadTracker={
     html+='</div>';
     html+='<span class="upload-drawer-count">'+(c.done+c.fail)+'/'+c.total+'</span>';
     html+='<div class="upload-drawer-actions">';
+    if(c.done+c.fail<c.total)html+='<button id="upload-drawer-cancel" title="Cancel remaining">◼</button>';
     html+='<button id="upload-drawer-min" title="'+(this.minimized?'Expand':'Minimize')+'">'+(this.minimized?'▲':'▼')+'</button>';
     if(c.done+c.fail>=c.total)html+='<button id="upload-drawer-close" title="Close">✕</button>';
     html+='</div></div>';
@@ -1223,6 +1261,8 @@ var uploadTracker={
 
     // Wire up toggle/close
     var self=this;
+    var cancelBtn=document.getElementById('upload-drawer-cancel');
+    if(cancelBtn)cancelBtn.addEventListener('click',function(e){e.stopPropagation();_uploadCancelled=true;});
     var toggleBtn=document.getElementById('upload-drawer-min');
     if(toggleBtn)toggleBtn.addEventListener('click',function(e){e.stopPropagation();self.toggle()});
     var closeBtn=document.getElementById('upload-drawer-close');
@@ -1235,12 +1275,21 @@ function doUploadFiles(files){
   if(!files||!files.length)return;
   if(_uploadInProgress){toast('Upload already in progress…','info');return;}
   _uploadInProgress=true;
+  _uploadCancelled=false;
   var dir=S.path||'/';
   var todo=[];
   for(var i=0;i<files.length;i++){todo.push({file:files[i],dir:dir})}
   var total=todo.length,idx=0,done=0,failed=0;
   uploadTracker.start(todo.map(function(t){return{name:t.file.name,size:t.file.size}}));
   function next(){
+    if(_uploadCancelled){
+      for(var c=idx;c<total;c++)uploadTracker.markFailed(c,'cancelled');
+      _uploadInProgress=false;
+      _uploadCancelled=false;
+      uploadTracker.scheduleAutoMinimize();
+      if(S.page==='browse')loadBrowse(S.path);
+      return;
+    }
     if(idx>=total){
       _uploadInProgress=false;
       uploadTracker.scheduleAutoMinimize();
@@ -1268,11 +1317,20 @@ function doUploadWithPaths(entries){
   if(!entries||!entries.length)return;
   if(_uploadInProgress){toast('Upload already in progress…','info');return;}
   _uploadInProgress=true;
+  _uploadCancelled=false;
   var baseDir=S.path||'/';
   var todo=entries.map(function(e){return{file:e.file,dir:baseDir==="/"?baseDir+e.relDir:baseDir+"/"+e.relDir}});
   var total=todo.length,idx=0,done=0,failed=0;
   uploadTracker.start(todo.map(function(t){return{name:t.file.name,size:t.file.size}}));
   function next(){
+    if(_uploadCancelled){
+      for(var c=idx;c<total;c++)uploadTracker.markFailed(c,'cancelled');
+      _uploadInProgress=false;
+      _uploadCancelled=false;
+      uploadTracker.scheduleAutoMinimize();
+      if(S.page==='browse')loadBrowse(S.path);
+      return;
+    }
     if(idx>=total){
       _uploadInProgress=false;
       uploadTracker.scheduleAutoMinimize();
@@ -1573,6 +1631,11 @@ document.addEventListener('keydown',function(e){
     return;
   }
 
+  // Close keyboard help
+  if(e.key==='Escape'&&document.getElementById('kbd-overlay').classList.contains('open')){
+    toggleKbdHelp();e.preventDefault();return;
+  }
+
   // Sidebar close on escape
   if(e.key==='Escape'){
     document.getElementById('sidebar').classList.remove('open');
@@ -1583,6 +1646,13 @@ document.addEventListener('keydown',function(e){
   if(e.key==='/'){
     e.preventDefault();
     document.getElementById('global-search').focus();
+    return;
+  }
+
+  // Keyboard help
+  if(e.key==='?'){
+    e.preventDefault();
+    toggleKbdHelp();
     return;
   }
 
@@ -1642,6 +1712,38 @@ document.addEventListener('keydown',function(e){
     }
   }
 });
+
+// ─── Keyboard Help ──────────────────────────────────────────────────────────
+
+function toggleKbdHelp(){
+  var overlay=document.getElementById('kbd-overlay');
+  if(overlay.classList.contains('open')){overlay.classList.remove('open');overlay.innerHTML='';return;}
+  var html='<div class="kbd-modal"><div class="kbd-modal-header"><h3>Keyboard Shortcuts</h3>'
+    +'<button class="btn-icon" id="kbd-close" title="Close">✕</button></div>'
+    +'<div class="kbd-modal-body">'
+    +'<div class="kbd-section">Global</div>'
+    +'<div class="kbd-row"><span>Search</span><span class="kbd-key">/</span></div>'
+    +'<div class="kbd-row"><span>Keyboard shortcuts</span><span class="kbd-key">?</span></div>'
+    +'<div class="kbd-row"><span>Close panel / sidebar</span><span class="kbd-key">Esc</span></div>'
+    +'<div class="kbd-section">File Browser</div>'
+    +'<div class="kbd-row"><span>Move down</span><span><span class="kbd-key">j</span> <span class="kbd-key">↓</span></span></div>'
+    +'<div class="kbd-row"><span>Move up</span><span><span class="kbd-key">k</span> <span class="kbd-key">↑</span></span></div>'
+    +'<div class="kbd-row"><span>Open / Enter</span><span><span class="kbd-key">Enter</span> <span class="kbd-key">l</span> <span class="kbd-key">→</span></span></div>'
+    +'<div class="kbd-row"><span>Go up directory</span><span><span class="kbd-key">h</span> <span class="kbd-key">←</span> <span class="kbd-key">Backspace</span></span></div>'
+    +'<div class="kbd-row"><span>Go to root</span><span class="kbd-key">~</span></div>'
+    +'<div class="kbd-row"><span>Toggle select</span><span class="kbd-key">Space</span></div>'
+    +'<div class="kbd-section">File Actions (when focused)</div>'
+    +'<div class="kbd-row"><span>Download</span><span class="kbd-key">d</span></div>'
+    +'<div class="kbd-row"><span>Pin (keep local)</span><span class="kbd-key">p</span></div>'
+    +'<div class="kbd-row"><span>Unpin (evict local)</span><span class="kbd-key">u</span></div>'
+    +'<div class="kbd-row"><span>Info panel</span><span class="kbd-key">i</span></div>'
+    +'<div class="kbd-row"><span>Delete</span><span class="kbd-key">x</span></div>'
+    +'</div></div>';
+  overlay.innerHTML=html;
+  overlay.classList.add('open');
+  document.getElementById('kbd-close').addEventListener('click',function(){toggleKbdHelp()});
+  overlay.addEventListener('click',function(ev){if(ev.target===overlay)toggleKbdHelp()});
+}
 
 function highlightFocus(allItems){
   document.querySelectorAll('.file-row.focused').forEach(function(r){r.classList.remove('focused')});
