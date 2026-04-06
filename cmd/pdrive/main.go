@@ -149,6 +149,13 @@ func main() {
 		case "get":
 			runGet(*webdavAddr, *configDir, args[1:])
 			return
+		case "put":
+			if len(args) < 2 {
+				fmt.Fprintf(os.Stderr, "Usage: pdrive put <local-path> [remote-dir]\n")
+				os.Exit(1)
+			}
+			runPut(*webdavAddr, args[1:])
+			return
 		case "rm":
 			if len(args) < 2 {
 				fmt.Fprintf(os.Stderr, "Usage: pdrive rm <path|number> [<path|number>...]\n")

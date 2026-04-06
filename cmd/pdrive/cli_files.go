@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"os"
@@ -588,4 +590,105 @@ func runDu(addr, configDir string, args []string) {
 	}
 
 	fmt.Printf("%s in %d files: %s\n", fmtSize(resp.TotalBytes), resp.FileCount, resp.Path)
+}
+
+// --- put ---
+
+func runPut(addr string, args []string) {
+	if len(args) < 1 {
+		fmt.Fprintf(os.Stderr, "Usage: pdrive put <local-path> [remote-dir]\n")
+		os.Exit(1)
+	}
+	localPath := args[0]
+	remoteDir := "/"
+	if len(args) >= 2 {
+		remoteDir = args[1]
+		if !strings.HasPrefix(remoteDir, "/") {
+			remoteDir = "/" + remoteDir
+		}
+	}
+
+	info, err := os.Stat(localPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if !info.IsDir() {
+		if err := uploadOneFile(addr, localPath, remoteDir); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	// Walk directory and upload each file.
+	baseName := filepath.Base(localPath)
+	var count int
+	err = filepath.Walk(localPath, func(p string, fi os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if fi.IsDir() {
+			return nil
+		}
+		rel, _ := filepath.Rel(localPath, p)
+		dir := path.Join(remoteDir, baseName, filepath.ToSlash(filepath.Dir(rel)))
+		if err := uploadOneFile(addr, p, dir); err != nil {
+			fmt.Fprintf(os.Stderr, "  Error: %s: %v\n", rel, err)
+		} else {
+			count++
+		}
+		return nil
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error walking directory: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("Uploaded %d file%s\n", count, pluralS(count))
+}
+
+func uploadOneFile(addr, localPath, remoteDir string) error {
+	f, err := os.Open(localPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	fw, err := w.CreateFormFile("file", filepath.Base(localPath))
+	if err != nil {
+		return err
+	}
+	n, err := io.Copy(fw, f)
+	if err != nil {
+		return err
+	}
+	w.WriteField("dir", remoteDir) //nolint:errcheck
+	w.Close()
+
+	resp, err := http.Post(
+		fmt.Sprintf("http://%s/api/upload", addr),
+		w.FormDataContentType(),
+		&buf,
+	)
+	if err != nil {
+		return fmt.Errorf("cannot reach daemon at %s: %w", addr, err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("daemon returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	virtualPath := path.Join(remoteDir, filepath.Base(localPath))
+	fmt.Printf("  %s → %s (%s)\n", filepath.Base(localPath), virtualPath, fmtSize(n))
+	return nil
+}
+
+func pluralS(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }

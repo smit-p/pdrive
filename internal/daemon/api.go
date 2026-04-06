@@ -673,6 +673,11 @@ func (h *browserHandler) serveAPIUpload(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Ensure parent directories exist (for folder uploads).
+	if dir != "/" {
+		h.ensureParentDirs(dir)
+	}
+
 	if err := h.engine.WriteFileStream(virtualPath, file, header.Size); err != nil {
 		http.Error(w, "upload failed: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -680,6 +685,18 @@ func (h *browserHandler) serveAPIUpload(w http.ResponseWriter, r *http.Request) 
 	h.engine.DB().InsertActivity("upload", virtualPath, fmt.Sprintf("%d bytes", header.Size)) //nolint:errcheck
 	w.Header().Set("Content-Type", "application/json")
 	fmt.Fprintf(w, `{"status":"ok","path":%q,"size":%d}`, virtualPath, header.Size)
+}
+
+// ensureParentDirs creates all ancestor directory records for a path like
+// "/photos/vacation/2024" → creates "/photos", "/photos/vacation",
+// "/photos/vacation/2024".
+func (h *browserHandler) ensureParentDirs(dirPath string) {
+	parts := strings.Split(strings.Trim(dirPath, "/"), "/")
+	cur := ""
+	for _, p := range parts {
+		cur += "/" + p
+		h.engine.MkDir(cur) //nolint:errcheck
+	}
 }
 
 func (h *browserHandler) serveAPIVerify(w http.ResponseWriter, r *http.Request) {

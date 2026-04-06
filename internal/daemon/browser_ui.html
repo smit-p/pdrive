@@ -584,8 +584,10 @@ function renderBrowse(){
   // Action bar
   html+='<div class="action-bar">';
   html+='<button class="btn btn-secondary" data-action="newFolder">+ New Folder</button>';
-  html+='<button class="btn btn-secondary" data-action="uploadFile">⬆ Upload</button>';
+  html+='<button class="btn btn-secondary" data-action="uploadFile">⬆ Upload Files</button>';
+  html+='<button class="btn btn-secondary" data-action="uploadFolder">📁 Upload Folder</button>';
   html+='<input type="file" id="upload-input" style="display:none" multiple>';
+  html+='<input type="file" id="upload-folder-input" style="display:none" webkitdirectory>';
   html+='<div style="flex:1"></div>';
   html+='<button class="btn-ghost" data-action="duHere" title="Disk usage" style="font-size:12px">💾 Usage</button>';
   if(S.path!=='/'){
@@ -1086,7 +1088,7 @@ function doDuHere(){
 function doUploadFiles(files){
   if(!files||!files.length)return;
   var dir=S.path||'/';
-  var todo=Array.from(files);
+  var todo=Array.from(files).map(function(f){return{file:f,dir:dir}});
   var done=0;
   function next(){
     if(!todo.length){
@@ -1094,10 +1096,48 @@ function doUploadFiles(files){
       if(S.page==='browse')loadBrowse(S.path);
       return;
     }
-    var f=todo.shift();
-    api.upload(f,dir).then(function(){done++;next()}).catch(function(e){toast('Upload failed: '+e.message,'error');next()});
+    var item=todo.shift();
+    api.upload(item.file,item.dir).then(function(){done++;next()}).catch(function(e){toast('Upload failed: '+e.message,'error');next()});
   }
   next();
+}
+
+// Upload files with relative paths (from folder input or directory drop).
+function doUploadWithPaths(entries){
+  if(!entries||!entries.length)return;
+  var baseDir=S.path||'/';
+  var todo=entries.map(function(e){return{file:e.file,dir:baseDir==="/"?baseDir+e.relDir:baseDir+"/"+e.relDir}});
+  var done=0;
+  function next(){
+    if(!todo.length){
+      if(done)toast('Uploaded '+done+' file'+(done>1?'s':''),'success');
+      if(S.page==='browse')loadBrowse(S.path);
+      return;
+    }
+    var item=todo.shift();
+    api.upload(item.file,item.dir).then(function(){done++;next()}).catch(function(e){toast('Upload failed: '+e.message,'error');next()});
+  }
+  next();
+}
+
+// Recursively read a DataTransferItem directory entry into a flat list.
+function readEntryRecursive(entry,basePath,results,done){
+  if(entry.isFile){
+    entry.file(function(f){
+      results.push({file:f,relDir:basePath});
+      done();
+    },function(){done()});
+  } else if(entry.isDirectory){
+    var reader=entry.createReader();
+    var dirPath=basePath?basePath+'/'+entry.name:entry.name;
+    reader.readEntries(function(entries){
+      if(!entries.length){done();return;}
+      var pending=entries.length;
+      entries.forEach(function(child){
+        readEntryRecursive(child,dirPath,results,function(){pending--;if(!pending)done();});
+      });
+    },function(){done()});
+  } else {done();}
 }
 
 function doVerify(p){
@@ -1211,6 +1251,11 @@ document.addEventListener('click',function(e){
       e.preventDefault();
       var inp=document.getElementById('upload-input');
       if(inp)inp.click();
+      break;
+    case'uploadFolder':
+      e.preventDefault();
+      var finp=document.getElementById('upload-folder-input');
+      if(finp)finp.click();
       break;
     case'verifyFile':
       e.preventDefault();
@@ -1473,6 +1518,21 @@ document.addEventListener('change',function(e){
     doUploadFiles(e.target.files);
     e.target.value='';
   }
+  if(e.target.id==='upload-folder-input'){
+    var files=e.target.files;
+    if(!files||!files.length)return;
+    var entries=[];
+    for(var i=0;i<files.length;i++){
+      var f=files[i];
+      var rel=f.webkitRelativePath||f.name;
+      var parts=rel.split('/');
+      // relDir = all path components except the filename
+      var relDir=parts.slice(0,parts.length-1).join('/');
+      entries.push({file:f,relDir:relDir});
+    }
+    doUploadWithPaths(entries);
+    e.target.value='';
+  }
 });
 
 (function(){
@@ -1483,7 +1543,25 @@ document.addEventListener('change',function(e){
   main.addEventListener('dragover',function(e){e.preventDefault()});
   main.addEventListener('drop',function(e){
     e.preventDefault();dragCounter=0;main.classList.remove('drag-over');
-    if(S.page==='browse'&&e.dataTransfer&&e.dataTransfer.files.length){
+    if(S.page!=='browse'||!e.dataTransfer)return;
+    // Check if any dropped items are directories via webkitGetAsEntry
+    var items=e.dataTransfer.items;
+    var hasDir=false;
+    if(items){
+      for(var i=0;i<items.length;i++){
+        var entry=items[i].webkitGetAsEntry&&items[i].webkitGetAsEntry();
+        if(entry&&entry.isDirectory){hasDir=true;break;}
+      }
+    }
+    if(hasDir&&items){
+      var results=[];var pending=items.length;
+      for(var i=0;i<items.length;i++){
+        var entry=items[i].webkitGetAsEntry();
+        if(entry){
+          readEntryRecursive(entry,'',results,function(){pending--;if(!pending)doUploadWithPaths(results);});
+        } else {pending--;if(!pending)doUploadWithPaths(results);}
+      }
+    } else if(e.dataTransfer.files.length){
       doUploadFiles(e.dataTransfer.files);
     }
   });

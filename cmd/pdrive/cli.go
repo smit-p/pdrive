@@ -230,6 +230,7 @@ Navigation:
 File operations:
   pdrive cat <path|number>        Print file contents to stdout
   pdrive get <path|number> [dest] Download file to local filesystem
+  pdrive put <local-path> [dir]   Upload local file or directory
   pdrive pin <path|number> [...]  Download cloud-only files locally
   pdrive unpin <path|number> [...] Evict local copies (keep in cloud)
   pdrive mv <src> <dst>           Move or rename files/directories
