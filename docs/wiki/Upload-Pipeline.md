@@ -10,15 +10,19 @@ File → SHA-256 hash → Dedup check → Chunk → Encrypt → Upload → Recor
 
 ## Detailed Steps
 
-### 1. File Hashing
+### 1. Pre-Upload Space Check
+
+Before hashing, the engine checks aggregate free space across all providers. If the file won't fit, the upload is rejected immediately with a clear error — no work is wasted.
+
+### 2. File Hashing
 
 The engine computes a SHA-256 hash of the entire file. This hash is the primary deduplication key.
 
-### 2. Deduplication Check
+### 3. Deduplication Check
 
 The hash is compared against all existing files in the metadata DB via `FindDuplicate()`. If a match is found, the file is recorded as a new path pointing to existing chunks — no upload needed.
 
-### 3. Chunk Sizing
+### 4. Chunk Sizing
 
 `ChunkSizeForFile()` auto-selects chunk size based on file size:
 
@@ -28,11 +32,11 @@ The hash is compared against all existing files in the metadata DB via `FindDupl
 | 32 MB – 3.2 GB | 32 MB (default)     | 1–100         |
 | > 3.2 GB       | Up to 128 MB        | ~25           |
 
-### 4. Splitting
+### 5. Splitting
 
 The file is split using `ChunkReader`, a streaming iterator that reads one chunk at a time to keep memory usage constant regardless of file size. Each chunk gets a SHA-256 hash for later verification.
 
-### 5. Encryption
+### 6. Encryption
 
 Each chunk is encrypted independently:
 
@@ -40,14 +44,14 @@ Each chunk is encrypted independently:
 - AES-256-GCM encryption with the derived key
 - Output: `[nonce][ciphertext][GCM tag]`
 
-### 6. Provider Selection
+### 7. Provider Selection
 
 The `Broker` picks a target provider for each chunk. Two policies:
 
 - **PFRD** — Weighted random selection proportional to free space
 - **MFS** — Always picks the provider with the most free space
 
-### 7. Concurrent Upload
+### 8. Concurrent Upload
 
 Chunks are uploaded concurrently with these controls:
 
@@ -60,7 +64,7 @@ Chunks are uploaded concurrently with these controls:
 
 Each upload uses rclone's async `operations/copyfile` + job polling (exponential backoff from 100ms to 5s, max ~720 iterations ≈ 1 hour timeout).
 
-### 8. Metadata Recording
+### 9. Metadata Recording
 
 After all chunks are uploaded, the engine:
 
@@ -70,7 +74,7 @@ After all chunks are uploaded, the engine:
 4. Logs the upload to `activity_log`
 5. Schedules a debounced metadata backup to all providers
 
-### 9. Async Writes
+### 10. Async Writes
 
 Files smaller than 4 MB (`AsyncWriteThreshold`) are uploaded synchronously — the caller blocks until complete. Larger files are uploaded asynchronously; the engine tracks them via `UploadProgress()` which the CLI and API can poll.
 
@@ -78,4 +82,4 @@ Files smaller than 4 MB (`AsyncWriteThreshold`) are uploaded synchronously — t
 
 - **Rate limiting:** Detected by string matching on rclone error messages (`IsRateLimited`). Triggers exponential backoff.
 - **Upload failure:** Retried up to 5 times with exponential backoff. After 5 failures, the upload is abandoned and the error is reported.
-- **Partial upload:** If some chunks succeed but others fail, the engine does not roll back uploaded chunks — they become orphans, cleaned up by the periodic GC (60 s after startup, then every 24 h).
+- **Partial upload:** If some chunks succeed but others fail, the engine automatically cleans up the successfully uploaded chunks. Any chunks that fail to delete during cleanup become orphans, cleaned up by the periodic GC (60 s after startup, then every 24 h).

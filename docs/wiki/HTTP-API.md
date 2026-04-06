@@ -122,6 +122,17 @@ Unpin a file — remove local copy, replace with stub.
 
 Verify file integrity by re-downloading and hash-checking all chunks.
 
+## Provider Management
+
+### `POST /api/resync`
+
+Trigger an immediate re-discovery of rclone remotes. New remotes are automatically picked up every 60 seconds, but this endpoint forces it immediately.
+
+```bash
+curl -X POST http://127.0.0.1:8765/api/resync
+# {"ok":true}
+```
+
 ## WebDAV
 
 The daemon also serves a WebDAV interface at `http://127.0.0.1:8765/dav/`. This can be mounted as a network drive:

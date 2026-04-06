@@ -45,7 +45,7 @@ pdrive runs as a local daemon process that coordinates several subsystems:
                              │
               ┌──────────────┼──────────────┐
               │              │              │
-        Google Drive    Dropbox       OneDrive
+        Google Drive    Dropbox     OneDrive / Box
 ```
 
 ## Component Responsibilities
@@ -56,7 +56,7 @@ The core orchestrator. Handles upload (hash → dedup → chunk → encrypt → 
 
 ### Daemon (`internal/daemon`)
 
-Ties all subsystems together. Manages the rclone child process, opens the metadata DB, creates the engine, launches the WebDAV + HTTP API server, watches the sync directory, and runs periodic background tasks.
+Ties all subsystems together. Manages the rclone child process, opens the metadata DB, creates the engine, launches the WebDAV + HTTP API server, watches the sync directory, and runs periodic background tasks (orphan GC, failed deletion retry, metadata backup, provider re-sync every 60 s).
 
 ### Chunker (`internal/chunker`)
 
@@ -93,8 +93,9 @@ TOML configuration file support. Loads settings from `~/.pdrive/config.toml`, al
 
 ### Upload
 
-1. User runs `pdrive upload file.pdf` or saves to sync dir
-2. Engine computes SHA-256 hash and checks for deduplication
+1. User runs `pdrive put file.pdf` or saves to sync dir
+2. Engine checks aggregate free space across all providers (rejects if insufficient)
+3. Engine computes SHA-256 hash and checks for deduplication
 3. Chunker splits file into appropriately-sized chunks
 4. Each chunk is encrypted with AES-256-GCM (unique nonce per chunk)
 5. Broker selects target provider per chunk based on free space

@@ -2,13 +2,14 @@
 
 ## Daemon Management
 
-### `pdrive start`
+### `pdrive`
 
-Start the pdrive daemon. Prompts for encryption passphrase on first run. Runs in background by default.
+Start the pdrive daemon. Prompts for encryption passphrase on first run. Runs in the background by default.
 
 ```bash
-pdrive start              # Start daemon (background)
-pdrive start --foreground # Start in foreground (for debugging)
+pdrive                # Start daemon (background)
+pdrive --foreground   # Start in foreground (for debugging)
+pdrive --debug        # Enable debug logging
 ```
 
 ### `pdrive stop`
@@ -60,13 +61,14 @@ pdrive ls 3            # Open item #3 from last listing
 
 **Columns:** Index, Size, Age, Name
 
-### `pdrive upload <local-path> [virtual-path]`
+### `pdrive put <local-path> [remote-dir]`
 
-Upload a local file to pdrive.
+Upload a local file or directory to pdrive.
 
 ```bash
-pdrive upload ~/photo.jpg              # Upload to /photo.jpg
-pdrive upload ~/photo.jpg /pics/       # Upload to /pics/photo.jpg
+pdrive put ~/photo.jpg              # Upload to /photo.jpg
+pdrive put ~/photo.jpg /pics/       # Upload to /pics/photo.jpg
+pdrive put ~/folder/ /backup/       # Upload entire directory
 ```
 
 ### `pdrive cat <path>`
@@ -218,12 +220,15 @@ Remove local copy and replace with a lightweight stub.
 pdrive unpin /large-video.mp4
 ```
 
-### `pdrive verify <path>`
+## Version
 
-Verify file integrity by downloading and checking all chunk hashes.
+### `pdrive version`
+
+Print version, commit, and build date.
 
 ```bash
-pdrive verify /critical-data.bin
+pdrive version
+# pdrive v1.2.0 (commit abc123, built 2024-01-15)
 ```
 
 ## Global Flags

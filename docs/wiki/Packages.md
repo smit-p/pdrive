@@ -79,9 +79,9 @@ Core orchestrator for all cloud operations.
 
 Daemon process that ties everything together.
 
-**HTTP API endpoints:** `/api/ls`, `/api/status`, `/api/uploads`, `/api/remotes`, `/api/pin`, `/api/unpin`, `/api/health`, `/api/metrics`, `/api/download`, `/api/delete`, `/api/tree`, `/api/find`, `/api/mv`, `/api/mkdir`, `/api/info`, `/api/du`, `/api/upload`, `/api/verify`, `/api/activity`
+**HTTP API endpoints:** `/api/ls`, `/api/status`, `/api/uploads`, `/api/remotes`, `/api/pin`, `/api/unpin`, `/api/health`, `/api/metrics`, `/api/download`, `/api/delete`, `/api/tree`, `/api/find`, `/api/mv`, `/api/mkdir`, `/api/info`, `/api/du`, `/api/upload`, `/api/verify`, `/api/activity`, `/api/resync`
 
-**Background tasks:** Orphan GC (60 s after startup, then every 24 h), failed deletion retry (every hour), metadata backup (debounced 30 s)
+**Background tasks:** Orphan GC (60 s after startup, then every 24 h), failed deletion retry (every hour), metadata backup (debounced 30 s), periodic provider re-sync from rclone (every 60 s)
 
 ### `internal/fusefs`
 

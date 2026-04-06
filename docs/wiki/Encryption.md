@@ -5,7 +5,7 @@ pdrive uses client-side encryption so that cloud providers never see your plaint
 ## Key Derivation
 
 - **Algorithm:** Argon2id (memory-hard, resistant to GPU/ASIC attacks)
-- **Salt:** 16 bytes from `crypto/rand`, stored in `~/.config/pdrive/salt`
+- **Salt:** 16 bytes from `crypto/rand`, stored in `~/.pdrive/enc.salt`
 - **Parameters:** Time=1, Memory=64 MB, Threads=4, KeyLen=32 bytes
 - **Output:** 256-bit key used for all AES-256-GCM operations
 

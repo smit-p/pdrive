@@ -6,12 +6,12 @@
 
 - **Client-side encryption** — AES-256-GCM with Argon2id key derivation; your cloud providers never see plaintext.
 - **Chunked storage** — Files are split into 32–128 MB chunks (auto-sized) and distributed across providers.
-- **Multi-provider** — Google Drive, Dropbox, OneDrive, and any other rclone-supported remote.
+- **Multi-provider** — Google Drive, Dropbox, OneDrive, Box, and any other rclone-supported remote.
 - **Deduplication** — SHA-256 content hashing prevents storing the same file twice.
 - **Local sync directory** — A macOS/Linux folder that mirrors your cloud files. Unpinned files appear as lightweight stubs (via extended attributes).
 - **WebDAV interface** — Mount pdrive as a network drive in Finder or any WebDAV client.
 - **FUSE mount** — Native kernel-level filesystem mount via go-fuse. Full read/write support with temp-file staging and async uploads.
-- **Config file** — Optional TOML configuration at `~/.config/pdrive/config.toml` for persistent settings.
+- **Config file** — Optional TOML configuration at `~/.pdrive/config.toml` for persistent settings.
 - **Interactive TUI** — Browse files, navigate directories, and manage storage from the terminal.
 - **HTTP API** — 20+ JSON endpoints for programmatic access to all operations.
 
@@ -22,13 +22,13 @@
 go install github.com/smit-p/pdrive/cmd/pdrive@latest
 
 # Start the daemon (first run prompts for encryption passphrase)
-pdrive start
+pdrive
 
 # List files
 pdrive ls
 
 # Upload a file
-pdrive upload ~/Documents/report.pdf
+pdrive put ~/Documents/report.pdf
 
 # Interactive browser
 pdrive browse

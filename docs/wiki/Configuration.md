@@ -28,14 +28,14 @@ The rclone config file is typically at `~/.config/rclone/rclone.conf`.
 
 ## pdrive Data Directory
 
-All pdrive data is stored in `~/.config/pdrive/`:
+All pdrive data is stored in `~/.pdrive/`:
 
 ```
-~/.config/pdrive/
+~/.pdrive/
   config.toml      Optional TOML configuration (persistent settings)
   metadata.db      SQLite database (files, chunks, providers)
-  salt             Argon2id salt (16 bytes, generated on first run)
-  pdrive.pid       PID file for the running daemon
+  enc.salt         Argon2id salt (16 bytes, generated on first run)
+  daemon.pid       PID file for the running daemon
   spool/           Temp directory for WebDAV/FUSE read/write operations
   rclone           Auto-downloaded rclone binary (if needed)
 ```
@@ -45,8 +45,8 @@ All pdrive data is stored in `~/.config/pdrive/`:
 On first start, pdrive prompts for an encryption passphrase:
 
 - Used with Argon2id to derive a 256-bit AES key
-- A random 16-byte salt is generated and saved to `~/.config/pdrive/salt`
-- The passphrase is prompted on each `pdrive start` — it is never stored on disk
+- A random 16-byte salt is generated and saved to `~/.pdrive/enc.salt`
+- The passphrase is prompted on each `pdrive` start — it is never stored on disk
 - **If you lose the passphrase, your data cannot be recovered**
 
 ## Sync Directory
@@ -104,7 +104,7 @@ Files smaller than 32 MB are stored as a single chunk. Files larger than ~3.2 GB
 
 ## Config File
 
-pdrive supports an optional TOML configuration file at `~/.config/pdrive/config.toml`. CLI flags always override config file values.
+pdrive supports an optional TOML configuration file at `~/.pdrive/config.toml`. CLI flags always override config file values.
 
 ```toml
 # Example config.toml

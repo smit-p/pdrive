@@ -54,7 +54,7 @@ func main() {
 	minFreeSpace := flag.Int64("min-free-space", 256*1024*1024, "Minimum free space (bytes) to keep on each provider (default 256 MB)")
 	skipRestore := flag.Bool("skip-restore", false, "Skip restoring metadata DB from cloud on startup (use after a manual wipe)")
 	chunkSize := flag.Int("chunk-size", 0, "Override chunk size in bytes (e.g. 67108864 for 64 MB); 0 uses dynamic sizing")
-	rateLimit := flag.Int("rate-limit", 0, "API rate limit in requests per second (default 8)")
+	rateLimit := flag.Int("rate-limit", 0, "API rate limit in requests per second (default 6)")
 	remotesFlag := flag.String("remotes", "", "Comma-separated list of rclone remote names to use (default: all)")
 	debug := flag.Bool("debug", false, "Enable debug logging")
 	foreground := flag.Bool("foreground", false, "Run daemon in the foreground instead of backgrounding (useful with systemd or for debugging)")

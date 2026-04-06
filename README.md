@@ -1,6 +1,6 @@
 # pdrive
 
-Aggregate multiple cloud storage accounts into a single unified drive. Drop files into `~/pdrive` and they upload automatically — encrypted, chunked, and distributed across Google Drive, Dropbox, OneDrive, or any provider [rclone](https://rclone.org) supports.
+Aggregate multiple cloud storage accounts into a single unified drive. Drop files into `~/pdrive` and they upload automatically — encrypted, chunked, and distributed across Google Drive, Dropbox, OneDrive, Box, or any provider [rclone](https://rclone.org) supports.
 
 ## How It Works
 
@@ -29,20 +29,27 @@ pdrive uses rclone in RC daemon mode as the transport layer — any rclone-suppo
 ## Features
 
 - **Local sync folder** — `~/pdrive` works like Dropbox. Drop files in, they upload in the background. Delete or rename files locally, changes sync to cloud.
+- **FUSE mount** — Native kernel-level filesystem mount via go-fuse. Full read/write support with temp-file staging and async uploads. Works with any application.
 - **Encryption at rest** — AES-256-GCM with password-based key derivation (Argon2id). Set a password on first run and use it on any machine. Legacy raw key files (`~/.pdrive/enc.key`) still supported.
 - **Content-hash dedup** — Files with identical SHA-256 share cloud chunks. No duplicate uploads.
 - **Dynamic chunk sizing** — Small files get 32 MB chunks, large files up to 128 MB, keeping API call count low.
+- **Pre-upload space validation** — Checks aggregate free space across all providers before uploading. Rejects files that won't fit with a clear error.
 - **Stub files** — Cloud-only files appear as 0-byte stubs with xattrs marking them as cloud-only. Use `pdrive pin` to download on demand.
-- **Full CLI** — List, download, pin/unpin, and inspect storage from the terminal. No GUI needed.
+- **Full CLI** — List, upload, download, pin/unpin, move, search, and inspect storage from the terminal. No GUI needed.
 - **Interactive TUI** — `pdrive browse` launches a full-screen file browser with keyboard navigation.
 - **Browser UI** — Full-featured file manager at `http://localhost:8765` with dark/light mode. Browse directories, pin/unpin/delete/move/download files, create folders, search by pattern, view tree structure, monitor uploads, and inspect storage metrics — all from the browser.
 - **WebDAV** — Mount as a network drive in Finder, Explorer, or any WebDAV client.
 - **Auto-restart** — Run as a background daemon that auto-starts on login.
-- **Metadata backup** — SQLite DB is encrypted (AES-256-GCM) and auto-backed up to every cloud provider. The Argon2id salt is stored alongside the backup so the same password works on any machine. On a fresh install, the newest backup is auto-restored — just connect the same cloud accounts and enter your password.
+- **Live remote detection** — New rclone remotes are auto-detected every 60 seconds without a daemon restart. Or trigger immediately with `pdrive remotes add`.
+- **Activity log** — All user-visible actions (uploads, downloads, deletes, moves, pins) are logged with timestamps.
+- **Metadata backup** — SQLite DB is encrypted (AES-256-GCM) and auto-backed up to every cloud provider. The Argon2id salt is stored alongside the backup so the same password works on any machine. On a fresh install, the newest backup is auto-restored — just connect the same cloud accounts and enter your password. Restored backups are validated against actual cloud chunks before use.
 - **Interrupted upload resume** — Daemon restart picks up where it left off.
 - **Orphan GC** — Periodic garbage collection removes cloud chunks with no DB record and purges DB records with missing cloud data.
 - **Failed deletion retry** — Cloud deletions that fail are persisted and retried hourly (up to 10 attempts).
+- **Partial upload cleanup** — If a multi-chunk upload fails partway through, successfully uploaded chunks are cleaned up automatically.
 - **Rate-limit awareness** — Configurable API rate limiting with automatic backoff tripling on 429 responses.
+- **Quota-exceeded detection** — Detects provider-specific quota/disk-full errors and skips retries for unrecoverable failures.
+- **Config file** — Optional TOML configuration at `~/.pdrive/config.toml` for persistent settings. CLI flags override config values.
 
 ## Quick Start
 
@@ -163,24 +170,28 @@ mount -t davfs http://localhost:8765 /mnt/pdrive
 
 ### HTTP API
 
-| Endpoint                   | Method | Description                                                 |
-| -------------------------- | ------ | ----------------------------------------------------------- |
-| `/api/ls?path=/`           | GET    | Directory listing with `local_state` (local/stub/uploading) |
-| `/api/status`              | GET    | Total files, bytes, per-provider quotas                     |
-| `/api/health`              | GET    | Uptime, DB status, in-flight uploads                        |
-| `/api/uploads`             | GET    | In-flight upload progress                                   |
-| `/api/metrics`             | GET    | Telemetry counters (files/chunks/bytes)                     |
-| `/api/remotes`             | GET    | List configured remotes with enabled status                 |
-| `/api/info?path=/file`     | GET    | File metadata, chunks, provider locations                   |
-| `/api/tree?path=/`         | GET    | Recursive directory tree                                    |
-| `/api/find?pattern=*.pdf`  | GET    | Glob search across all files                                |
-| `/api/du?path=/`           | GET    | Disk usage summary for a directory                          |
-| `/api/download?path=/file` | GET    | Download decrypted file content                             |
-| `/api/pin?path=/file`      | POST   | Download cloud file to local                                |
-| `/api/unpin?path=/file`    | POST   | Evict local data, replace with stub                         |
-| `/api/delete?path=/file`   | POST   | Delete file from cloud and local                            |
-| `/api/mv?from=/a&to=/b`    | POST   | Move or rename a file                                       |
-| `/api/mkdir?path=/dir`     | POST   | Create a new directory                                      |
+| Endpoint                      | Method | Description                                                 |
+| ----------------------------- | ------ | ----------------------------------------------------------- |
+| `/api/ls?path=/`              | GET    | Directory listing with `local_state` (local/stub/uploading) |
+| `/api/status`                 | GET    | Total files, bytes, per-provider quotas                     |
+| `/api/health`                 | GET    | Uptime, DB status, in-flight uploads                        |
+| `/api/uploads`                | GET    | In-flight upload progress                                   |
+| `/api/metrics`                | GET    | Telemetry counters (files/chunks/bytes)                     |
+| `/api/remotes`                | GET    | List configured remotes with enabled status                 |
+| `/api/info?path=/file`        | GET    | File metadata, chunks, provider locations                   |
+| `/api/tree?path=/`            | GET    | Recursive directory tree                                    |
+| `/api/find?pattern=*.pdf`     | GET    | Glob search across all files                                |
+| `/api/du?path=/`              | GET    | Disk usage summary for a directory                          |
+| `/api/download?path=/file`    | GET    | Download decrypted file content                             |
+| `/api/activity`               | GET    | Recent activity log entries                                 |
+| `/api/verify`                 | GET    | Verify chunk integrity on cloud providers                   |
+| `/api/pin?path=/file`         | POST   | Download cloud file to local                                |
+| `/api/unpin?path=/file`       | POST   | Evict local data, replace with stub                         |
+| `/api/delete?path=/file`      | POST   | Delete file from cloud and local                            |
+| `/api/mv?src=/a&dst=/b`       | POST   | Move or rename a file                                       |
+| `/api/mkdir?path=/dir`        | POST   | Create a new directory                                      |
+| `/api/upload`                 | POST   | Upload a file (multipart form)                              |
+| `/api/resync`                 | POST   | Trigger immediate provider re-discovery from rclone         |
 
 ## CLI Reference
 
@@ -188,25 +199,46 @@ pdrive has a full CLI for managing files without touching the browser or Finder:
 
 ```
 pdrive                          Start the daemon (default)
-pdrive browse                   Interactive file browser (TUI)
-pdrive ls [path]                List files and directories
-pdrive status                   Show storage summary and provider quotas
-pdrive uploads                  Show in-flight upload progress
-pdrive health                   Check daemon health
-pdrive metrics                  Show telemetry counters
-pdrive pin <path> [path...]     Download cloud-only file to local
-pdrive unpin <path> [path...]   Evict local data, replace with stub
-pdrive cat <path>               Print file contents to stdout
-pdrive get <path> [dest]        Download file to local filesystem
-pdrive stop                     Stop the daemon
-pdrive remotes                  List remotes and enabled status
-pdrive remotes add <name>       Enable a remote
-pdrive remotes remove <name>    Disable a remote
-pdrive remotes reset            Reset selection to all remotes
-pdrive help                     Show CLI usage
+
+Navigation:
+  pdrive browse                   Interactive file browser (TUI)
+  pdrive ls [path|number]         List files and directories
+  pdrive tree [path]              Show directory tree recursively
+  pdrive find <pattern> [path]    Search for files by name
+
+File operations:
+  pdrive cat <path|number>        Print file contents to stdout
+  pdrive get <path|number> [dest] Download file to local filesystem
+  pdrive put <local-path> [dir]   Upload local file or directory
+  pdrive pin <path|number> [...]  Download cloud-only files locally
+  pdrive unpin <path|number> [...] Evict local copies (keep in cloud)
+  pdrive mv <src> <dst>           Move or rename files/directories
+  pdrive rm <path|number> [...]   Delete files/directories from cloud
+  pdrive mkdir <path>             Create a directory
+
+Info:
+  pdrive info <path|number>       Show detailed file metadata and chunks
+  pdrive du [path]                Show disk usage summary
+  pdrive status                   Show storage summary and provider quotas
+  pdrive remotes                  List rclone remotes and which are enabled
+  pdrive remotes add <name>       Enable a remote for pdrive
+  pdrive remotes remove <name>    Disable a remote from pdrive
+  pdrive remotes reset            Use all remotes (clear selection)
+  pdrive uploads                  Show in-flight upload progress
+  pdrive health                   Check daemon health
+  pdrive metrics                  Show telemetry counters
+
+Management:
+  pdrive stop                     Stop the daemon
+  pdrive mount [--mountpoint=PATH] Switch to FUSE backend
+  pdrive unmount                  Unmount FUSE and stop the daemon
+  pdrive version                  Print version information
+  pdrive help                     Show all daemon flags
 ```
 
 All subcommands talk to the running daemon over HTTP — you need the daemon running first (`pdrive` to start).
+
+Use numbers from `ls` output as shorthand: `pdrive ls` → `pdrive cat 3`. Use `..` to go up a directory. Fuzzy matching works too: `pdrive cat vacation`.
 
 ### Remote Management
 
@@ -260,9 +292,12 @@ pdrive unpin /video.mp4       # evict local copy, keep in cloud
 | `--broker-policy`  | `pfrd`           | Placement policy: `pfrd` (weighted random) or `mfs` (most free space) |
 | `--min-free-space` | `256 MB`         | Minimum free bytes per provider                                       |
 | `--chunk-size`     | `0` (dynamic)    | Override chunk size in bytes; 0 = dynamic (32–128 MB)                 |
-| `--rate-limit`     | `8`              | Cloud API calls per second                                            |
+| `--rate-limit`     | `6`              | Cloud API calls per second                                            |
 | `--skip-restore`   | `false`          | Skip restoring DB from cloud on startup                               |
 | `--remotes`        | (all)            | Comma-separated rclone remote names to use                            |
+| `--foreground`     | `false`          | Run in foreground instead of backgrounding (for systemd/debugging)    |
+| `--backend`        | `webdav`         | Mount backend: `webdav` (default) or `fuse`                           |
+| `--mountpoint`     | (none)           | FUSE mount point (e.g. `/Volumes/pdrive`); required with `--backend=fuse` |
 | `--debug`          | `false`          | Enable debug logging                                                  |
 
 ## Architecture
@@ -270,17 +305,22 @@ pdrive unpin /video.mp4       # evict local copy, keep in cloud
 ```
 cmd/pdrive/           CLI entry, flags, signal handling, launchd install
 internal/
-  daemon/             Lifecycle: rclone subprocess, HTTP server, browser UI
-  engine/             Core I/O: write/read/delete, chunked upload, DB sync, GC
+  daemon/             Lifecycle: rclone subprocess, HTTP server, browser UI, periodic provider sync
+  engine/             Core I/O: write/read/delete, chunked upload, DB sync, GC, space checks
   broker/             Chunk placement: assigns chunks to providers by free space
   chunker/            Split, encrypt (AES-256-GCM), decrypt, reassemble
+  config/             TOML config file loading and defaults
+  fusefs/             FUSE filesystem backend (go-fuse)
+  junkfile/           Detection and purging of OS junk files (.DS_Store, Thumbs.db, etc.)
   metadata/           SQLite schema, migrations, all CRUD queries
-  rclonerc/           HTTP client for rclone RC API
+  rclonebin/          Auto-download and management of the rclone binary
+  rclonerc/           HTTP client for rclone RC API, provider identity detection
   vfs/                WebDAV filesystem, sync folder watcher, stub files
 scripts/              E2E test scripts
+web/                  Browser UI (HTML/CSS/JS single-page app)
 ```
 
-### Database Schema (6 tables)
+### Database Schema (7 tables)
 
 | Table              | Purpose                                     |
 | ------------------ | ------------------------------------------- |
@@ -290,15 +330,18 @@ scripts/              E2E test scripts
 | `chunk_locations`  | Maps chunks to cloud providers              |
 | `directories`      | Explicit directory records                  |
 | `failed_deletions` | Tracks failed cloud deletions for retry     |
+| `activity_log`     | Timestamped log of user-visible actions     |
 
 ### Key Paths
 
 | Path                                 | Purpose                                       |
 | ------------------------------------ | --------------------------------------------- |
 | `~/.pdrive/metadata.db`              | SQLite metadata database                      |
+| `~/.pdrive/config.toml`              | Optional TOML configuration file              |
 | `~/.pdrive/enc.salt`                 | Argon2id salt for password-derived key        |
 | `~/.pdrive/enc.key`                  | Legacy AES-256 key (raw 32 bytes)             |
 | `~/.pdrive/remotes.json`             | Persistent remote selection                   |
+| `~/.pdrive/daemon.pid`               | PID file for the background daemon            |
 | `~/.pdrive/spool/`                   | Temp files for in-progress uploads            |
 | `~/pdrive/`                          | Local sync folder                             |
 | Cloud: `pdrive-chunks/*`             | Encrypted chunk storage                       |
@@ -329,7 +372,10 @@ The Playwright suite covers 69 tests across the web UI: layout, file browser, in
 - [rclone](https://rclone.org) — cloud storage transport (RC daemon mode)
 - [modernc.org/sqlite](https://pkg.go.dev/modernc.org/sqlite) — pure-Go SQLite driver
 - [golang.org/x/net/webdav](https://pkg.go.dev/golang.org/x/net/webdav) — WebDAV server
+- [go-fuse](https://github.com/hanwen/go-fuse) — FUSE filesystem bindings
 - [fsnotify](https://github.com/fsnotify/fsnotify) — filesystem event watcher
+- [bubbletea](https://github.com/charmbracelet/bubbletea) — terminal UI framework (TUI browser)
+- [go-toml](https://github.com/pelletier/go-toml) — TOML config file parser
 
 ## License
 
