@@ -807,3 +807,150 @@ func TestPlanChunks_ZeroFileSize(t *testing.T) {
 		t.Fatalf("expected DefaultChunkSize for zero-size file, got %d", s.MaxSize())
 	}
 }
+
+// --- Streaming encryption tests ---
+
+func TestEncryptStreamDecryptStream_Roundtrip(t *testing.T) {
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, size := range []int{0, 1, 1000, encBlockSize - 1, encBlockSize, encBlockSize + 1, encBlockSize*2 + 42} {
+		t.Run(fmt.Sprintf("size=%d", size), func(t *testing.T) {
+			plain := make([]byte, size)
+			if size > 0 {
+				rand.Read(plain)
+			}
+
+			var enc bytes.Buffer
+			written, err := EncryptStream(key, bytes.NewReader(plain), &enc)
+			if err != nil {
+				t.Fatalf("EncryptStream: %v", err)
+			}
+			if written != int64(enc.Len()) {
+				t.Fatalf("EncryptStream returned %d but wrote %d bytes", written, enc.Len())
+			}
+
+			var dec bytes.Buffer
+			if err := DecryptStream(key, &enc, &dec); err != nil {
+				t.Fatalf("DecryptStream: %v", err)
+			}
+			if !bytes.Equal(dec.Bytes(), plain) {
+				t.Fatalf("roundtrip mismatch for size %d", size)
+			}
+		})
+	}
+}
+
+func TestEncryptStreamDecryptStream_MultiBlock(t *testing.T) {
+	key := make([]byte, 32)
+	rand.Read(key)
+
+	// 2.5 blocks worth of data → tests partial last block.
+	plain := make([]byte, encBlockSize*2+encBlockSize/2)
+	rand.Read(plain)
+
+	var enc bytes.Buffer
+	if _, err := EncryptStream(key, bytes.NewReader(plain), &enc); err != nil {
+		t.Fatal(err)
+	}
+
+	var dec bytes.Buffer
+	if err := DecryptStream(key, &enc, &dec); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(dec.Bytes(), plain) {
+		t.Fatal("multi-block roundtrip mismatch")
+	}
+}
+
+func TestIsStreamFormat(t *testing.T) {
+	key := make([]byte, 32)
+	rand.Read(key)
+
+	// Stream format should have magic header.
+	var enc bytes.Buffer
+	EncryptStream(key, bytes.NewReader([]byte("hello")), &enc)
+	if !IsStreamFormat(enc.Bytes()) {
+		t.Fatal("expected stream format after EncryptStream")
+	}
+
+	// Legacy format should not match.
+	legacy, _ := Encrypt(key, []byte("hello"))
+	if IsStreamFormat(legacy) {
+		t.Fatal("legacy format should not be detected as stream")
+	}
+
+	// Too short.
+	if IsStreamFormat([]byte{0x50}) {
+		t.Fatal("short slice should not be stream format")
+	}
+}
+
+func TestEncStreamOverhead(t *testing.T) {
+	if EncStreamOverhead(0) != 0 {
+		t.Fatal("zero plaintext should have zero overhead")
+	}
+
+	// 1 byte → 1 block → magic(4) + length_prefix(4) + nonce(12) + tag(16) = 36
+	oh := EncStreamOverhead(1)
+	if oh != 36 {
+		t.Fatalf("expected 36, got %d", oh)
+	}
+
+	// Exactly encBlockSize → 1 block → 36
+	oh = EncStreamOverhead(int64(encBlockSize))
+	if oh != 36 {
+		t.Fatalf("expected 36 for exactly 1 block, got %d", oh)
+	}
+
+	// encBlockSize + 1 → 2 blocks → 4 + 2*(4+12+16) = 4 + 64 = 68
+	oh = EncStreamOverhead(int64(encBlockSize) + 1)
+	if oh != 68 {
+		t.Fatalf("expected 68 for 2 blocks, got %d", oh)
+	}
+}
+
+func TestDecryptStream_WrongKey(t *testing.T) {
+	key := make([]byte, 32)
+	rand.Read(key)
+
+	var enc bytes.Buffer
+	EncryptStream(key, bytes.NewReader([]byte("secret")), &enc)
+
+	wrongKey := make([]byte, 32)
+	rand.Read(wrongKey)
+	if err := DecryptStream(wrongKey, &enc, io.Discard); err == nil {
+		t.Fatal("expected error with wrong key")
+	}
+}
+
+func TestDecryptStream_BadMagic(t *testing.T) {
+	key := make([]byte, 32)
+	rand.Read(key)
+
+	bad := bytes.NewReader([]byte{0x00, 0x00, 0x00, 0x00, 0x01, 0x02})
+	if err := DecryptStream(key, bad, io.Discard); err == nil {
+		t.Fatal("expected bad magic error")
+	}
+}
+
+func TestEncryptStream_OverheadMatchesActual(t *testing.T) {
+	key := make([]byte, 32)
+	rand.Read(key)
+
+	for _, size := range []int64{1, 1000, int64(encBlockSize), int64(encBlockSize) + 1, int64(encBlockSize)*3 + 7} {
+		plain := make([]byte, size)
+		rand.Read(plain)
+
+		var enc bytes.Buffer
+		EncryptStream(key, bytes.NewReader(plain), &enc)
+
+		actualOverhead := int64(enc.Len()) - size
+		predicted := EncStreamOverhead(size)
+		if actualOverhead != predicted {
+			t.Errorf("size=%d: actual overhead %d != predicted %d", size, actualOverhead, predicted)
+		}
+	}
+}

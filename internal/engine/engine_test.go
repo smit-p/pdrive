@@ -3807,7 +3807,7 @@ func (r *readOnceSeeker) Seek(offset int64, whence int) (int64, error) {
 	return 0, nil
 }
 
-// TestWriteFileStream_ChunkReadError covers the cr.Next() error path in uploadChunks.
+// TestWriteFileStream_ChunkReadError covers the read-error path in uploadChunks.
 func TestWriteFileStream_ChunkReadError(t *testing.T) {
 	eng, _ := newTestEngine(t)
 	data := []byte("chunk-read-error-test")
@@ -3815,8 +3815,8 @@ func TestWriteFileStream_ChunkReadError(t *testing.T) {
 	if err == nil {
 		t.Error("expected error from broken reader on second pass")
 	}
-	if err != nil && !strings.Contains(err.Error(), "reading chunk") {
-		t.Errorf("expected 'reading chunk' error, got %v", err)
+	if err != nil && !strings.Contains(err.Error(), "encrypting chunk") {
+		t.Errorf("expected 'encrypting chunk' error, got %v", err)
 	}
 }
 
@@ -4304,7 +4304,7 @@ func TestUploadChunks_ReadError(t *testing.T) {
 	eng, _ := newTestEngine(t)
 
 	// errSeeker fails on the second read.
-	r := &errSeeker{failAfter: 1}
+	r := &errSeeker{failAfter: 0}
 
 	_, err := eng.uploadChunks(r, "test-file-id", 1024, nil, nil)
 	if err == nil {

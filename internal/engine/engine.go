@@ -575,9 +575,9 @@ func (e *Engine) WriteFileAsync(virtualPath string, tmpFile *os.File, tmpPath st
 	return nil
 }
 
-// uploadChunks reads, encrypts, and uploads chunks concurrently with retry.
-// Uses a variable chunk schedule (small→large ramp) to fill the upload pipeline
-// quickly and maintain high throughput for large files.
+// uploadChunks splits the file into chunks, encrypts each to a temp file on
+// disk using streaming encryption (16 MB blocks), and uploads them concurrently.
+// Peak memory is bounded to ~encBlockSize (16 MB) regardless of chunk size.
 // onChunkUploaded, if non-nil, is called after each successful chunk upload.
 // Returns the ordered slice of chunk metadata on success.
 func (e *Engine) uploadChunks(r io.ReadSeeker, fileID string, fileSize int64, schedule *chunker.ChunkSchedule, onChunkUploaded func()) ([]chunkMeta, error) {
@@ -587,7 +587,6 @@ func (e *Engine) uploadChunks(r io.ReadSeeker, fileID string, fileSize int64, sc
 	workers := uploadWorkersForSchedule(schedule)
 	slog.Debug("upload plan", "fileSize", fileSize, "workers", workers,
 		"tiers", len(schedule.Tiers), "maxChunk", schedule.MaxSize())
-	cr := chunker.NewVariableChunkReader(r, schedule)
 
 	var (
 		metas    []chunkMeta
@@ -600,7 +599,8 @@ func (e *Engine) uploadChunks(r io.ReadSeeker, fileID string, fileSize int64, sc
 		uploaded []chunkMeta
 	)
 
-	for chunkCount := 0; ; chunkCount++ {
+	remaining := fileSize
+	for seq := 0; remaining > 0; seq++ {
 		mu.Lock()
 		uploadErr := firstErr
 		mu.Unlock()
@@ -608,54 +608,72 @@ func (e *Engine) uploadChunks(r io.ReadSeeker, fileID string, fileSize int64, sc
 			break
 		}
 
-		chunk, err := cr.Next()
-		if err != nil {
-			wg.Wait()
-			return nil, fmt.Errorf("reading chunk %d: %w", chunkCount, err)
-		}
-		if chunk == nil {
-			break
+		chunkPlain := int64(schedule.SizeForSeq(seq))
+		if chunkPlain > remaining {
+			chunkPlain = remaining
 		}
 
-		encrypted, err := chunker.Encrypt(e.encKey, chunk.Data)
-		if err != nil {
-			wg.Wait()
-			return nil, fmt.Errorf("encrypting chunk %d: %w", chunk.Sequence, err)
-		}
-		chunk.Data = nil
+		// Read chunk data through a hasher, encrypting to a temp file.
+		chunkID := uuid.New().String()
+		hasher := sha256.New()
+		tee := io.TeeReader(io.LimitReader(r, chunkPlain), hasher)
 
-		providerID, err := e.broker.AssignChunk(int64(len(encrypted)))
+		encTmp, err := os.CreateTemp("", "pdrive-enc-*")
 		if err != nil {
 			wg.Wait()
-			return nil, fmt.Errorf("assigning chunk %d: %w", chunk.Sequence, err)
+			return nil, fmt.Errorf("creating encrypted temp file for chunk %d: %w", seq, err)
+		}
+
+		encSize, err := chunker.EncryptStream(e.encKey, tee, encTmp)
+		if err != nil {
+			encTmp.Close()
+			os.Remove(encTmp.Name())
+			wg.Wait()
+			return nil, fmt.Errorf("encrypting chunk %d: %w", seq, err)
+		}
+		chunkHash := hex.EncodeToString(hasher.Sum(nil))
+		remaining -= chunkPlain
+
+		providerID, err := e.broker.AssignChunk(encSize)
+		if err != nil {
+			encTmp.Close()
+			os.Remove(encTmp.Name())
+			wg.Wait()
+			return nil, fmt.Errorf("assigning chunk %d: %w", seq, err)
 		}
 
 		provider, err := e.db.GetProvider(providerID)
 		if err != nil || provider == nil {
+			encTmp.Close()
+			os.Remove(encTmp.Name())
 			wg.Wait()
 			return nil, fmt.Errorf("getting provider %s: %w", providerID, err)
 		}
 
-		remotePath := chunkRemoteDir + "/" + chunk.ID
+		remotePath := chunkRemoteDir + "/" + chunkID
 		metas = append(metas, chunkMeta{
-			chunkID:       chunk.ID,
-			sequence:      chunk.Sequence,
-			size:          chunk.Size,
-			sha256:        chunk.SHA256,
-			encryptedSize: len(encrypted),
+			chunkID:       chunkID,
+			sequence:      seq,
+			size:          int(chunkPlain),
+			sha256:        chunkHash,
+			encryptedSize: int(encSize),
 			providerID:    providerID,
 			remotePath:    remotePath,
 		})
 
 		// Optimistically reserve space so subsequent AssignChunk calls see
-		// reduced free space for this provider (prevents over-assignment
-		// when chunks are large relative to remote capacity).
-		_ = e.db.DeductProviderFreeBytes(providerID, int64(len(encrypted)))
+		// reduced free space for this provider.
+		_ = e.db.DeductProviderFreeBytes(providerID, encSize)
 
 		sem <- struct{}{}
 		wg.Add(1)
-		go func(enc []byte, remote string, prov *metadata.Provider, seq int, cm chunkMeta) {
-			defer func() { <-sem; wg.Done() }()
+		go func(encFile *os.File, encBytes int64, remote string, prov *metadata.Provider, s int, cm chunkMeta) {
+			defer func() {
+				encFile.Close()
+				os.Remove(encFile.Name())
+				<-sem
+				wg.Done()
+			}()
 			retries := maxUploadRetries
 			if e.maxChunkRetries > 0 {
 				retries = e.maxChunkRetries
@@ -663,33 +681,32 @@ func (e *Engine) uploadChunks(r io.ReadSeeker, fileID string, fileSize int64, sc
 			var lastErr error
 			for attempt := 0; attempt < retries; attempt++ {
 				if attempt > 0 {
-					// Don't retry quota-exceeded errors — they won't succeed.
 					if rclonerc.IsQuotaExceeded(lastErr) {
 						break
 					}
 					backoff := time.Duration(1<<uint(attempt)) * time.Second
-					// Triple backoff when the provider is rate-limiting us.
 					if rclonerc.IsRateLimited(lastErr) {
 						backoff *= 3
 					}
 					if backoff > 30*time.Second {
 						backoff = 30 * time.Second
 					}
-					// Add up to 50% jitter to prevent thundering-herd retries.
 					jitter := time.Duration(rand.Int64N(int64(backoff) / 2))
 					backoff += jitter
 					slog.Warn("retrying chunk upload",
-						"seq", seq, "attempt", attempt+1, "backoff", backoff)
+						"seq", s, "attempt", attempt+1, "backoff", backoff)
 					time.Sleep(backoff)
 				}
-				// Acquire a rate-limit token before each API call (blocks briefly
-				// when the bucket is empty) to avoid bursting past provider quotas.
-				<-e.uploadTokens
-				if err := e.rc.PutFile(prov.RcloneRemote, remote, bytes.NewReader(enc)); err != nil {
+				if _, err := encFile.Seek(0, io.SeekStart); err != nil {
 					lastErr = err
 					continue
 				}
-				slog.Debug("chunk uploaded", "seq", seq, "provider", prov.DisplayName)
+				<-e.uploadTokens
+				if err := e.rc.PutFile(prov.RcloneRemote, remote, encFile); err != nil {
+					lastErr = err
+					continue
+				}
+				slog.Debug("chunk uploaded", "seq", s, "provider", prov.DisplayName)
 				e.chunksUploaded.Add(1)
 				mu.Lock()
 				uploaded = append(uploaded, cm)
@@ -699,16 +716,14 @@ func (e *Engine) uploadChunks(r io.ReadSeeker, fileID string, fileSize int64, sc
 				}
 				return // success
 			}
-			// Credit back the optimistic space reservation that was
-			// deducted when this chunk was assigned.
-			_ = e.db.CreditProviderFreeBytes(prov.ID, int64(len(enc)))
+			_ = e.db.CreditProviderFreeBytes(prov.ID, encBytes)
 			mu.Lock()
 			if firstErr == nil {
 				firstErr = fmt.Errorf("uploading chunk %d to %s after %d retries: %w",
-					seq, prov.DisplayName, retries, lastErr)
+					s, prov.DisplayName, retries, lastErr)
 			}
 			mu.Unlock()
-		}(encrypted, remotePath, provider, chunk.Sequence, metas[len(metas)-1])
+		}(encTmp, encSize, remotePath, provider, seq, metas[len(metas)-1])
 	}
 
 	wg.Wait()
@@ -1088,29 +1103,53 @@ func (e *Engine) ReadFileToTempFile(virtualPath string) (*os.File, error) {
 			abandon()
 			return nil, fmt.Errorf("downloading chunk %d from %s: %w", chunk.Sequence, provider.DisplayName, err)
 		}
-		encrypted, readErr := io.ReadAll(rc)
+
+		chunkHasher := sha256.New()
+		mw := io.MultiWriter(tmp, fullHasher, chunkHasher)
+
+		// Peek at the first 4 bytes to detect stream vs legacy format.
+		var header [4]byte
+		n, peekErr := io.ReadFull(rc, header[:])
+		if peekErr != nil && peekErr != io.ErrUnexpectedEOF {
+			rc.Close()
+			abandon()
+			return nil, fmt.Errorf("reading chunk %d header: %w", chunk.Sequence, peekErr)
+		}
+
+		if n == 4 && chunker.IsStreamFormat(header[:]) {
+			// Stream format: decrypt in 16 MB blocks — bounded memory.
+			combined := io.MultiReader(bytes.NewReader(header[:n]), rc)
+			if err := chunker.DecryptStream(e.encKey, combined, mw); err != nil {
+				rc.Close()
+				abandon()
+				return nil, fmt.Errorf("decrypting chunk %d: %w", chunk.Sequence, err)
+			}
+		} else {
+			// Legacy single-block format: read all, decrypt in memory.
+			rest, readErr := io.ReadAll(rc)
+			if readErr != nil {
+				rc.Close()
+				abandon()
+				return nil, fmt.Errorf("reading chunk %d: %w", chunk.Sequence, readErr)
+			}
+			encrypted := append(header[:n], rest...)
+			decrypted, err := chunker.Decrypt(e.encKey, encrypted)
+			if err != nil {
+				rc.Close()
+				abandon()
+				return nil, fmt.Errorf("decrypting chunk %d: %w", chunk.Sequence, err)
+			}
+			if _, err := mw.Write(decrypted); err != nil {
+				rc.Close()
+				abandon()
+				return nil, fmt.Errorf("writing chunk %d: %w", chunk.Sequence, err)
+			}
+		}
 		rc.Close()
-		if readErr != nil {
-			abandon()
-			return nil, fmt.Errorf("reading chunk %d: %w", chunk.Sequence, readErr)
-		}
 
-		decrypted, err := chunker.Decrypt(e.encKey, encrypted)
-		if err != nil {
-			abandon()
-			return nil, fmt.Errorf("decrypting chunk %d: %w", chunk.Sequence, err)
-		}
-
-		chunkHash := sha256.Sum256(decrypted)
-		if hex.EncodeToString(chunkHash[:]) != chunk.SHA256 {
+		if hex.EncodeToString(chunkHasher.Sum(nil)) != chunk.SHA256 {
 			abandon()
 			return nil, fmt.Errorf("chunk %d hash mismatch for %s", chunk.Sequence, virtualPath)
-		}
-
-		fullHasher.Write(decrypted)
-		if _, err := tmp.Write(decrypted); err != nil {
-			abandon()
-			return nil, fmt.Errorf("writing chunk %d to temp: %w", chunk.Sequence, err)
 		}
 	}
 
