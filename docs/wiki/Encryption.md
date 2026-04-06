@@ -56,10 +56,10 @@ The magic bytes allow verification that a decrypted backup is valid before attem
 
 ## Security Properties
 
-| Property | Guarantee |
-|----------|-----------|
-| Confidentiality | AES-256-GCM — cloud providers cannot read your data |
-| Integrity | GCM tag + SHA-256 hash — any tampering is detected |
-| Key strength | 256-bit key from Argon2id — memory-hard against brute force |
-| Nonce uniqueness | 12 bytes from crypto/rand per chunk — astronomically unlikely collision |
-| Forward secrecy | Not applicable (single symmetric key) — re-encrypt if key is compromised |
+| Property         | Guarantee                                                                |
+| ---------------- | ------------------------------------------------------------------------ |
+| Confidentiality  | AES-256-GCM — cloud providers cannot read your data                      |
+| Integrity        | GCM tag + SHA-256 hash — any tampering is detected                       |
+| Key strength     | 256-bit key from Argon2id — memory-hard against brute force              |
+| Nonce uniqueness | 12 bytes from crypto/rand per chunk — astronomically unlikely collision  |
+| Forward secrecy  | Not applicable (single symmetric key) — re-encrypt if key is compromised |

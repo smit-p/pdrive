@@ -170,28 +170,28 @@ mount -t davfs http://localhost:8765 /mnt/pdrive
 
 ### HTTP API
 
-| Endpoint                      | Method | Description                                                 |
-| ----------------------------- | ------ | ----------------------------------------------------------- |
-| `/api/ls?path=/`              | GET    | Directory listing with `local_state` (local/stub/uploading) |
-| `/api/status`                 | GET    | Total files, bytes, per-provider quotas                     |
-| `/api/health`                 | GET    | Uptime, DB status, in-flight uploads                        |
-| `/api/uploads`                | GET    | In-flight upload progress                                   |
-| `/api/metrics`                | GET    | Telemetry counters (files/chunks/bytes)                     |
-| `/api/remotes`                | GET    | List configured remotes with enabled status                 |
-| `/api/info?path=/file`        | GET    | File metadata, chunks, provider locations                   |
-| `/api/tree?path=/`            | GET    | Recursive directory tree                                    |
-| `/api/find?pattern=*.pdf`     | GET    | Glob search across all files                                |
-| `/api/du?path=/`              | GET    | Disk usage summary for a directory                          |
-| `/api/download?path=/file`    | GET    | Download decrypted file content                             |
-| `/api/activity`               | GET    | Recent activity log entries                                 |
-| `/api/verify`                 | GET    | Verify chunk integrity on cloud providers                   |
-| `/api/pin?path=/file`         | POST   | Download cloud file to local                                |
-| `/api/unpin?path=/file`       | POST   | Evict local data, replace with stub                         |
-| `/api/delete?path=/file`      | POST   | Delete file from cloud and local                            |
-| `/api/mv?src=/a&dst=/b`       | POST   | Move or rename a file                                       |
-| `/api/mkdir?path=/dir`        | POST   | Create a new directory                                      |
-| `/api/upload`                 | POST   | Upload a file (multipart form)                              |
-| `/api/resync`                 | POST   | Trigger immediate provider re-discovery from rclone         |
+| Endpoint                   | Method | Description                                                 |
+| -------------------------- | ------ | ----------------------------------------------------------- |
+| `/api/ls?path=/`           | GET    | Directory listing with `local_state` (local/stub/uploading) |
+| `/api/status`              | GET    | Total files, bytes, per-provider quotas                     |
+| `/api/health`              | GET    | Uptime, DB status, in-flight uploads                        |
+| `/api/uploads`             | GET    | In-flight upload progress                                   |
+| `/api/metrics`             | GET    | Telemetry counters (files/chunks/bytes)                     |
+| `/api/remotes`             | GET    | List configured remotes with enabled status                 |
+| `/api/info?path=/file`     | GET    | File metadata, chunks, provider locations                   |
+| `/api/tree?path=/`         | GET    | Recursive directory tree                                    |
+| `/api/find?pattern=*.pdf`  | GET    | Glob search across all files                                |
+| `/api/du?path=/`           | GET    | Disk usage summary for a directory                          |
+| `/api/download?path=/file` | GET    | Download decrypted file content                             |
+| `/api/activity`            | GET    | Recent activity log entries                                 |
+| `/api/verify`              | GET    | Verify chunk integrity on cloud providers                   |
+| `/api/pin?path=/file`      | POST   | Download cloud file to local                                |
+| `/api/unpin?path=/file`    | POST   | Evict local data, replace with stub                         |
+| `/api/delete?path=/file`   | POST   | Delete file from cloud and local                            |
+| `/api/mv?src=/a&dst=/b`    | POST   | Move or rename a file                                       |
+| `/api/mkdir?path=/dir`     | POST   | Create a new directory                                      |
+| `/api/upload`              | POST   | Upload a file (multipart form)                              |
+| `/api/resync`              | POST   | Trigger immediate provider re-discovery from rclone         |
 
 ## CLI Reference
 
@@ -280,25 +280,25 @@ pdrive pin /video.mp4         # download cloud file locally
 pdrive unpin /video.mp4       # evict local copy, keep in cloud
 ```
 
-| Flag               | Default          | Description                                                           |
-| ------------------ | ---------------- | --------------------------------------------------------------------- |
-| `--config-dir`     | `~/.pdrive`      | Configuration directory (DB, spool, key)                              |
-| `--sync-dir`       | `~/pdrive`       | Local sync folder; empty disables sync                                |
-| `--webdav-addr`    | `127.0.0.1:8765` | HTTP/WebDAV listen address                                            |
-| `--rclone-addr`    | `127.0.0.1:5572` | rclone RC address                                                     |
-| `--rclone-bin`     | (auto-detected)  | Path to rclone binary                                                 |
-| `--password`       | (interactive)    | Encryption password (derives AES-256 key via Argon2id)                |
-| `--enc-key`        | (none)           | Legacy: 64-char hex AES-256 key; prefer `--password`                  |
-| `--broker-policy`  | `pfrd`           | Placement policy: `pfrd` (weighted random) or `mfs` (most free space) |
-| `--min-free-space` | `256 MB`         | Minimum free bytes per provider                                       |
-| `--chunk-size`     | `0` (dynamic)    | Override chunk size in bytes; 0 = dynamic (32–128 MB)                 |
-| `--rate-limit`     | `6`              | Cloud API calls per second                                            |
-| `--skip-restore`   | `false`          | Skip restoring DB from cloud on startup                               |
-| `--remotes`        | (all)            | Comma-separated rclone remote names to use                            |
-| `--foreground`     | `false`          | Run in foreground instead of backgrounding (for systemd/debugging)    |
-| `--backend`        | `webdav`         | Mount backend: `webdav` (default) or `fuse`                           |
+| Flag               | Default          | Description                                                               |
+| ------------------ | ---------------- | ------------------------------------------------------------------------- |
+| `--config-dir`     | `~/.pdrive`      | Configuration directory (DB, spool, key)                                  |
+| `--sync-dir`       | `~/pdrive`       | Local sync folder; empty disables sync                                    |
+| `--webdav-addr`    | `127.0.0.1:8765` | HTTP/WebDAV listen address                                                |
+| `--rclone-addr`    | `127.0.0.1:5572` | rclone RC address                                                         |
+| `--rclone-bin`     | (auto-detected)  | Path to rclone binary                                                     |
+| `--password`       | (interactive)    | Encryption password (derives AES-256 key via Argon2id)                    |
+| `--enc-key`        | (none)           | Legacy: 64-char hex AES-256 key; prefer `--password`                      |
+| `--broker-policy`  | `pfrd`           | Placement policy: `pfrd` (weighted random) or `mfs` (most free space)     |
+| `--min-free-space` | `256 MB`         | Minimum free bytes per provider                                           |
+| `--chunk-size`     | `0` (dynamic)    | Override chunk size in bytes; 0 = dynamic (32–128 MB)                     |
+| `--rate-limit`     | `6`              | Cloud API calls per second                                                |
+| `--skip-restore`   | `false`          | Skip restoring DB from cloud on startup                                   |
+| `--remotes`        | (all)            | Comma-separated rclone remote names to use                                |
+| `--foreground`     | `false`          | Run in foreground instead of backgrounding (for systemd/debugging)        |
+| `--backend`        | `webdav`         | Mount backend: `webdav` (default) or `fuse`                               |
 | `--mountpoint`     | (none)           | FUSE mount point (e.g. `/Volumes/pdrive`); required with `--backend=fuse` |
-| `--debug`          | `false`          | Enable debug logging                                                  |
+| `--debug`          | `false`          | Enable debug logging                                                      |
 
 ## Architecture
 
@@ -365,7 +365,7 @@ python3 scripts/test_dirs.py   # directory operations
 python3 scripts/test_large.py  # large file chunking
 ```
 
-The Playwright suite covers 69 tests across the web UI: layout, file browser, info panel, file actions (download/pin/unpin/delete/move/mkdir), dashboard, uploads, search, tree, metrics, keyboard shortcuts, navigation, toasts, and responsive layout.
+The Playwright suite covers 82 tests across the web UI: layout, file browser, info panel, file actions (download/pin/unpin/delete/move/mkdir), dashboard, uploads, search, tree, metrics, keyboard shortcuts, navigation, toasts, and responsive layout.
 
 ## Dependencies
 

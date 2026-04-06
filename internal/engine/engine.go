@@ -145,7 +145,7 @@ func NewEngine(db *metadata.DB, dbPath string, rc *rclonerc.Client, b *broker.Br
 }
 
 // NewEngineWithRate creates an Engine with a custom API rate limit (tokens per second).
-// A ratePerSec of 0 or less uses the default (8/s).
+// A ratePerSec of 0 or less uses the default (6/s).
 func NewEngineWithRate(db *metadata.DB, dbPath string, rc *rclonerc.Client, b *broker.Broker, encKey []byte, ratePerSec int) *Engine {
 	const burst = 10
 	if ratePerSec <= 0 {

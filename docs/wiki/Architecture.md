@@ -96,11 +96,11 @@ TOML configuration file support. Loads settings from `~/.pdrive/config.toml`, al
 1. User runs `pdrive put file.pdf` or saves to sync dir
 2. Engine checks aggregate free space across all providers (rejects if insufficient)
 3. Engine computes SHA-256 hash and checks for deduplication
-3. Chunker splits file into appropriately-sized chunks
-4. Each chunk is encrypted with AES-256-GCM (unique nonce per chunk)
-5. Broker selects target provider per chunk based on free space
-6. rclonerc uploads chunks concurrently (up to 10 workers) with retry/backoff
-7. Metadata DB records file, chunks, and their locations
+4. Chunker splits file into appropriately-sized chunks
+5. Each chunk is encrypted with AES-256-GCM (unique nonce per chunk)
+6. Broker selects target provider per chunk based on free space
+7. rclonerc uploads chunks concurrently (up to 10 workers) with retry/backoff
+8. Metadata DB records file, chunks, and their locations
 
 ### Download
 
