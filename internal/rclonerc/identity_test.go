@@ -62,9 +62,9 @@ func TestMaskKey(t *testing.T) {
 
 // --- parsers ---
 
-func TestParseGoogleUserinfo(t *testing.T) {
-	body := `{"email":"alice@gmail.com","name":"Alice"}`
-	if got := parseGoogleUserinfo([]byte(body)); got != "alice@gmail.com" {
+func TestParseGoogleDriveAbout(t *testing.T) {
+	body := `{"user":{"emailAddress":"alice@gmail.com","displayName":"Alice"}}`
+	if got := parseGoogleDriveAbout([]byte(body)); got != "alice@gmail.com" {
 		t.Errorf("got %q, want alice@gmail.com", got)
 	}
 }
@@ -104,13 +104,15 @@ func TestFetchOAuthIdentity_Google(t *testing.T) {
 		if r.Header.Get("Authorization") != "Bearer test-token" {
 			t.Errorf("unexpected auth header: %s", r.Header.Get("Authorization"))
 		}
-		json.NewEncoder(w).Encode(map[string]string{"email": "alice@gmail.com"})
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"user": map[string]string{"emailAddress": "alice@gmail.com"},
+		})
 	}))
 	defer srv.Close()
 
 	// Temporarily override the google provider URL for testing.
 	orig := oauthProviders["drive"]
-	oauthProviders["drive"] = oauthProvider{url: srv.URL, method: "GET", parser: parseGoogleUserinfo}
+	oauthProviders["drive"] = oauthProvider{url: srv.URL, method: "GET", parser: parseGoogleDriveAbout}
 	defer func() { oauthProviders["drive"] = orig }()
 
 	identity, err := fetchOAuthIdentity("drive", "test-token")
@@ -161,7 +163,7 @@ func TestFetchOAuthIdentity_HTTPError(t *testing.T) {
 	defer srv.Close()
 
 	orig := oauthProviders["drive"]
-	oauthProviders["drive"] = oauthProvider{url: srv.URL, method: "GET", parser: parseGoogleUserinfo}
+	oauthProviders["drive"] = oauthProvider{url: srv.URL, method: "GET", parser: parseGoogleDriveAbout}
 	defer func() { oauthProviders["drive"] = orig }()
 
 	_, err := fetchOAuthIdentity("drive", "expired-token")
@@ -210,12 +212,14 @@ func TestFetchAccountIdentity_S3AccessKey(t *testing.T) {
 func TestFetchAccountIdentity_OAuthFallback(t *testing.T) {
 	// OAuth backend with a token. We override the provider URL to a local mock.
 	userInfoSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]string{"email": "alice@gmail.com"})
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"user": map[string]string{"emailAddress": "alice@gmail.com"},
+		})
 	}))
 	defer userInfoSrv.Close()
 
 	orig := oauthProviders["drive"]
-	oauthProviders["drive"] = oauthProvider{url: userInfoSrv.URL, method: "GET", parser: parseGoogleUserinfo}
+	oauthProviders["drive"] = oauthProvider{url: userInfoSrv.URL, method: "GET", parser: parseGoogleDriveAbout}
 	defer func() { oauthProviders["drive"] = orig }()
 
 	c := fakeRclone(t, func(w http.ResponseWriter, r *http.Request) {

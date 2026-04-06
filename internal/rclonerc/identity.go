@@ -76,9 +76,9 @@ type oauthProvider struct {
 
 var oauthProviders = map[string]oauthProvider{
 	"drive": {
-		url:    "https://www.googleapis.com/oauth2/v3/userinfo",
+		url:    "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)",
 		method: "GET",
-		parser: parseGoogleUserinfo,
+		parser: parseGoogleDriveAbout,
 	},
 	"dropbox": {
 		url:    "https://api.dropboxapi.com/2/users/get_current_account",
@@ -132,12 +132,14 @@ func fetchOAuthIdentity(remoteType, accessToken string) (string, error) {
 	return pc.parser(body), nil
 }
 
-func parseGoogleUserinfo(body []byte) string {
+func parseGoogleDriveAbout(body []byte) string {
 	var resp struct {
-		Email string `json:"email"`
+		User struct {
+			EmailAddress string `json:"emailAddress"`
+		} `json:"user"`
 	}
 	json.Unmarshal(body, &resp) //nolint:errcheck
-	return resp.Email
+	return resp.User.EmailAddress
 }
 
 func parseDropboxUserinfo(body []byte) string {

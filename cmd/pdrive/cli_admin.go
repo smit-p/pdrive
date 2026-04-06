@@ -80,6 +80,24 @@ func runStatus(addr string) {
 			fmt.Fprintf(w, "  %s\t%s\t%s used by pdrive\t%s free / %s total\n", p.Name, fmtProviderDetail(p), used, free, total)
 		}
 		w.Flush()
+
+		// Print totals.
+		var totalFree, totalCap int64
+		var hasFree, hasCap bool
+		for _, p := range resp.Providers {
+			if p.QuotaFreeBytes != nil {
+				totalFree += *p.QuotaFreeBytes
+				hasFree = true
+			}
+			if p.QuotaTotalBytes != nil {
+				totalCap += *p.QuotaTotalBytes
+				hasCap = true
+			}
+		}
+		fmt.Println()
+		if hasFree && hasCap {
+			fmt.Printf("Total: %s free / %s capacity across %d providers\n", fmtSize(totalFree), fmtSize(totalCap), len(resp.Providers))
+		}
 	}
 }
 
