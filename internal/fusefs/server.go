@@ -29,10 +29,10 @@ func CheckFUSEAvailable() error {
 	case "darwin":
 		// Check if macFUSE filesystem bundle exists.
 		if _, err := os.Stat("/Library/Filesystems/macfuse.fs"); err != nil {
-			return errors.New("macFUSE is not installed.\n\n" +
+			return errors.New("macFUSE is not installed\n\n" +
 				"  Install it with:  brew install --cask macfuse\n" +
 				"  Then reboot and approve the system extension in\n" +
-				"  System Settings → Privacy & Security.")
+				"  System Settings → Privacy & Security")
 		}
 		// Check if the kernel extension is loaded.
 		out, err := exec.Command("kextstat").Output()
@@ -48,11 +48,11 @@ func CheckFUSEAvailable() error {
 		if tryLoadMacFUSEKext() {
 			return nil // loaded successfully
 		}
-		return errors.New("macFUSE is installed but the kernel extension is not loaded.\n\n" +
+		return errors.New("macFUSE is installed but the kernel extension is not loaded\n\n" +
 			"  Try loading it manually:\n" +
 			"    sudo kextload /Library/Filesystems/macfuse.fs/Contents/Extensions/$(sw_vers -productVersion | cut -d. -f1)/macfuse.kext\n\n" +
 			"  If that doesn't work, check System Settings → Privacy & Security\n" +
-			"  for a blocked system extension and approve it, then reboot.")
+			"  for a blocked system extension and approve it, then reboot")
 
 	case "linux":
 		if _, err := os.Stat("/dev/fuse"); err != nil {

@@ -871,7 +871,6 @@ func (e *Engine) ReadFileToTempFile(virtualPath string) (*os.File, error) {
 			abandon()
 			return nil, fmt.Errorf("decrypting chunk %d: %w", chunk.Sequence, err)
 		}
-		encrypted = nil
 
 		chunkHash := sha256.Sum256(decrypted)
 		if hex.EncodeToString(chunkHash[:]) != chunk.SHA256 {
@@ -884,7 +883,6 @@ func (e *Engine) ReadFileToTempFile(virtualPath string) (*os.File, error) {
 			abandon()
 			return nil, fmt.Errorf("writing chunk %d to temp: %w", chunk.Sequence, err)
 		}
-		decrypted = nil
 	}
 
 	if hex.EncodeToString(fullHasher.Sum(nil)) != file.SHA256Full {

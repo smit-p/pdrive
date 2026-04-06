@@ -39,7 +39,7 @@ func Open(dbPath string) (*DB, error) {
 
 	// Enable WAL mode for crash safety and concurrent reads.
 	if _, err := conn.Exec("PRAGMA journal_mode=WAL"); err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, fmt.Errorf("enabling WAL mode: %w", err)
 	}
 
@@ -50,13 +50,13 @@ func Open(dbPath string) (*DB, error) {
 
 	// Enable foreign keys.
 	if _, err := conn.Exec("PRAGMA foreign_keys=ON"); err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, fmt.Errorf("enabling foreign keys: %w", err)
 	}
 
 	// Run schema migrations.
 	if _, err := conn.Exec(schemaSQL); err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, fmt.Errorf("running schema: %w", err)
 	}
 

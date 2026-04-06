@@ -47,7 +47,7 @@ func (c *Client) call(endpoint string, params map[string]interface{}) (json.RawM
 	if err != nil {
 		return nil, fmt.Errorf("calling %s: %w", endpoint, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {

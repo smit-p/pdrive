@@ -1834,10 +1834,7 @@ func TestStopDaemon_Signal(t *testing.T) {
 // exitTestHelper checks if the env var is set and runs the specified function.
 // Returns true if it ran (i.e., we're in the child subprocess).
 func exitTestHelper(action string) bool {
-	if os.Getenv("CLI_EXIT_TEST") != action {
-		return false
-	}
-	return true
+	return os.Getenv("CLI_EXIT_TEST") == action
 }
 
 func TestRunCat_NoArgs_Exits(t *testing.T) {

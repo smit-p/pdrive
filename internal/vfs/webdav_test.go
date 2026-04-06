@@ -482,7 +482,7 @@ func TestWebDAV_Stat_WithCleanablePaths(t *testing.T) {
 	// These paths should all resolve to /testdir via cleanPath.
 	paths := []string{"/testdir", "testdir", "/a/../testdir", "//testdir"}
 	for _, p := range paths {
-		fi, err := fs.Stat(nil, p)
+		fi, err := fs.Stat(context.TODO(), p)
 		if err != nil {
 			t.Errorf("Stat(%q): %v", p, err)
 			continue
@@ -499,7 +499,7 @@ func TestWebDAV_Stat_Root(t *testing.T) {
 	srv, eng, _ := newTestServer(t)
 	_ = srv
 	fs := vfs.NewWebDAVFS(eng, "")
-	fi, err := fs.Stat(nil, "/")
+	fi, err := fs.Stat(context.TODO(), "/")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -524,7 +524,7 @@ func TestWebDAV_Stat_File(t *testing.T) {
 	srv, eng, _ := newTestServer(t)
 	httpPUT(t, srv, "/stattest.txt", []byte("hello"))
 	fs := vfs.NewWebDAVFS(eng, "")
-	fi, err := fs.Stat(nil, "/stattest.txt")
+	fi, err := fs.Stat(context.TODO(), "/stattest.txt")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -548,7 +548,7 @@ func TestWebDAV_Stat_File(t *testing.T) {
 func TestWebDAV_Stat_NonExistent(t *testing.T) {
 	_, eng, _ := newTestServer(t)
 	fs := vfs.NewWebDAVFS(eng, "")
-	_, err := fs.Stat(nil, "/nonexistent.txt")
+	_, err := fs.Stat(context.TODO(), "/nonexistent.txt")
 	if err == nil || !os.IsNotExist(err) {
 		t.Errorf("expected ErrNotExist, got %v", err)
 	}
@@ -558,7 +558,7 @@ func TestWebDAV_Stat_Dir(t *testing.T) {
 	_, eng, _ := newTestServer(t)
 	eng.MkDir("/testdir")
 	fs := vfs.NewWebDAVFS(eng, "")
-	fi, err := fs.Stat(nil, "/testdir")
+	fi, err := fs.Stat(context.TODO(), "/testdir")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -573,7 +573,7 @@ func TestWebDAV_Stat_Dir(t *testing.T) {
 func TestWebDAV_OpenFile_Dir(t *testing.T) {
 	_, eng, _ := newTestServer(t)
 	fs := vfs.NewWebDAVFS(eng, "")
-	f, err := fs.OpenFile(nil, "/", 0, 0)
+	f, err := fs.OpenFile(context.TODO(), "/", 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -591,7 +591,7 @@ func TestWebDAV_RemoveAll_Dir(t *testing.T) {
 	_, eng, _ := newTestServer(t)
 	eng.MkDir("/rmdir")
 	fs := vfs.NewWebDAVFS(eng, "")
-	if err := fs.RemoveAll(nil, "/rmdir"); err != nil {
+	if err := fs.RemoveAll(context.TODO(), "/rmdir"); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -600,7 +600,7 @@ func TestWebDAV_Rename_Dir(t *testing.T) {
 	_, eng, _ := newTestServer(t)
 	eng.MkDir("/oldname")
 	fs := vfs.NewWebDAVFS(eng, "")
-	if err := fs.Rename(nil, "/oldname", "/newname"); err != nil {
+	if err := fs.Rename(context.TODO(), "/oldname", "/newname"); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -608,7 +608,7 @@ func TestWebDAV_Rename_Dir(t *testing.T) {
 func TestWebDAV_Mkdir(t *testing.T) {
 	_, eng, _ := newTestServer(t)
 	fs := vfs.NewWebDAVFS(eng, "")
-	if err := fs.Mkdir(nil, "/newdir", 0755); err != nil {
+	if err := fs.Mkdir(context.TODO(), "/newdir", 0755); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -616,7 +616,7 @@ func TestWebDAV_Mkdir(t *testing.T) {
 func TestWebDAV_OpenFile_Write(t *testing.T) {
 	_, eng, _ := newTestServer(t)
 	fs := vfs.NewWebDAVFS(eng, "")
-	f, err := fs.OpenFile(nil, "/write.txt", os.O_CREATE|os.O_WRONLY, 0644)
+	f, err := fs.OpenFile(context.TODO(), "/write.txt", os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -627,7 +627,7 @@ func TestWebDAV_OpenFile_Write(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Verify written.
-	fi, err := fs.Stat(nil, "/write.txt")
+	fi, err := fs.Stat(context.TODO(), "/write.txt")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -661,7 +661,7 @@ func TestWebDAVFile_Read_Directory(t *testing.T) {
 	_, eng, _ := newTestServer(t)
 	eng.MkDir("/readdir")
 	fs := vfs.NewWebDAVFS(eng, "")
-	f, err := fs.OpenFile(nil, "/readdir", 0, 0)
+	f, err := fs.OpenFile(context.TODO(), "/readdir", 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -677,7 +677,7 @@ func TestWebDAVFile_Seek_Directory(t *testing.T) {
 	_, eng, _ := newTestServer(t)
 	eng.MkDir("/seekdir")
 	fs := vfs.NewWebDAVFS(eng, "")
-	f, err := fs.OpenFile(nil, "/seekdir", 0, 0)
+	f, err := fs.OpenFile(context.TODO(), "/seekdir", 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -692,7 +692,7 @@ func TestWebDAVFile_Readdir_NotDir(t *testing.T) {
 	srv, eng, _ := newTestServer(t)
 	httpPUT(t, srv, "/file.txt", []byte("data"))
 	fs := vfs.NewWebDAVFS(eng, "")
-	f, err := fs.OpenFile(nil, "/file.txt", 0, 0)
+	f, err := fs.OpenFile(context.TODO(), "/file.txt", 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -709,7 +709,7 @@ func TestWebDAVFile_Readdir_WithCount(t *testing.T) {
 	httpPUT(t, srv, "/rdcount/b.txt", []byte("b"))
 	httpPUT(t, srv, "/rdcount/c.txt", []byte("c"))
 	fs := vfs.NewWebDAVFS(eng, "")
-	f, err := fs.OpenFile(nil, "/rdcount", 0, 0)
+	f, err := fs.OpenFile(context.TODO(), "/rdcount", 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -727,7 +727,7 @@ func TestWebDAVFile_Write_NotWritable(t *testing.T) {
 	_, eng, _ := newTestServer(t)
 	fs := vfs.NewWebDAVFS(eng, "")
 	// Open for read (no write flag)
-	f, err := fs.OpenFile(nil, "/", 0, 0)
+	f, err := fs.OpenFile(context.TODO(), "/", 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -742,7 +742,7 @@ func TestWebDAVFile_Stat_Dir(t *testing.T) {
 	_, eng, _ := newTestServer(t)
 	eng.MkDir("/statdir")
 	fs := vfs.NewWebDAVFS(eng, "")
-	f, err := fs.OpenFile(nil, "/statdir", 0, 0)
+	f, err := fs.OpenFile(context.TODO(), "/statdir", 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -763,7 +763,7 @@ func TestWebDAVFile_ReadAndSeek_File(t *testing.T) {
 	srv, eng, _ := newTestServer(t)
 	httpPUT(t, srv, "/readseek.txt", []byte("hello world"))
 	fs := vfs.NewWebDAVFS(eng, "")
-	f, err := fs.OpenFile(nil, "/readseek.txt", 0, 0)
+	f, err := fs.OpenFile(context.TODO(), "/readseek.txt", 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -802,7 +802,7 @@ func TestWebDAVFile_Close_WithReadFile(t *testing.T) {
 	srv, eng, _ := newTestServer(t)
 	httpPUT(t, srv, "/closerd.txt", []byte("close test"))
 	fs := vfs.NewWebDAVFS(eng, "")
-	f, err := fs.OpenFile(nil, "/closerd.txt", 0, 0)
+	f, err := fs.OpenFile(context.TODO(), "/closerd.txt", 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -823,10 +823,10 @@ func TestWebDAV_RemoveAll_File(t *testing.T) {
 	srv, eng, _ := newTestServer(t)
 	httpPUT(t, srv, "/rmfile.txt", []byte("data"))
 	fs := vfs.NewWebDAVFS(eng, "")
-	if err := fs.RemoveAll(nil, "/rmfile.txt"); err != nil {
+	if err := fs.RemoveAll(context.TODO(), "/rmfile.txt"); err != nil {
 		t.Fatal(err)
 	}
-	_, err := fs.Stat(nil, "/rmfile.txt")
+	_, err := fs.Stat(context.TODO(), "/rmfile.txt")
 	if !os.IsNotExist(err) {
 		t.Errorf("expected ErrNotExist after RemoveAll, got %v", err)
 	}
@@ -836,10 +836,10 @@ func TestWebDAV_Rename_File(t *testing.T) {
 	srv, eng, _ := newTestServer(t)
 	httpPUT(t, srv, "/renold.txt", []byte("rename"))
 	fs := vfs.NewWebDAVFS(eng, "")
-	if err := fs.Rename(nil, "/renold.txt", "/rennew.txt"); err != nil {
+	if err := fs.Rename(context.TODO(), "/renold.txt", "/rennew.txt"); err != nil {
 		t.Fatal(err)
 	}
-	fi, err := fs.Stat(nil, "/rennew.txt")
+	fi, err := fs.Stat(context.TODO(), "/rennew.txt")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -852,7 +852,7 @@ func TestWebDAVFile_Write_WithSpoolDir(t *testing.T) {
 	_, eng, _ := newTestServer(t)
 	spool := t.TempDir()
 	fs := vfs.NewWebDAVFS(eng, spool)
-	f, err := fs.OpenFile(nil, "/spool.txt", os.O_CREATE|os.O_WRONLY, 0644)
+	f, err := fs.OpenFile(context.TODO(), "/spool.txt", os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -862,7 +862,7 @@ func TestWebDAVFile_Write_WithSpoolDir(t *testing.T) {
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
-	fi, err := fs.Stat(nil, "/spool.txt")
+	fi, err := fs.Stat(context.TODO(), "/spool.txt")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1027,7 +1027,7 @@ func TestSyncDir_ListFiles_Empty(t *testing.T) {
 func TestWebDAVFile_Stat_WritableFile(t *testing.T) {
 	_, eng, _ := newTestServer(t)
 	fs := vfs.NewWebDAVFS(eng, "")
-	f, err := fs.OpenFile(nil, "/wrstat.txt", os.O_CREATE|os.O_WRONLY, 0644)
+	f, err := fs.OpenFile(context.TODO(), "/wrstat.txt", os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1049,7 +1049,7 @@ func TestWebDAVFile_Close_ReadOnlyNoReadFile(t *testing.T) {
 	_, eng, _ := newTestServer(t)
 	eng.MkDir("/closedir")
 	fs := vfs.NewWebDAVFS(eng, "")
-	f, err := fs.OpenFile(nil, "/closedir", 0, 0)
+	f, err := fs.OpenFile(context.TODO(), "/closedir", 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

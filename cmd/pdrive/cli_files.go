@@ -89,10 +89,7 @@ func runLs(addr, configDir string, args []string) {
 		return resp.Files[i].Name < resp.Files[j].Name
 	})
 
-	var items []string
-	for _, d := range resp.Dirs {
-		items = append(items, d)
-	}
+	items := append([]string{}, resp.Dirs...)
 	for _, f := range resp.Files {
 		items = append(items, f.Name)
 	}

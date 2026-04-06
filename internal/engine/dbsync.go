@@ -190,8 +190,8 @@ func (e *Engine) GCOrphanedChunks() {
 				continue
 			}
 			// remote_path stored in DB is e.g. "pdrive-chunks/<uuid>"
-			remotePath := path.Join(chunkRemoteDir, item.Name)
 			// Normalise — rclone may return "pdrive-chunks/uuid" or just "uuid"
+			var remotePath string
 			if !strings.HasPrefix(item.Path, chunkRemoteDir) {
 				remotePath = path.Join(chunkRemoteDir, item.Path)
 			} else {

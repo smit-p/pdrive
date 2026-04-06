@@ -41,7 +41,7 @@ func (c *Client) PutFile(remote, remotePath string, data io.Reader) error {
 	if err != nil {
 		return fmt.Errorf("creating temp dir: %w", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	base := filepath.Base(remotePath)
 	tmpFile := filepath.Join(tmpDir, base)
@@ -50,7 +50,7 @@ func (c *Client) PutFile(remote, remotePath string, data io.Reader) error {
 		return fmt.Errorf("creating temp file: %w", err)
 	}
 	if _, err := io.Copy(f, data); err != nil {
-		f.Close()
+		_ = f.Close()
 		return fmt.Errorf("writing temp file: %w", err)
 	}
 	if err := f.Close(); err != nil {
@@ -131,7 +131,7 @@ type tempFileReadCloser struct {
 
 func (t *tempFileReadCloser) Close() error {
 	err := t.File.Close()
-	os.RemoveAll(t.tmpDir)
+	_ = os.RemoveAll(t.tmpDir)
 	return err
 }
 
@@ -153,13 +153,13 @@ func (c *Client) GetFile(remote, remotePath string) (io.ReadCloser, error) {
 		"dstRemote": dstRemote,
 	})
 	if err != nil {
-		os.RemoveAll(tmpDir)
+		_ = os.RemoveAll(tmpDir)
 		return nil, fmt.Errorf("downloading file: %w", err)
 	}
 
 	f, err := os.Open(filepath.Join(tmpDir, dstRemote))
 	if err != nil {
-		os.RemoveAll(tmpDir)
+		_ = os.RemoveAll(tmpDir)
 		return nil, fmt.Errorf("opening downloaded file: %w", err)
 	}
 

@@ -52,7 +52,7 @@ func EnsureRclone(configDir string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("downloading rclone: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("downloading rclone: HTTP %d", resp.StatusCode)
@@ -94,7 +94,7 @@ func EnsureRclone(configDir string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("extracting rclone: %w", err)
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 
 	if err := os.MkdirAll(binDir, 0755); err != nil {
 		return "", fmt.Errorf("creating bin directory: %w", err)
@@ -104,10 +104,10 @@ func EnsureRclone(configDir string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("writing rclone binary: %w", err)
 	}
-	defer out.Close()
+	defer func() { _ = out.Close() }()
 
 	if _, err := io.Copy(out, rc); err != nil {
-		os.Remove(dest)
+		_ = os.Remove(dest)
 		return "", fmt.Errorf("writing rclone binary: %w", err)
 	}
 

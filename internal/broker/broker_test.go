@@ -7,16 +7,7 @@ import (
 	"github.com/smit-p/pdrive/internal/metadata"
 )
 
-// mockDB implements a minimal in-memory provider store for broker tests.
-type mockDB struct {
-	providers []metadata.Provider
-}
-
 func ptr(v int64) *int64 { return &v }
-
-func (m *mockDB) GetAllProviders() ([]metadata.Provider, error) {
-	return m.providers, nil
-}
 
 func TestPFRDWeightedSelection(t *testing.T) {
 	db, _ := metadata.Open(":memory:")
