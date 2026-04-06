@@ -56,6 +56,7 @@ type CloudStorage interface {
 	ListDir(remote, remotePath string) ([]rclonerc.ListItem, error)
 	Cleanup(remote string) error
 	Mkdir(remote, remotePath string) error
+	TransferStats() rclonerc.TransferProgress
 }
 
 const chunkRemoteDir = "pdrive-chunks"
@@ -66,20 +67,28 @@ type uploadProgress struct {
 	TotalChunks    int
 	ChunksUploaded int
 	SizeBytes      int64
+	BytesDone      int64  // encrypted bytes of completed chunks
+	BytesTotal     int64  // total encrypted size (all chunks)
 	StartedAt      time.Time
 	Failed         bool
 	Preparing      bool // true while hashing / spooling, before chunks start
+	// inFlightChunks tracks chunk remote paths currently being uploaded
+	// so we can match them against rclone transfer stats.
+	inFlightChunks map[string]struct{}
 }
 
 // UploadProgressInfo is the exported snapshot of an in-flight upload.
 type UploadProgressInfo struct {
-	VirtualPath    string
-	TotalChunks    int
-	ChunksUploaded int
-	SizeBytes      int64
-	StartedAt      time.Time
-	Failed         bool
-	Preparing      bool
+	VirtualPath    string  `json:"VirtualPath"`
+	TotalChunks    int     `json:"TotalChunks"`
+	ChunksUploaded int     `json:"ChunksUploaded"`
+	SizeBytes      int64   `json:"SizeBytes"`
+	BytesDone      int64   `json:"BytesDone"`
+	BytesTotal     int64   `json:"BytesTotal"`
+	SpeedBPS       float64 `json:"SpeedBPS"`
+	StartedAt      time.Time `json:"StartedAt"`
+	Failed         bool    `json:"Failed"`
+	Preparing      bool    `json:"Preparing"`
 }
 
 // Engine orchestrates file write and read operations.
@@ -578,9 +587,12 @@ func (e *Engine) WriteFileAsync(virtualPath string, tmpFile *os.File, tmpPath st
 // uploadChunks splits the file into chunks, encrypts each to a temp file on
 // disk using streaming encryption (16 MB blocks), and uploads them concurrently.
 // Peak memory is bounded to ~encBlockSize (16 MB) regardless of chunk size.
-// onChunkUploaded, if non-nil, is called after each successful chunk upload.
+// onChunkUploaded, if non-nil, is called with (remotePath, encryptedSize, done):
+//   - done=false at beginning of upload attempt (track as in-flight)
+//   - done=true after successful upload (track bytes completed)
+//
 // Returns the ordered slice of chunk metadata on success.
-func (e *Engine) uploadChunks(r io.ReadSeeker, fileID string, fileSize int64, schedule *chunker.ChunkSchedule, onChunkUploaded func()) ([]chunkMeta, error) {
+func (e *Engine) uploadChunks(r io.ReadSeeker, fileID string, fileSize int64, schedule *chunker.ChunkSchedule, onChunkUploaded func(remotePath string, encSize int64, done bool)) ([]chunkMeta, error) {
 	if schedule == nil {
 		schedule = e.chunkSchedule(fileSize)
 	}
@@ -701,6 +713,9 @@ func (e *Engine) uploadChunks(r io.ReadSeeker, fileID string, fileSize int64, sc
 					lastErr = err
 					continue
 				}
+				if attempt == 0 && onChunkUploaded != nil {
+					onChunkUploaded(remote, encBytes, false) // mark in-flight
+				}
 				<-e.uploadTokens
 				if err := e.rc.PutFile(prov.RcloneRemote, remote, encFile); err != nil {
 					lastErr = err
@@ -712,7 +727,7 @@ func (e *Engine) uploadChunks(r io.ReadSeeker, fileID string, fileSize int64, sc
 				uploaded = append(uploaded, cm)
 				mu.Unlock()
 				if onChunkUploaded != nil {
-					onChunkUploaded()
+					onChunkUploaded(remote, encBytes, true) // mark completed
 				}
 				return // success
 			}
@@ -866,29 +881,53 @@ func (e *Engine) uploadChunksTracked(r io.ReadSeeker, fileID, virtualPath string
 		estimated = 1
 	}
 
+	// Pre-compute total encrypted size for byte-level progress.
+	var bytesTotal int64
+	{
+		rem := fileSize
+		for seq := 0; rem > 0; seq++ {
+			plain := int64(schedule.SizeForSeq(seq))
+			if plain > rem {
+				plain = rem
+			}
+			bytesTotal += plain + chunker.EncStreamOverhead(plain)
+			rem -= plain
+		}
+	}
+
 	e.uploadsMu.Lock()
 	if p, ok := e.uploads[fileID]; ok {
 		// Entry was pre-registered by WriteFileAsync with Preparing=true;
 		// transition to active upload.
 		p.TotalChunks = estimated
+		p.BytesTotal = bytesTotal
 		p.Preparing = false
+		p.inFlightChunks = make(map[string]struct{})
 	} else {
 		// Fallback: WriteFileStream path (no pre-registration).
 		e.uploads[fileID] = &uploadProgress{
-			VirtualPath: virtualPath,
-			TotalChunks: estimated,
-			SizeBytes:   fileSize,
-			StartedAt:   time.Now(),
+			VirtualPath:    virtualPath,
+			TotalChunks:    estimated,
+			SizeBytes:      fileSize,
+			BytesTotal:     bytesTotal,
+			StartedAt:      time.Now(),
+			inFlightChunks: make(map[string]struct{}),
 		}
 	}
 	e.uploadsMu.Unlock()
 
-	callback := func() {
+	callback := func(remotePath string, encSize int64, done bool) {
 		e.uploadsMu.Lock()
 		if p, ok := e.uploads[fileID]; ok {
-			p.ChunksUploaded++
-			if p.ChunksUploaded > p.TotalChunks {
-				p.TotalChunks = p.ChunksUploaded
+			if done {
+				p.ChunksUploaded++
+				p.BytesDone += encSize
+				delete(p.inFlightChunks, remotePath)
+				if p.ChunksUploaded > p.TotalChunks {
+					p.TotalChunks = p.ChunksUploaded
+				}
+			} else {
+				p.inFlightChunks[remotePath] = struct{}{}
 			}
 		}
 		e.uploadsMu.Unlock()
@@ -909,18 +948,35 @@ func (e *Engine) uploadChunksTracked(r io.ReadSeeker, fileID, virtualPath string
 	return metas, nil
 }
 
-// UploadProgress returns a snapshot of all currently in-flight async uploads.
+// UploadProgress returns a snapshot of all currently in-flight async uploads,
+// enriched with real-time transfer speed and in-flight byte counts from rclone.
 func (e *Engine) UploadProgress() []UploadProgressInfo {
+	var stats rclonerc.TransferProgress
+	if e.rc != nil {
+		stats = e.rc.TransferStats()
+	}
+
 	e.uploadsMu.RLock()
 	defer e.uploadsMu.RUnlock()
 
 	out := make([]UploadProgressInfo, 0, len(e.uploads))
 	for _, p := range e.uploads {
+		// Sum bytes of in-flight chunks from rclone transfer stats.
+		var inFlightBytes int64
+		for rp := range p.inFlightChunks {
+			// rclone transfer names use the destination remote path.
+			if b, ok := stats.Transferring[rp]; ok {
+				inFlightBytes += b
+			}
+		}
 		out = append(out, UploadProgressInfo{
 			VirtualPath:    p.VirtualPath,
 			TotalChunks:    p.TotalChunks,
 			ChunksUploaded: p.ChunksUploaded,
 			SizeBytes:      p.SizeBytes,
+			BytesDone:      p.BytesDone + inFlightBytes,
+			BytesTotal:     p.BytesTotal,
+			SpeedBPS:       stats.SpeedBytes,
 			StartedAt:      p.StartedAt,
 			Failed:         p.Failed,
 			Preparing:      p.Preparing,

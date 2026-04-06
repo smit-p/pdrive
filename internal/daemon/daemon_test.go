@@ -82,6 +82,9 @@ func (f *fakeCloud) ListDir(remote, p string) ([]rclonerc.ListItem, error) {
 
 func (f *fakeCloud) Cleanup(remote string) error     { return nil }
 func (f *fakeCloud) Mkdir(remote, path string) error { return nil }
+func (f *fakeCloud) TransferStats() rclonerc.TransferProgress {
+	return rclonerc.TransferProgress{}
+}
 
 // newTestHandlerWithCloud creates a handler backed by a real fakeCloud engine
 // so that file writes/reads succeed end-to-end.

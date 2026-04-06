@@ -134,6 +134,10 @@ func (f *fakeCloud) Mkdir(remote, path string) error {
 	return nil
 }
 
+func (f *fakeCloud) TransferStats() rclonerc.TransferProgress {
+	return rclonerc.TransferProgress{}
+}
+
 // ── test helpers ─────────────────────────────────────────────────────────────
 
 // newTestEngine creates a fully wired Engine backed by a temp-dir SQLite DB
@@ -1301,9 +1305,9 @@ func TestUploadWorkers(t *testing.T) {
 		wantMin   int
 		wantMax   int
 	}{
-		{"small_32MB", 32 << 20, 12, 12},              // 6 GiB / 32 MiB = 192, capped at 12
-		{"medium_1GB", 1 << 30, 6, 6},                 // 6 GiB / 1 GiB = 6
-		{"large_4GB", 4 * 1024 * 1024 * 1024, 2, 2},  // 6 GiB / 4 GiB = 1, clamped to 2
+		{"small_32MB", 32 << 20, 12, 12},            // 6 GiB / 32 MiB = 192, capped at 12
+		{"medium_1GB", 1 << 30, 6, 6},               // 6 GiB / 1 GiB = 6
+		{"large_4GB", 4 * 1024 * 1024 * 1024, 2, 2}, // 6 GiB / 4 GiB = 1, clamped to 2
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

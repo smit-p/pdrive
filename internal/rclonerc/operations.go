@@ -308,6 +308,42 @@ func (c *Client) GetRemoteType(remote string) (string, error) {
 	return "unknown", nil
 }
 
+// TransferProgress holds the current aggregate transfer stats from rclone.
+type TransferProgress struct {
+	SpeedBytes   float64            // aggregate upload speed in bytes/sec
+	Transferring map[string]int64   // name → bytes transferred so far
+}
+
+// TransferStats queries rclone core/stats and returns the current transfer
+// speed and a map of in-flight transfer names to bytes transferred.
+// Non-fatal: returns a zero value on error so callers can degrade gracefully.
+func (c *Client) TransferStats() TransferProgress {
+	result, err := c.call("core/stats", nil)
+	if err != nil {
+		return TransferProgress{}
+	}
+
+	var stats struct {
+		Speed        float64 `json:"speed"`
+		Transferring []struct {
+			Name  string `json:"name"`
+			Bytes int64  `json:"bytes"`
+		} `json:"transferring"`
+	}
+	if err := json.Unmarshal(result, &stats); err != nil {
+		return TransferProgress{}
+	}
+
+	m := make(map[string]int64, len(stats.Transferring))
+	for _, t := range stats.Transferring {
+		m[t.Name] = t.Bytes
+	}
+	return TransferProgress{
+		SpeedBytes:   stats.Speed,
+		Transferring: m,
+	}
+}
+
 // ListRemotes returns all configured rclone remote names.
 func (c *Client) ListRemotes() ([]string, error) {
 	result, err := c.call("config/listremotes", map[string]interface{}{})

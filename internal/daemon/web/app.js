@@ -510,7 +510,8 @@ function refreshUploads(){
     }
     var html='';
     S.uploads.forEach(function(u){
-      var pct=u.TotalChunks>0?Math.min(100,Math.round(u.ChunksUploaded/u.TotalChunks*100)):0;
+      var pct=u.BytesTotal>0?Math.min(100,Math.round(u.BytesDone/u.BytesTotal*100)):
+               (u.TotalChunks>0?Math.min(100,Math.round(u.ChunksUploaded/u.TotalChunks*100)):0);
       var name=u.VirtualPath.split('/').pop();
       var dir=u.VirtualPath.substring(0,u.VirtualPath.lastIndexOf('/'));
       var statusLabel=u.Failed?'✗ failed':u.Preparing?'Preparing…':'';
@@ -522,8 +523,20 @@ function refreshUploads(){
           +'<div class="upload-meta"><span>Preparing… hashing file</span>'
           +'<span>'+fmtSize(u.SizeBytes)+'</span></div></div>';
       } else {
+        var speed=u.SpeedBPS>0?fmtSize(u.SpeedBPS)+'/s':'';
+        var eta='';
+        if(u.SpeedBPS>0&&u.BytesTotal>u.BytesDone){
+          var secs=Math.round((u.BytesTotal-u.BytesDone)/u.SpeedBPS);
+          if(secs<60)eta=secs+'s';
+          else if(secs<3600)eta=Math.floor(secs/60)+'m '+secs%60+'s';
+          else eta=Math.floor(secs/3600)+'h '+Math.floor((secs%3600)/60)+'m';
+        }
+        var detail=pct+'%';
+        if(u.BytesTotal>0)detail+=' · '+fmtSize(u.BytesDone)+' / '+fmtSize(u.BytesTotal);
+        if(speed)detail+=' · '+speed;
+        if(eta)detail+=' · ~'+eta;
         html+='<div class="upload-bar"><div class="upload-bar-fill'+(u.Failed?' fail':'')+'" style="width:'+pct+'%"></div></div>'
-          +'<div class="upload-meta"><span>'+pct+'% · '+u.ChunksUploaded+'/'+u.TotalChunks+' chunks</span>'
+          +'<div class="upload-meta"><span>'+detail+'</span>'
           +'<span>'+fmtSize(u.SizeBytes)+'</span></div></div>';
       }
     });
