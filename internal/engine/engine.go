@@ -186,6 +186,16 @@ func newEngine(db *metadata.DB, dbPath string, rc CloudStorage, b *broker.Broker
 		uploads:      make(map[string]*uploadProgress),
 		closeCh:      make(chan struct{}),
 	}
+	// Seed in-memory counters from persisted DB values.
+	if counters, err := db.LoadCounters(); err == nil {
+		e.filesUploaded.Store(counters["files_uploaded"])
+		e.filesDownloaded.Store(counters["files_downloaded"])
+		e.filesDeleted.Store(counters["files_deleted"])
+		e.chunksUploaded.Store(counters["chunks_uploaded"])
+		e.bytesUploaded.Store(counters["bytes_uploaded"])
+		e.bytesDownloaded.Store(counters["bytes_downloaded"])
+		e.dedupHits.Store(counters["dedup_hits"])
+	}
 	for i := 0; i < burst; i++ {
 		e.uploadTokens <- struct{}{}
 	}
@@ -327,6 +337,12 @@ func (e *Engine) Metrics() MetricsSnapshot {
 	}
 }
 
+// incCounter increments both the in-memory atomic and the persisted DB counter.
+func (e *Engine) incCounter(counter *atomic.Int64, key string, delta int64) {
+	counter.Add(delta)
+	e.db.IncrementCounter(key, delta) //nolint:errcheck
+}
+
 // chunkSize returns the chunk size to use for a file of the given size.
 // Used by WriteFileStream (fixed-size path) and as fallback.
 func (e *Engine) chunkSize(fileSize int64) int {
@@ -458,8 +474,8 @@ func (e *Engine) WriteFileStream(virtualPath string, r io.ReadSeeker, size int64
 		return err
 	}
 	slog.Info("file written", "path", virtualPath, "size", size, "chunks", len(metas))
-	e.filesUploaded.Add(1)
-	e.bytesUploaded.Add(size)
+	e.incCounter(&e.filesUploaded, "files_uploaded", 1)
+	e.incCounter(&e.bytesUploaded, "bytes_uploaded", size)
 	e.scheduleBackup()
 	return nil
 }
@@ -576,8 +592,8 @@ func (e *Engine) WriteFileAsync(virtualPath string, tmpFile *os.File, tmpPath st
 			return
 		}
 		slog.Info("file written", "path", virtualPath, "size", size, "chunks", len(metas))
-		e.filesUploaded.Add(1)
-		e.bytesUploaded.Add(size)
+		e.incCounter(&e.filesUploaded, "files_uploaded", 1)
+		e.incCounter(&e.bytesUploaded, "bytes_uploaded", size)
 		e.db.InsertActivity("upload", virtualPath, fmt.Sprintf("%d bytes", size)) //nolint:errcheck
 		e.scheduleBackup()
 	}()
@@ -722,7 +738,7 @@ func (e *Engine) uploadChunks(r io.ReadSeeker, fileID string, fileSize int64, sc
 					continue
 				}
 				slog.Debug("chunk uploaded", "seq", s, "provider", prov.DisplayName)
-				e.chunksUploaded.Add(1)
+				e.incCounter(&e.chunksUploaded, "chunks_uploaded", 1)
 				mu.Lock()
 				uploaded = append(uploaded, cm)
 				mu.Unlock()
@@ -855,9 +871,9 @@ func (e *Engine) cloneFileFromDonor(donor *metadata.File, fileID, virtualPath st
 	}
 
 	slog.Info("file deduped (cloned from existing)", "path", virtualPath, "donor", donor.VirtualPath, "size", size)
-	e.dedupHits.Add(1)
-	e.filesUploaded.Add(1)
-	e.bytesUploaded.Add(size)
+	e.incCounter(&e.dedupHits, "dedup_hits", 1)
+	e.incCounter(&e.filesUploaded, "files_uploaded", 1)
+	e.incCounter(&e.bytesUploaded, "bytes_uploaded", size)
 	e.scheduleBackup()
 	return nil
 }
@@ -1220,8 +1236,8 @@ func (e *Engine) ReadFileToTempFile(virtualPath string) (*os.File, error) {
 	}
 
 	slog.Info("file read", "path", virtualPath, "size", file.SizeBytes)
-	e.filesDownloaded.Add(1)
-	e.bytesDownloaded.Add(file.SizeBytes)
+	e.incCounter(&e.filesDownloaded, "files_downloaded", 1)
+	e.incCounter(&e.bytesDownloaded, "bytes_downloaded", file.SizeBytes)
 	return tmp, nil
 }
 
@@ -1251,7 +1267,7 @@ func (e *Engine) DeleteFile(virtualPath string) error {
 	}
 
 	slog.Info("file deleted", "path", virtualPath)
-	e.filesDeleted.Add(1)
+	e.incCounter(&e.filesDeleted, "files_deleted", 1)
 	// Immediate backup — deletions are irreversible and must be synced ASAP.
 	go func() {
 		if err := e.BackupDB(); err != nil {

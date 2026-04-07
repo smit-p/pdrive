@@ -198,6 +198,210 @@ func TestNewBroker_DefaultPolicy(t *testing.T) {
 	}
 }
 
+// ── EligibleFreeSpaces tests ────────────────────────────────────────────────
+
+func TestEligibleFreeSpaces_Normal(t *testing.T) {
+	db, _ := metadata.Open(":memory:")
+	defer db.Close()
+	db.UpsertProvider(&metadata.Provider{
+		ID: "a", Type: "drive", DisplayName: "A", RcloneRemote: "a:",
+		QuotaTotalBytes: ptr(100e9), QuotaFreeBytes: ptr(50e9),
+	})
+	db.UpsertProvider(&metadata.Provider{
+		ID: "b", Type: "drive", DisplayName: "B", RcloneRemote: "b:",
+		QuotaTotalBytes: ptr(100e9), QuotaFreeBytes: ptr(30e9),
+	})
+	b := NewBroker(db, PolicyPFRD, 0)
+	spaces, err := b.EligibleFreeSpaces()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(spaces) != 2 {
+		t.Fatalf("got %d spaces, want 2", len(spaces))
+	}
+}
+
+func TestEligibleFreeSpaces_RateLimitedExcluded(t *testing.T) {
+	db, _ := metadata.Open(":memory:")
+	defer db.Close()
+	future := time.Now().Unix() + 3600
+	db.UpsertProvider(&metadata.Provider{
+		ID: "a", Type: "drive", DisplayName: "A", RcloneRemote: "a:",
+		QuotaTotalBytes: ptr(100e9), QuotaFreeBytes: ptr(50e9),
+		RateLimitedUntil: &future,
+	})
+	db.UpsertProvider(&metadata.Provider{
+		ID: "b", Type: "drive", DisplayName: "B", RcloneRemote: "b:",
+		QuotaTotalBytes: ptr(100e9), QuotaFreeBytes: ptr(30e9),
+	})
+	b := NewBroker(db, PolicyPFRD, 0)
+	spaces, err := b.EligibleFreeSpaces()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(spaces) != 1 {
+		t.Fatalf("got %d spaces, want 1 (rate-limited provider excluded)", len(spaces))
+	}
+	if spaces[0] != int64(30e9) {
+		t.Errorf("got space %d, want %d", spaces[0], int64(30e9))
+	}
+}
+
+func TestEligibleFreeSpaces_NilQuotaExcluded(t *testing.T) {
+	db, _ := metadata.Open(":memory:")
+	defer db.Close()
+	db.UpsertProvider(&metadata.Provider{
+		ID: "a", Type: "drive", DisplayName: "A", RcloneRemote: "a:",
+		QuotaTotalBytes: ptr(100e9), // QuotaFreeBytes is nil
+	})
+	b := NewBroker(db, PolicyPFRD, 0)
+	spaces, err := b.EligibleFreeSpaces()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(spaces) != 0 {
+		t.Fatalf("got %d spaces, want 0 (nil QuotaFreeBytes excluded)", len(spaces))
+	}
+}
+
+func TestEligibleFreeSpaces_BelowThresholdExcluded(t *testing.T) {
+	db, _ := metadata.Open(":memory:")
+	defer db.Close()
+	db.UpsertProvider(&metadata.Provider{
+		ID: "a", Type: "drive", DisplayName: "A", RcloneRemote: "a:",
+		QuotaTotalBytes: ptr(1e9), QuotaFreeBytes: ptr(100 * 1024 * 1024), // 100 MB
+	})
+	db.UpsertProvider(&metadata.Provider{
+		ID: "b", Type: "drive", DisplayName: "B", RcloneRemote: "b:",
+		QuotaTotalBytes: ptr(1e9), QuotaFreeBytes: ptr(500 * 1024 * 1024), // 500 MB
+	})
+	b := NewBroker(db, PolicyPFRD, 256*1024*1024) // min 256 MB
+	spaces, err := b.EligibleFreeSpaces()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Only provider b (500 MB) should pass; a (100 MB) <= 256 MB threshold
+	if len(spaces) != 1 {
+		t.Fatalf("got %d spaces, want 1", len(spaces))
+	}
+}
+
+func TestEligibleFreeSpaces_NoProviders(t *testing.T) {
+	db, _ := metadata.Open(":memory:")
+	defer db.Close()
+	b := NewBroker(db, PolicyPFRD, 0)
+	spaces, err := b.EligibleFreeSpaces()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(spaces) != 0 {
+		t.Fatalf("got %d spaces, want 0", len(spaces))
+	}
+}
+
+// ── TotalFreeSpace tests ────────────────────────────────────────────────────
+
+func TestTotalFreeSpace_Normal(t *testing.T) {
+	db, _ := metadata.Open(":memory:")
+	defer db.Close()
+	db.UpsertProvider(&metadata.Provider{
+		ID: "a", Type: "drive", DisplayName: "A", RcloneRemote: "a:",
+		QuotaTotalBytes: ptr(100e9), QuotaFreeBytes: ptr(50e9),
+	})
+	db.UpsertProvider(&metadata.Provider{
+		ID: "b", Type: "drive", DisplayName: "B", RcloneRemote: "b:",
+		QuotaTotalBytes: ptr(100e9), QuotaFreeBytes: ptr(30e9),
+	})
+	b := NewBroker(db, PolicyPFRD, 0)
+	total, err := b.TotalFreeSpace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := int64(50e9) + int64(30e9)
+	if total != want {
+		t.Errorf("total = %d, want %d", total, want)
+	}
+}
+
+func TestTotalFreeSpace_RateLimitedExcluded(t *testing.T) {
+	db, _ := metadata.Open(":memory:")
+	defer db.Close()
+	future := time.Now().Unix() + 3600
+	db.UpsertProvider(&metadata.Provider{
+		ID: "a", Type: "drive", DisplayName: "A", RcloneRemote: "a:",
+		QuotaTotalBytes: ptr(100e9), QuotaFreeBytes: ptr(50e9),
+		RateLimitedUntil: &future,
+	})
+	db.UpsertProvider(&metadata.Provider{
+		ID: "b", Type: "drive", DisplayName: "B", RcloneRemote: "b:",
+		QuotaTotalBytes: ptr(100e9), QuotaFreeBytes: ptr(30e9),
+	})
+	b := NewBroker(db, PolicyPFRD, 0)
+	total, err := b.TotalFreeSpace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// a is rate-limited, so only b's 30e9 is counted
+	if total != int64(30e9) {
+		t.Errorf("total = %d, want %d", total, int64(30e9))
+	}
+}
+
+func TestTotalFreeSpace_NilQuotaSkipped(t *testing.T) {
+	db, _ := metadata.Open(":memory:")
+	defer db.Close()
+	db.UpsertProvider(&metadata.Provider{
+		ID: "a", Type: "drive", DisplayName: "A", RcloneRemote: "a:",
+		QuotaTotalBytes: ptr(100e9), // QuotaFreeBytes nil
+	})
+	db.UpsertProvider(&metadata.Provider{
+		ID: "b", Type: "drive", DisplayName: "B", RcloneRemote: "b:",
+		QuotaTotalBytes: ptr(100e9), QuotaFreeBytes: ptr(30e9),
+	})
+	b := NewBroker(db, PolicyPFRD, 0)
+	total, err := b.TotalFreeSpace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != int64(30e9) {
+		t.Errorf("total = %d, want %d", total, int64(30e9))
+	}
+}
+
+func TestTotalFreeSpace_NoProviders(t *testing.T) {
+	db, _ := metadata.Open(":memory:")
+	defer db.Close()
+	b := NewBroker(db, PolicyPFRD, 0)
+	total, err := b.TotalFreeSpace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 0 {
+		t.Errorf("total = %d, want 0", total)
+	}
+}
+
+// ── pickPFRD edge case ──────────────────────────────────────────────────────
+
+func TestPickPFRD_SingleCandidate(t *testing.T) {
+	db, _ := metadata.Open(":memory:")
+	defer db.Close()
+	db.UpsertProvider(&metadata.Provider{
+		ID: "only", Type: "drive", DisplayName: "Only", RcloneRemote: "only:",
+		QuotaTotalBytes: ptr(100e9), QuotaFreeBytes: ptr(50e9),
+	})
+	b := NewBroker(db, PolicyPFRD, 0)
+	for i := 0; i < 100; i++ {
+		id, err := b.AssignChunk(1024)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if id != "only" {
+			t.Fatalf("expected 'only', got %s", id)
+		}
+	}
+}
+
 // TestPickPFRD_ZeroFreeSpace tests the totalFree <= 0 fallback in pickPFRD.
 func TestPickPFRD_ZeroFreeSpace(t *testing.T) {
 	db, _ := metadata.Open(":memory:")
@@ -277,6 +481,170 @@ func TestAssignChunk_DBError(t *testing.T) {
 	db.Close() // close immediately to trigger query error
 	b := NewBroker(db, PolicyPFRD, 0)
 	_, err := b.AssignChunk(1024)
+	if err == nil {
+		t.Fatal("expected error for closed DB")
+	}
+}
+
+// ── EligibleFreeSpaces ──────────────────────────────────────────────────────
+
+func TestEligibleFreeSpaces_Basic(t *testing.T) {
+	db, _ := metadata.Open(":memory:")
+	defer db.Close()
+	db.UpsertProvider(&metadata.Provider{
+		ID: "a", Type: "gdrive", DisplayName: "A", RcloneRemote: "a:",
+		QuotaTotalBytes: ptr(100e9), QuotaFreeBytes: ptr(50e9),
+	})
+	db.UpsertProvider(&metadata.Provider{
+		ID: "b", Type: "dropbox", DisplayName: "B", RcloneRemote: "b:",
+		QuotaTotalBytes: ptr(100e9), QuotaFreeBytes: ptr(30e9),
+	})
+	b := NewBroker(db, PolicyPFRD, 0)
+	spaces, err := b.EligibleFreeSpaces()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(spaces) != 2 {
+		t.Fatalf("expected 2 spaces, got %d", len(spaces))
+	}
+}
+
+func TestEligibleFreeSpaces_FiltersRateLimited(t *testing.T) {
+	db, _ := metadata.Open(":memory:")
+	defer db.Close()
+	future := time.Now().Add(time.Hour).Unix()
+	db.UpsertProvider(&metadata.Provider{
+		ID: "rl", Type: "gdrive", DisplayName: "RL", RcloneRemote: "rl:",
+		QuotaTotalBytes: ptr(100e9), QuotaFreeBytes: ptr(50e9),
+		RateLimitedUntil: &future,
+	})
+	db.UpsertProvider(&metadata.Provider{
+		ID: "ok", Type: "dropbox", DisplayName: "OK", RcloneRemote: "ok:",
+		QuotaTotalBytes: ptr(100e9), QuotaFreeBytes: ptr(30e9),
+	})
+	b := NewBroker(db, PolicyPFRD, 0)
+	spaces, err := b.EligibleFreeSpaces()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(spaces) != 1 {
+		t.Fatalf("expected 1 space (rate-limited excluded), got %d", len(spaces))
+	}
+}
+
+func TestEligibleFreeSpaces_FiltersNilQuota(t *testing.T) {
+	db, _ := metadata.Open(":memory:")
+	defer db.Close()
+	db.UpsertProvider(&metadata.Provider{
+		ID: "nq", Type: "gdrive", DisplayName: "NQ", RcloneRemote: "nq:",
+		QuotaTotalBytes: ptr(100e9), QuotaFreeBytes: nil,
+	})
+	b := NewBroker(db, PolicyPFRD, 0)
+	spaces, err := b.EligibleFreeSpaces()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(spaces) != 0 {
+		t.Errorf("expected 0 spaces for nil quota, got %d", len(spaces))
+	}
+}
+
+func TestEligibleFreeSpaces_FiltersMinFreeSpace(t *testing.T) {
+	db, _ := metadata.Open(":memory:")
+	defer db.Close()
+	db.UpsertProvider(&metadata.Provider{
+		ID: "small", Type: "gdrive", DisplayName: "Small", RcloneRemote: "s:",
+		QuotaTotalBytes: ptr(100e9), QuotaFreeBytes: ptr(1e9),
+	})
+	b := NewBroker(db, PolicyPFRD, int64(5e9))
+	spaces, err := b.EligibleFreeSpaces()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(spaces) != 0 {
+		t.Errorf("expected 0 (below min free), got %d", len(spaces))
+	}
+}
+
+func TestEligibleFreeSpaces_DBError(t *testing.T) {
+	db, _ := metadata.Open(":memory:")
+	db.Close()
+	b := NewBroker(db, PolicyPFRD, 0)
+	_, err := b.EligibleFreeSpaces()
+	if err == nil {
+		t.Fatal("expected error for closed DB")
+	}
+}
+
+// ── TotalFreeSpace ──────────────────────────────────────────────────────────
+
+func TestTotalFreeSpace_Basic(t *testing.T) {
+	db, _ := metadata.Open(":memory:")
+	defer db.Close()
+	db.UpsertProvider(&metadata.Provider{
+		ID: "a", Type: "gdrive", DisplayName: "A", RcloneRemote: "a:",
+		QuotaTotalBytes: ptr(100e9), QuotaFreeBytes: ptr(50e9),
+	})
+	db.UpsertProvider(&metadata.Provider{
+		ID: "b", Type: "dropbox", DisplayName: "B", RcloneRemote: "b:",
+		QuotaTotalBytes: ptr(100e9), QuotaFreeBytes: ptr(30e9),
+	})
+	b := NewBroker(db, PolicyPFRD, 0)
+	total, err := b.TotalFreeSpace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := int64(80e9)
+	if total != expected {
+		t.Errorf("expected %d, got %d", expected, total)
+	}
+}
+
+func TestTotalFreeSpace_ExcludesRateLimited(t *testing.T) {
+	db, _ := metadata.Open(":memory:")
+	defer db.Close()
+	future := time.Now().Add(time.Hour).Unix()
+	db.UpsertProvider(&metadata.Provider{
+		ID: "rl", Type: "gdrive", DisplayName: "RL", RcloneRemote: "rl:",
+		QuotaTotalBytes: ptr(100e9), QuotaFreeBytes: ptr(50e9),
+		RateLimitedUntil: &future,
+	})
+	db.UpsertProvider(&metadata.Provider{
+		ID: "ok", Type: "dropbox", DisplayName: "OK", RcloneRemote: "ok:",
+		QuotaTotalBytes: ptr(100e9), QuotaFreeBytes: ptr(30e9),
+	})
+	b := NewBroker(db, PolicyPFRD, 0)
+	total, err := b.TotalFreeSpace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != int64(30e9) {
+		t.Errorf("expected 30GB (rate-limited excluded), got %d", total)
+	}
+}
+
+func TestTotalFreeSpace_NilQuota(t *testing.T) {
+	db, _ := metadata.Open(":memory:")
+	defer db.Close()
+	db.UpsertProvider(&metadata.Provider{
+		ID: "nq", Type: "gdrive", DisplayName: "NQ", RcloneRemote: "nq:",
+		QuotaTotalBytes: ptr(100e9), QuotaFreeBytes: nil,
+	})
+	b := NewBroker(db, PolicyPFRD, 0)
+	total, err := b.TotalFreeSpace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 0 {
+		t.Errorf("expected 0 for nil quota, got %d", total)
+	}
+}
+
+func TestTotalFreeSpace_DBError(t *testing.T) {
+	db, _ := metadata.Open(":memory:")
+	db.Close()
+	b := NewBroker(db, PolicyPFRD, 0)
+	_, err := b.TotalFreeSpace()
 	if err == nil {
 		t.Fatal("expected error for closed DB")
 	}

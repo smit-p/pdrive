@@ -79,12 +79,15 @@ func (c *Client) PutFile(remote, remotePath string, data io.Reader) error {
 
 	// Launch as an async rclone job so the HTTP call returns immediately
 	// and we are not subject to HTTP client timeouts for slow uploads.
+	// Use _group so transfer stats are queryable in a single stats group
+	// rather than being isolated per-job.
 	result, err := c.call("operations/copyfile", map[string]interface{}{
 		"srcFs":     tmpDir + "/",
 		"srcRemote": base,
 		"dstFs":     ensureColon(remote),
 		"dstRemote": remotePath,
 		"_async":    true,
+		"_group":    "pdrive",
 	})
 	if err != nil {
 		return fmt.Errorf("starting async upload: %w", err)
@@ -316,30 +319,49 @@ type TransferProgress struct {
 
 // TransferStats queries rclone core/stats and returns the current transfer
 // speed and a map of in-flight transfer names to bytes transferred.
+// Queries both the default and "pdrive" stat groups so that async job
+// transfers (which use _group:"pdrive") are included.
 // Non-fatal: returns a zero value on error so callers can degrade gracefully.
 func (c *Client) TransferStats() TransferProgress {
-	result, err := c.call("core/stats", nil)
-	if err != nil {
-		return TransferProgress{}
-	}
-
-	var stats struct {
+	type statsResponse struct {
 		Speed        float64 `json:"speed"`
 		Transferring []struct {
 			Name  string `json:"name"`
 			Bytes int64  `json:"bytes"`
 		} `json:"transferring"`
 	}
-	if err := json.Unmarshal(result, &stats); err != nil {
-		return TransferProgress{}
+
+	var speed float64
+	m := make(map[string]int64)
+
+	// Query default global group for aggregate speed.
+	if result, err := c.call("core/stats", nil); err == nil {
+		var stats statsResponse
+		if json.Unmarshal(result, &stats) == nil {
+			speed = stats.Speed
+			for _, t := range stats.Transferring {
+				m[t.Name] = t.Bytes
+			}
+		}
 	}
 
-	m := make(map[string]int64, len(stats.Transferring))
-	for _, t := range stats.Transferring {
-		m[t.Name] = t.Bytes
+	// Query the "pdrive" group where async upload jobs report their transfers.
+	if result, err := c.call("core/stats", map[string]interface{}{"group": "pdrive"}); err == nil {
+		var stats statsResponse
+		if json.Unmarshal(result, &stats) == nil {
+			if stats.Speed > speed {
+				speed = stats.Speed
+			}
+			for _, t := range stats.Transferring {
+				if existing, ok := m[t.Name]; !ok || t.Bytes > existing {
+					m[t.Name] = t.Bytes
+				}
+			}
+		}
 	}
+
 	return TransferProgress{
-		SpeedBytes:   stats.Speed,
+		SpeedBytes:   speed,
 		Transferring: m,
 	}
 }

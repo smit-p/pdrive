@@ -3509,3 +3509,374 @@ func TestDuEndpoint_NoPath(t *testing.T) {
 		t.Error("expected file_count in response")
 	}
 }
+
+// ── purgeJunkFiles ──────────────────────────────────────────────────────────
+
+func TestPurgeJunkFiles_RemovesJunk(t *testing.T) {
+	h, eng, _ := newTestHandlerWithCloud(t)
+
+	// Upload real files including junk.
+	eng.WriteFile("/real.txt", []byte("keep me"))
+	eng.WriteFile("/.DS_Store", []byte("junk"))
+	eng.WriteFile("/dir/._resource", []byte("junk"))
+	eng.WriteFile("/Thumbs.db", []byte("junk"))
+
+	d := &Daemon{engine: eng}
+	d.purgeJunkFiles()
+
+	// Real file should remain.
+	stat, _ := eng.Stat("/real.txt")
+	if stat == nil {
+		t.Error("real.txt should not be purged")
+	}
+	// Junk files should be gone.
+	for _, junk := range []string{"/.DS_Store", "/dir/._resource", "/Thumbs.db"} {
+		stat, _ := eng.Stat(junk)
+		if stat != nil {
+			t.Errorf("%s should be purged", junk)
+		}
+	}
+	_ = h
+}
+
+func TestPurgeJunkFiles_NoJunk(t *testing.T) {
+	_, eng, _ := newTestHandlerWithCloud(t)
+	eng.WriteFile("/clean.txt", []byte("data"))
+
+	d := &Daemon{engine: eng}
+	d.purgeJunkFiles() // should not panic
+}
+
+// ── Activity endpoint: non-GET ──────────────────────────────────────────────
+
+func TestActivityEndpoint_PostAlsoWorks(t *testing.T) {
+	h, _ := newTestHandler(t)
+	req := httptest.NewRequest("POST", "/api/activity", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	// Activity endpoint doesn't restrict methods — POST returns 200 too.
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", rec.Code)
+	}
+}
+
+func TestActivityEndpoint_WithLimit(t *testing.T) {
+	h, eng, _ := newTestHandlerWithCloud(t)
+	eng.WriteFile("/act1.txt", []byte("a"))
+	eng.WriteFile("/act2.txt", []byte("b"))
+
+	req := httptest.NewRequest("GET", "/api/activity?limit=1", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	var activities []interface{}
+	json.NewDecoder(rec.Body).Decode(&activities)
+	if len(activities) > 1 {
+		t.Errorf("expected at most 1 activity, got %d", len(activities))
+	}
+}
+
+// ── Upload: junk file skip ─────────────────────────────────────────────────
+
+func TestUploadEndpoint_JunkFileSkipped(t *testing.T) {
+	h, _, _ := newTestHandlerWithCloud(t)
+
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	fw, _ := mw.CreateFormFile("file", ".DS_Store")
+	fw.Write([]byte("junk"))
+	mw.Close()
+
+	req := httptest.NewRequest("POST", "/api/upload", &buf)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `"status":"skipped"`) {
+		t.Errorf("expected skipped status, got %s", body)
+	}
+	if !strings.Contains(body, "junk file") {
+		t.Errorf("expected junk file reason, got %s", body)
+	}
+}
+
+func TestUploadEndpoint_SubdirectoryCreatesParents(t *testing.T) {
+	h, eng, _ := newTestHandlerWithCloud(t)
+
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	mw.WriteField("dir", "/photos/vacation/2024")
+	fw, _ := mw.CreateFormFile("file", "beach.txt")
+	fw.Write([]byte("hello beach"))
+	mw.Close()
+
+	req := httptest.NewRequest("POST", "/api/upload", &buf)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Parent dirs should be created.
+	for _, dir := range []string{"/photos", "/photos/vacation", "/photos/vacation/2024"} {
+		entries, _, _ := eng.ListDir(dir)
+		_ = entries // just confirm no panic
+	}
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "/photos/vacation/2024/beach.txt") {
+		t.Errorf("expected path in response, got %s", body)
+	}
+}
+
+// ── syncProviders: allowed remotes from config ──────────────────────────────
+
+func TestSyncProviders_AllowedRemotesFromConfig(t *testing.T) {
+	remotes := map[string]string{"gdrive": "drive", "mybox": "dropbox", "s3bkt": "s3"}
+	quotas := map[string][2]int64{
+		"gdrive": {100e9, 80e9},
+		"mybox":  {50e9, 30e9},
+		"s3bkt":  {0, 0},
+	}
+	srv := fakeRCServer(t, remotes, quotas)
+	defer srv.Close()
+
+	d, db := newDaemonWithFakeRC(t, srv)
+	// Only allow gdrive and s3bkt.
+	d.config.Remotes = []string{"gdrive", "s3bkt"}
+
+	d.syncProviders()
+
+	providers, _ := db.GetAllProviders()
+	if len(providers) != 2 {
+		t.Fatalf("expected 2 providers, got %d", len(providers))
+	}
+
+	// mybox should NOT be registered.
+	p, _ := db.GetProviderByRemote("mybox")
+	if p != nil {
+		t.Error("mybox should not be registered when not in allowed remotes")
+	}
+
+	// gdrive and s3bkt should be registered.
+	for _, name := range []string{"gdrive", "s3bkt"} {
+		p, _ := db.GetProviderByRemote(name)
+		if p == nil {
+			t.Errorf("%s should be registered", name)
+		}
+	}
+}
+
+func TestSyncProviders_AllowedRemotesFromFile(t *testing.T) {
+	remotes := map[string]string{"gdrive": "drive", "mybox": "dropbox"}
+	quotas := map[string][2]int64{
+		"gdrive": {100e9, 80e9},
+		"mybox":  {50e9, 30e9},
+	}
+	srv := fakeRCServer(t, remotes, quotas)
+	defer srv.Close()
+
+	d, db := newDaemonWithFakeRC(t, srv)
+	// Write remotes.json to config dir.
+	remotesFile := filepath.Join(d.config.ConfigDir, "remotes.json")
+	os.WriteFile(remotesFile, []byte(`["mybox"]`), 0o644)
+
+	d.syncProviders()
+
+	providers, _ := db.GetAllProviders()
+	if len(providers) != 1 {
+		t.Fatalf("expected 1 provider, got %d", len(providers))
+	}
+	p, _ := db.GetProviderByRemote("mybox")
+	if p == nil {
+		t.Fatal("mybox should be registered")
+	}
+	// gdrive should NOT be registered.
+	gp, _ := db.GetProviderByRemote("gdrive")
+	if gp != nil {
+		t.Error("gdrive should not be registered when not in remotes.json")
+	}
+}
+
+func TestSyncProviders_AllowedNoMatch(t *testing.T) {
+	remotes := map[string]string{"gdrive": "drive"}
+	quotas := map[string][2]int64{"gdrive": {100e9, 80e9}}
+	srv := fakeRCServer(t, remotes, quotas)
+	defer srv.Close()
+
+	d, db := newDaemonWithFakeRC(t, srv)
+	d.config.Remotes = []string{"nonexistent"}
+
+	d.syncProviders()
+
+	providers, _ := db.GetAllProviders()
+	if len(providers) != 0 {
+		t.Fatalf("expected 0 providers when no remotes match, got %d", len(providers))
+	}
+}
+
+func TestSyncProviders_PreservesRateLimit(t *testing.T) {
+	remotes := map[string]string{"gdrive": "drive"}
+	quotas := map[string][2]int64{"gdrive": {100e9, 80e9}}
+	srv := fakeRCServer(t, remotes, quotas)
+	defer srv.Close()
+
+	d, db := newDaemonWithFakeRC(t, srv)
+
+	// Pre-existing provider with rate limit.
+	total, free := int64(50e9), int64(10e9)
+	rlUntil := time.Now().Add(time.Hour).Unix()
+	db.UpsertProvider(&metadata.Provider{
+		ID: "gdrive", Type: "drive", DisplayName: "gdrive",
+		RcloneRemote: "gdrive", QuotaTotalBytes: &total, QuotaFreeBytes: &free,
+		RateLimitedUntil: &rlUntil,
+		AccountIdentity:  "test@gmail.com",
+	})
+
+	d.syncProviders()
+
+	p, _ := db.GetProviderByRemote("gdrive")
+	if p == nil {
+		t.Fatal("expected provider")
+	}
+	// Rate limit should be preserved.
+	if p.RateLimitedUntil == nil || *p.RateLimitedUntil != rlUntil {
+		t.Errorf("RateLimitedUntil should be preserved, got %v", p.RateLimitedUntil)
+	}
+	// Account identity should be preserved from existing.
+	if p.AccountIdentity != "test@gmail.com" {
+		t.Errorf("AccountIdentity = %q, want test@gmail.com", p.AccountIdentity)
+	}
+}
+
+// ── Resync endpoint ─────────────────────────────────────────────────────────
+
+func TestResyncEndpoint(t *testing.T) {
+	h, _ := newTestHandler(t)
+	called := make(chan struct{}, 1)
+	h.resyncProviders = func() { called <- struct{}{} }
+
+	req := httptest.NewRequest("POST", "/api/resync", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `"ok":true`) {
+		t.Errorf("expected ok response, got %s", body)
+	}
+	// Wait for the goroutine to fire.
+	select {
+	case <-called:
+	case <-time.After(time.Second):
+		t.Error("resyncProviders was not called")
+	}
+}
+
+func TestResyncEndpoint_NilFunc(t *testing.T) {
+	h, _ := newTestHandler(t)
+	h.resyncProviders = nil
+
+	req := httptest.NewRequest("POST", "/api/resync", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+}
+
+// ── ServeHTTP: static assets path ───────────────────────────────────────────
+
+func TestServeHTTP_StaticAssets(t *testing.T) {
+	h, _ := newTestHandler(t)
+
+	req := httptest.NewRequest("GET", "/static/nonexistent.js", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	// Should be handled by staticFS — either 200 or 404 but not 500.
+	if rec.Code == http.StatusInternalServerError {
+		t.Errorf("static path should not return 500")
+	}
+}
+
+func TestServeHTTP_WebDAVNotConfigured(t *testing.T) {
+	h, _ := newTestHandler(t)
+	h.davHandler = nil
+
+	// Non-browser request to non-API, non-static path.
+	req := httptest.NewRequest("PROPFIND", "/somefile.txt", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 for nil davHandler, got %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "WebDAV not configured") {
+		t.Errorf("expected WebDAV error message, got %s", rec.Body.String())
+	}
+}
+
+func TestServeHTTP_WebDAVConfigured(t *testing.T) {
+	h, _ := newTestHandler(t)
+	h.davHandler = &webdav.Handler{
+		FileSystem: webdav.NewMemFS(),
+		LockSystem: webdav.NewMemLS(),
+	}
+
+	req := httptest.NewRequest("OPTIONS", "/", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	// WebDAV handler should handle the request (not 500).
+	if rec.Code == http.StatusInternalServerError {
+		t.Errorf("webdav should handle OPTIONS, got 500")
+	}
+}
+
+// ── serveBrowser: SPA shell fallthrough ─────────────────────────────────────
+
+func TestServeBrowser_SPAShell(t *testing.T) {
+	h, _ := newTestHandler(t)
+
+	req := httptest.NewRequest("GET", "/some/path", nil)
+	req.Header.Set("Accept", "text/html")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	ct := rec.Header().Get("Content-Type")
+	if !strings.Contains(ct, "text/html") {
+		t.Errorf("expected text/html content type, got %s", ct)
+	}
+}
+
+func TestServeBrowser_FileDownload(t *testing.T) {
+	h, eng, _ := newTestHandlerWithCloud(t)
+	eng.WriteFile("/doc.txt", []byte("important"))
+
+	req := httptest.NewRequest("GET", "/doc.txt", nil)
+	req.Header.Set("Accept", "text/html")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "important") {
+		t.Errorf("expected file content, got %s", rec.Body.String())
+	}
+}

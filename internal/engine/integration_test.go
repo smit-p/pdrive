@@ -29,9 +29,7 @@ func TestIntegration_UploadDeleteGCCleansChunks(t *testing.T) {
 	}
 
 	// Verify chunks exist in cloud.
-	cloud.mu.Lock()
-	chunksBeforeDelete := countNonMeta(cloud.objects)
-	cloud.mu.Unlock()
+	chunksBeforeDelete := countNonMeta(cloud)
 	if chunksBeforeDelete == 0 {
 		t.Fatal("expected cloud chunks after upload")
 	}
@@ -45,9 +43,7 @@ func TestIntegration_UploadDeleteGCCleansChunks(t *testing.T) {
 	eng.GCOrphanedChunks()
 
 	// Cloud should have fewer objects (chunks removed).
-	cloud.mu.Lock()
-	chunksAfterGC := countNonMeta(cloud.objects)
-	cloud.mu.Unlock()
+	chunksAfterGC := countNonMeta(cloud)
 	if chunksAfterGC >= chunksBeforeDelete {
 		t.Errorf("GC didn't clean up: before=%d, after=%d", chunksBeforeDelete, chunksAfterGC)
 	}
@@ -253,9 +249,7 @@ func TestIntegration_DedupDeleteBothThenGC(t *testing.T) {
 	eng.WriteFileStream("/dedup-gc/first.txt", bytes.NewReader(content), int64(len(content)))
 	eng.WriteFileStream("/dedup-gc/second.txt", bytes.NewReader(content), int64(len(content)))
 
-	cloud.mu.Lock()
-	chunksBefore := countNonMeta(cloud.objects)
-	cloud.mu.Unlock()
+	chunksBefore := countNonMeta(cloud)
 
 	// Delete both files.
 	eng.DeleteFile("/dedup-gc/first.txt")
@@ -264,9 +258,7 @@ func TestIntegration_DedupDeleteBothThenGC(t *testing.T) {
 	// GC should remove orphaned chunks.
 	eng.GCOrphanedChunks()
 
-	cloud.mu.Lock()
-	chunksAfterGC := countNonMeta(cloud.objects)
-	cloud.mu.Unlock()
+	chunksAfterGC := countNonMeta(cloud)
 
 	if chunksAfterGC >= chunksBefore {
 		t.Errorf("GC didn't clean chunks after both dedup files deleted: before=%d, after=%d",

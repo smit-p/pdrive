@@ -809,11 +809,11 @@ func (db *DB) DiskUsage(root string) (int64, int64, error) {
 // ActivityEntry represents a row in the activity_log table, which tracks
 // user-visible actions (uploads, downloads, deletes, etc.) for the UI.
 type ActivityEntry struct {
-	ID        int64
-	Action    string
-	Path      string
-	Detail    string
-	CreatedAt int64
+	ID        int64  `json:"id"`
+	Action    string `json:"action"`
+	Path      string `json:"path"`
+	Detail    string `json:"detail"`
+	CreatedAt int64  `json:"created_at"`
 }
 
 // InsertActivity logs an action to the activity_log table.
@@ -847,4 +847,33 @@ func (db *DB) RecentActivity(limit int) ([]ActivityEntry, error) {
 		entries = append(entries, e)
 	}
 	return entries, rows.Err()
+}
+
+// IncrementCounter atomically increments a named counter by delta.
+func (db *DB) IncrementCounter(key string, delta int64) error {
+	_, err := db.conn.Exec(
+		`INSERT INTO counters (key, value) VALUES (?, ?)
+		 ON CONFLICT(key) DO UPDATE SET value = value + excluded.value`,
+		key, delta,
+	)
+	return err
+}
+
+// LoadCounters returns all persisted counters as a key→value map.
+func (db *DB) LoadCounters() (map[string]int64, error) {
+	rows, err := db.conn.Query(`SELECT key, value FROM counters`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	m := make(map[string]int64)
+	for rows.Next() {
+		var k string
+		var v int64
+		if err := rows.Scan(&k, &v); err != nil {
+			return nil, err
+		}
+		m[k] = v
+	}
+	return m, rows.Err()
 }

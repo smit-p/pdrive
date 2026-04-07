@@ -77,6 +77,7 @@ func Open(dbPath string) (*DB, error) {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_chunk_locations_remote_path ON chunk_locations(remote_path)`,
 		`ALTER TABLE providers ADD COLUMN account_identity TEXT NOT NULL DEFAULT ''`,
+		`CREATE TABLE IF NOT EXISTS counters (key TEXT PRIMARY KEY, value INTEGER NOT NULL DEFAULT 0)`,
 	}
 	for _, m := range migrations {
 		// SQLite returns an error if the column already exists; ignore it.

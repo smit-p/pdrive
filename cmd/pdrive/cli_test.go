@@ -2586,3 +2586,472 @@ func TestRunLs_SortMultipleFiles(t *testing.T) {
 		t.Errorf("files not sorted: alpha@%d middle@%d zebra@%d\n%s", alphaIdx, middleIdx, zebraIdx, output)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// pluralS
+// ---------------------------------------------------------------------------
+
+func TestPluralS(t *testing.T) {
+	tests := []struct {
+		n    int
+		want string
+	}{
+		{0, "s"},
+		{1, ""},
+		{2, "s"},
+		{100, "s"},
+	}
+	for _, tt := range tests {
+		if got := pluralS(tt.n); got != tt.want {
+			t.Errorf("pluralS(%d) = %q, want %q", tt.n, got, tt.want)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// fmtProviderDetail
+// ---------------------------------------------------------------------------
+
+func TestFmtProviderDetail(t *testing.T) {
+	tests := []struct {
+		name string
+		p    cliStatusProvider
+		want string
+	}{
+		{"both", cliStatusProvider{AccountIdentity: "alice@gmail.com", Type: "drive"}, "(alice@gmail.com, drive)"},
+		{"identity only", cliStatusProvider{AccountIdentity: "bob@icloud.com"}, "(bob@icloud.com)"},
+		{"type only", cliStatusProvider{Type: "dropbox"}, "(dropbox)"},
+		{"neither", cliStatusProvider{}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := fmtProviderDetail(tt.p); got != tt.want {
+				t.Errorf("fmtProviderDetail() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// showRecentLogErrors
+// ---------------------------------------------------------------------------
+
+func TestShowRecentLogErrors_MissingFile(t *testing.T) {
+	// Should not panic when log file doesn't exist.
+	output := captureStderr(t, func() { showRecentLogErrors("/nonexistent/daemon.log") })
+	_ = output // no output expected, just no panic
+}
+
+func TestShowRecentLogErrors_NoErrors(t *testing.T) {
+	tmpFile := filepath.Join(t.TempDir(), "daemon.log")
+	os.WriteFile(tmpFile, []byte("INFO: all good\nDEBUG: fine\n"), 0644)
+	output := captureStderr(t, func() { showRecentLogErrors(tmpFile) })
+	_ = output
+}
+
+func TestShowRecentLogErrors_WithErrors(t *testing.T) {
+	tmpFile := filepath.Join(t.TempDir(), "daemon.log")
+	os.WriteFile(tmpFile, []byte("INFO: ok\nlevel=ERROR msg=\"something broke\"\nINFO: resumed\n"), 0644)
+	output := captureStderr(t, func() { showRecentLogErrors(tmpFile) })
+	if !strings.Contains(output, "something broke") {
+		t.Errorf("expected error line in output:\n%s", output)
+	}
+}
+
+// ── remotesConfigPath / loadRemotesConfig / saveRemotesConfig ───────────────
+
+func TestRemotesConfigPath(t *testing.T) {
+	got := remotesConfigPath("/some/dir")
+	want := filepath.Join("/some/dir", "remotes.json")
+	if got != want {
+		t.Errorf("remotesConfigPath = %q, want %q", got, want)
+	}
+}
+
+func TestLoadRemotesConfig_NoFile(t *testing.T) {
+	dir := t.TempDir()
+	remotes, err := loadRemotesConfig(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if remotes != nil {
+		t.Errorf("expected nil for missing file, got %v", remotes)
+	}
+}
+
+func TestLoadRemotesConfig_ValidJSON(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "remotes.json"), []byte(`["gdrive","mybox"]`), 0644)
+
+	remotes, err := loadRemotesConfig(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(remotes) != 2 || remotes[0] != "gdrive" || remotes[1] != "mybox" {
+		t.Errorf("unexpected remotes: %v", remotes)
+	}
+}
+
+func TestLoadRemotesConfig_InvalidJSON(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "remotes.json"), []byte(`{invalid`), 0644)
+
+	_, err := loadRemotesConfig(dir)
+	if err == nil {
+		t.Fatal("expected error for invalid JSON")
+	}
+	if !strings.Contains(err.Error(), "invalid remotes.json") {
+		t.Errorf("error should mention invalid remotes.json: %v", err)
+	}
+}
+
+func TestSaveRemotesConfig(t *testing.T) {
+	dir := t.TempDir()
+	err := saveRemotesConfig(dir, []string{"drive1", "drive2"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify it was saved correctly.
+	remotes, err := loadRemotesConfig(dir)
+	if err != nil {
+		t.Fatalf("load after save: %v", err)
+	}
+	if len(remotes) != 2 || remotes[0] != "drive1" || remotes[1] != "drive2" {
+		t.Errorf("unexpected remotes after save: %v", remotes)
+	}
+}
+
+func TestSaveRemotesConfig_CreatesDir(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "nested", "config")
+	err := saveRemotesConfig(dir, []string{"remote1"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Verify directory was created and file exists.
+	if _, err := os.Stat(filepath.Join(dir, "remotes.json")); err != nil {
+		t.Fatalf("remotes.json not created: %v", err)
+	}
+}
+
+func TestLoadRemotesConfig_EmptyArray(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "remotes.json"), []byte(`[]`), 0644)
+
+	remotes, err := loadRemotesConfig(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(remotes) != 0 {
+		t.Errorf("expected empty slice, got %v", remotes)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// uploadOneFile
+// ---------------------------------------------------------------------------
+
+func TestUploadOneFile_Success(t *testing.T) {
+	// Create a temp file to upload.
+	dir := t.TempDir()
+	localPath := filepath.Join(dir, "hello.txt")
+	os.WriteFile(localPath, []byte("hello world"), 0644)
+
+	// Mock /api/upload endpoint.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			t.Errorf("expected POST, got %s", r.Method)
+		}
+		if !strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
+			t.Errorf("expected multipart, got %s", r.Header.Get("Content-Type"))
+		}
+		// Parse the multipart form.
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			t.Fatal(err)
+		}
+		if got := r.FormValue("dir"); got != "/docs" {
+			t.Errorf("dir = %q, want /docs", got)
+		}
+		f, fh, err := r.FormFile("file")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+		if fh.Filename != "hello.txt" {
+			t.Errorf("filename = %q", fh.Filename)
+		}
+		data, _ := io.ReadAll(f)
+		if string(data) != "hello world" {
+			t.Errorf("file content = %q", string(data))
+		}
+		w.WriteHeader(200)
+		w.Write([]byte(`{"status":"ok"}`))
+	}))
+	defer srv.Close()
+	addr := strings.TrimPrefix(srv.URL, "http://")
+
+	output := captureStdout(t, func() {
+		if err := uploadOneFile(addr, localPath, "/docs"); err != nil {
+			t.Fatalf("uploadOneFile error: %v", err)
+		}
+	})
+	if !strings.Contains(output, "hello.txt") {
+		t.Errorf("output missing filename:\n%s", output)
+	}
+	if !strings.Contains(output, "/docs/hello.txt") {
+		t.Errorf("output missing virtual path:\n%s", output)
+	}
+}
+
+func TestUploadOneFile_DaemonError(t *testing.T) {
+	dir := t.TempDir()
+	localPath := filepath.Join(dir, "hello.txt")
+	os.WriteFile(localPath, []byte("hello"), 0644)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "disk full", 500)
+	}))
+	defer srv.Close()
+	addr := strings.TrimPrefix(srv.URL, "http://")
+
+	err := uploadOneFile(addr, localPath, "/")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "500") {
+		t.Errorf("error = %q, want 500", err.Error())
+	}
+}
+
+func TestUploadOneFile_Unreachable(t *testing.T) {
+	dir := t.TempDir()
+	localPath := filepath.Join(dir, "hello.txt")
+	os.WriteFile(localPath, []byte("hello"), 0644)
+
+	err := uploadOneFile("127.0.0.1:1", localPath, "/")
+	if err == nil {
+		t.Fatal("expected error for unreachable daemon")
+	}
+	if !strings.Contains(err.Error(), "cannot reach daemon") {
+		t.Errorf("error = %q, want cannot reach daemon", err.Error())
+	}
+}
+
+func TestUploadOneFile_BadLocalPath(t *testing.T) {
+	err := uploadOneFile("127.0.0.1:1", "/nonexistent/file.txt", "/")
+	if err == nil {
+		t.Fatal("expected error for bad local path")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// runPut — single file
+// ---------------------------------------------------------------------------
+
+func TestRunPut_SingleFile(t *testing.T) {
+	dir := t.TempDir()
+	localPath := filepath.Join(dir, "up.txt")
+	os.WriteFile(localPath, []byte("data"), 0644)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(200)
+		w.Write([]byte(`{"status":"ok"}`))
+	}))
+	defer srv.Close()
+	addr := strings.TrimPrefix(srv.URL, "http://")
+
+	output := captureStdout(t, func() {
+		runPut(addr, []string{localPath})
+	})
+	if !strings.Contains(output, "up.txt") {
+		t.Errorf("put output missing filename:\n%s", output)
+	}
+}
+
+func TestRunPut_SingleFileToDir(t *testing.T) {
+	dir := t.TempDir()
+	localPath := filepath.Join(dir, "up.txt")
+	os.WriteFile(localPath, []byte("data"), 0644)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.ParseMultipartForm(1 << 20)
+		if got := r.FormValue("dir"); got != "/backup" {
+			t.Errorf("dir = %q, want /backup", got)
+		}
+		w.WriteHeader(200)
+		w.Write([]byte(`{"status":"ok"}`))
+	}))
+	defer srv.Close()
+	addr := strings.TrimPrefix(srv.URL, "http://")
+
+	output := captureStdout(t, func() {
+		runPut(addr, []string{localPath, "/backup"})
+	})
+	if !strings.Contains(output, "/backup/up.txt") {
+		t.Errorf("put output missing virtual path:\n%s", output)
+	}
+}
+
+func TestRunPut_Directory(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "mydir", "sub"), 0755)
+	os.WriteFile(filepath.Join(dir, "mydir", "a.txt"), []byte("aaa"), 0644)
+	os.WriteFile(filepath.Join(dir, "mydir", "sub", "b.txt"), []byte("bbb"), 0644)
+
+	var uploads []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.ParseMultipartForm(1 << 20)
+		uploads = append(uploads, r.FormValue("dir"))
+		w.WriteHeader(200)
+		w.Write([]byte(`{"status":"ok"}`))
+	}))
+	defer srv.Close()
+	addr := strings.TrimPrefix(srv.URL, "http://")
+
+	output := captureStdout(t, func() {
+		runPut(addr, []string{filepath.Join(dir, "mydir")})
+	})
+	if !strings.Contains(output, "Uploaded 2 file") {
+		t.Errorf("put dir output:\n%s", output)
+	}
+}
+
+func TestRunPut_RelativeRemoteDir(t *testing.T) {
+	dir := t.TempDir()
+	localPath := filepath.Join(dir, "up.txt")
+	os.WriteFile(localPath, []byte("data"), 0644)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.ParseMultipartForm(1 << 20)
+		if got := r.FormValue("dir"); got != "/docs" {
+			t.Errorf("dir = %q, want /docs (should auto-prefix /)", got)
+		}
+		w.WriteHeader(200)
+		w.Write([]byte(`{"status":"ok"}`))
+	}))
+	defer srv.Close()
+	addr := strings.TrimPrefix(srv.URL, "http://")
+
+	captureStdout(t, func() {
+		runPut(addr, []string{localPath, "docs"})
+	})
+}
+
+// ---------------------------------------------------------------------------
+// notifyDaemonResync
+// ---------------------------------------------------------------------------
+
+func TestNotifyDaemonResync_DaemonRunning(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/resync" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		if r.Method != "POST" {
+			t.Errorf("method = %q", r.Method)
+		}
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+	addr := strings.TrimPrefix(srv.URL, "http://")
+
+	output := captureStdout(t, func() {
+		notifyDaemonResync(addr)
+	})
+	if !strings.Contains(output, "sync triggered") {
+		t.Errorf("output = %q, want sync triggered", output)
+	}
+}
+
+func TestNotifyDaemonResync_DaemonNotRunning(t *testing.T) {
+	output := captureStdout(t, func() {
+		notifyDaemonResync("127.0.0.1:1")
+	})
+	if !strings.Contains(output, "not running") {
+		t.Errorf("output = %q, want not running", output)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// runRemotesReset
+// ---------------------------------------------------------------------------
+
+func TestRunRemotesReset_FileExists(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "remotes.json")
+	os.WriteFile(p, []byte(`["gdrive"]`), 0644)
+
+	// Mock daemon for resync notification.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+	addr := strings.TrimPrefix(srv.URL, "http://")
+
+	output := captureStdout(t, func() {
+		runRemotesReset(dir, addr)
+	})
+	if !strings.Contains(output, "cleared") {
+		t.Errorf("output = %q, want cleared", output)
+	}
+	// File should be deleted.
+	if _, err := os.Stat(p); !os.IsNotExist(err) {
+		t.Error("remotes.json should be deleted")
+	}
+}
+
+func TestRunRemotesReset_FileNotExist(t *testing.T) {
+	dir := t.TempDir()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+	addr := strings.TrimPrefix(srv.URL, "http://")
+
+	output := captureStdout(t, func() {
+		runRemotesReset(dir, addr)
+	})
+	// Should succeed even if file doesn't exist.
+	if !strings.Contains(output, "cleared") {
+		t.Errorf("output = %q, want cleared", output)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// saveRemotesConfig error path
+// ---------------------------------------------------------------------------
+
+func TestSaveRemotesConfig_BadDir(t *testing.T) {
+	err := saveRemotesConfig("/nonexistent/dir", []string{"gdrive"})
+	if err == nil {
+		t.Error("expected error for bad directory")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// loadRemotesConfig with real content
+// ---------------------------------------------------------------------------
+
+func TestLoadRemotesConfig_WithEntries(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "remotes.json"), []byte(`["gdrive","dropbox"]`), 0644)
+
+	remotes, err := loadRemotesConfig(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(remotes) != 2 || remotes[0] != "gdrive" || remotes[1] != "dropbox" {
+		t.Errorf("remotes = %v", remotes)
+	}
+}
+
+func TestLoadRemotesConfig_MissingFile(t *testing.T) {
+	dir := t.TempDir()
+	remotes, err := loadRemotesConfig(dir)
+	if err != nil {
+		t.Fatalf("missing file should not error: %v", err)
+	}
+	if remotes != nil {
+		t.Errorf("missing file should return nil, got %v", remotes)
+	}
+}

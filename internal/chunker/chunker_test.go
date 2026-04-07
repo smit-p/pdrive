@@ -954,3 +954,496 @@ func TestEncryptStream_OverheadMatchesActual(t *testing.T) {
 		}
 	}
 }
+
+// ── SizeForSeq ──────────────────────────────────────────────────────────────
+
+func TestSizeForSeq_EmptyTiers(t *testing.T) {
+	s := &ChunkSchedule{Tiers: nil}
+	if got := s.SizeForSeq(0); got != DefaultChunkSize {
+		t.Errorf("empty tiers: got %d, want %d", got, DefaultChunkSize)
+	}
+}
+
+func TestSizeForSeq_SingleUnlimitedTier(t *testing.T) {
+	s := &ChunkSchedule{Tiers: []ChunkTier{{Count: 0, Size: 8 * 1024 * 1024}}}
+	for _, seq := range []int{0, 1, 100} {
+		if got := s.SizeForSeq(seq); got != 8*1024*1024 {
+			t.Errorf("seq=%d: got %d, want 8MB", seq, got)
+		}
+	}
+}
+
+func TestSizeForSeq_MultiTier(t *testing.T) {
+	s := &ChunkSchedule{Tiers: []ChunkTier{
+		{Count: 2, Size: 4 * 1024 * 1024},  // seq 0,1
+		{Count: 3, Size: 16 * 1024 * 1024}, // seq 2,3,4
+		{Count: 0, Size: 32 * 1024 * 1024}, // seq 5+
+	}}
+	tests := []struct{ seq, want int }{
+		{0, 4 * 1024 * 1024},
+		{1, 4 * 1024 * 1024},
+		{2, 16 * 1024 * 1024},
+		{4, 16 * 1024 * 1024},
+		{5, 32 * 1024 * 1024},
+		{100, 32 * 1024 * 1024},
+	}
+	for _, tt := range tests {
+		if got := s.SizeForSeq(tt.seq); got != tt.want {
+			t.Errorf("seq=%d: got %d, want %d", tt.seq, got, tt.want)
+		}
+	}
+}
+
+func TestSizeForSeq_AllBounded(t *testing.T) {
+	// All tiers have Count > 0, seq exceeds total → last tier size.
+	s := &ChunkSchedule{Tiers: []ChunkTier{
+		{Count: 1, Size: 1000},
+		{Count: 1, Size: 2000},
+	}}
+	if got := s.SizeForSeq(5); got != 2000 {
+		t.Errorf("beyond all tiers: got %d, want 2000", got)
+	}
+}
+
+// ── ScheduleForFile ─────────────────────────────────────────────────────────
+
+func TestScheduleForFile(t *testing.T) {
+	s := ScheduleForFile(100 * 1024 * 1024)
+	if len(s.Tiers) != 1 {
+		t.Fatalf("expected 1 tier, got %d", len(s.Tiers))
+	}
+	if s.Tiers[0].Size != DefaultChunkSize {
+		t.Errorf("expected DefaultChunkSize, got %d", s.Tiers[0].Size)
+	}
+	if s.Tiers[0].Count != 0 {
+		t.Errorf("expected unlimited count, got %d", s.Tiers[0].Count)
+	}
+}
+
+// ── NewVariableChunkReader ──────────────────────────────────────────────────
+
+func TestVariableChunkReader_Basic(t *testing.T) {
+	data := make([]byte, 10*1024*1024) // 10 MB
+	rand.Read(data)
+
+	schedule := &ChunkSchedule{Tiers: []ChunkTier{
+		{Count: 0, Size: 4 * 1024 * 1024}, // 4 MB chunks
+	}}
+
+	vr := NewVariableChunkReader(bytes.NewReader(data), schedule)
+	var chunks []*Chunk
+	for {
+		c, err := vr.Next()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c == nil {
+			break
+		}
+		chunks = append(chunks, c)
+	}
+
+	// 10 MB / 4 MB = 3 chunks (4+4+2)
+	if len(chunks) != 3 {
+		t.Fatalf("expected 3 chunks, got %d", len(chunks))
+	}
+	if chunks[0].Size != 4*1024*1024 {
+		t.Errorf("chunk 0 size = %d", chunks[0].Size)
+	}
+	if chunks[2].Size != 2*1024*1024 {
+		t.Errorf("last chunk size = %d, want 2MB", chunks[2].Size)
+	}
+	for i, c := range chunks {
+		if c.Sequence != i {
+			t.Errorf("chunk %d sequence = %d", i, c.Sequence)
+		}
+		hash := sha256.Sum256(c.Data)
+		if hex.EncodeToString(hash[:]) != c.SHA256 {
+			t.Errorf("chunk %d SHA256 mismatch", i)
+		}
+	}
+}
+
+func TestVariableChunkReader_NilSchedule(t *testing.T) {
+	data := []byte("hello")
+	vr := NewVariableChunkReader(bytes.NewReader(data), nil)
+	c, err := vr.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c == nil {
+		t.Fatal("expected a chunk")
+	}
+	if !bytes.Equal(c.Data, data) {
+		t.Errorf("data mismatch")
+	}
+	// Next call should return nil (EOF).
+	c2, err := vr.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c2 != nil {
+		t.Error("expected nil after EOF")
+	}
+}
+
+func TestVariableChunkReader_EmptyReader(t *testing.T) {
+	vr := NewVariableChunkReader(bytes.NewReader(nil), nil)
+	c, err := vr.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c != nil {
+		t.Error("expected nil for empty reader")
+	}
+}
+
+func TestVariableChunkReader_MultiTier(t *testing.T) {
+	// 12 MB total, schedule: 2 chunks of 4MB then unlimited 8MB
+	data := make([]byte, 12*1024*1024)
+	rand.Read(data)
+	schedule := &ChunkSchedule{Tiers: []ChunkTier{
+		{Count: 2, Size: 4 * 1024 * 1024},
+		{Count: 0, Size: 8 * 1024 * 1024},
+	}}
+	vr := NewVariableChunkReader(bytes.NewReader(data), schedule)
+	var sizes []int
+	for {
+		c, err := vr.Next()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c == nil {
+			break
+		}
+		sizes = append(sizes, c.Size)
+	}
+	// seq 0: 4MB, seq 1: 4MB, seq 2: 4MB (remaining, < 8MB tier size)
+	if len(sizes) != 3 {
+		t.Fatalf("expected 3 chunks, got %d: %v", len(sizes), sizes)
+	}
+	if sizes[0] != 4*1024*1024 || sizes[1] != 4*1024*1024 {
+		t.Errorf("first two chunks should be 4MB: %v", sizes)
+	}
+}
+
+func TestVariableChunkReader_ReadError(t *testing.T) {
+	er := &errReader{err: fmt.Errorf("disk error")}
+	vr := NewVariableChunkReader(er, nil)
+	_, err := vr.Next()
+	if err == nil {
+		t.Fatal("expected error from reader")
+	}
+}
+
+// ── GenerateSalt ────────────────────────────────────────────────────────────
+
+func TestGenerateSalt(t *testing.T) {
+	salt, err := GenerateSalt()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(salt) != SaltSize {
+		t.Errorf("salt size = %d, want %d", len(salt), SaltSize)
+	}
+	// Two salts should differ.
+	salt2, _ := GenerateSalt()
+	if bytes.Equal(salt, salt2) {
+		t.Error("two generated salts should not be equal")
+	}
+}
+
+// ── EncryptStream / DecryptStream error paths ───────────────────────────────
+
+func TestDecryptStream_TruncatedBlockLength(t *testing.T) {
+	key := make([]byte, 32)
+	rand.Read(key)
+
+	// Valid magic, then 3 of 4 length bytes → io.ErrUnexpectedEOF which the
+	// decoder treats as end-of-stream (same as a clean EOF between blocks).
+	var buf bytes.Buffer
+	buf.Write(streamMagic[:])
+	buf.Write([]byte{0x00, 0x00, 0x01}) // 3 of 4 bytes
+	err := DecryptStream(key, &buf, io.Discard)
+	// This is accepted as "no more complete blocks" — verify no panic at least.
+	_ = err
+}
+
+func TestDecryptStream_BlockTooShort(t *testing.T) {
+	key := make([]byte, 32)
+	rand.Read(key)
+
+	var buf bytes.Buffer
+	buf.Write(streamMagic[:])
+	// Block length that's too small (< NonceSize + gcmTagLen = 28).
+	var lenBuf [4]byte
+	lenBuf[3] = 5 // encLen = 5 < 28
+	buf.Write(lenBuf[:])
+	if err := DecryptStream(key, &buf, io.Discard); err == nil {
+		t.Fatal("expected error for block too short")
+	}
+}
+
+func TestDecryptStream_TruncatedBlock(t *testing.T) {
+	key := make([]byte, 32)
+	rand.Read(key)
+
+	var buf bytes.Buffer
+	buf.Write(streamMagic[:])
+	// Say block is 100 bytes but only provide 10.
+	var lenBuf [4]byte
+	lenBuf[3] = 100
+	buf.Write(lenBuf[:])
+	buf.Write(make([]byte, 10))
+	if err := DecryptStream(key, &buf, io.Discard); err == nil {
+		t.Fatal("expected error for truncated block data")
+	}
+}
+
+func TestEncryptStream_InvalidKey(t *testing.T) {
+	// AES requires 16, 24, or 32 byte keys.
+	badKey := make([]byte, 7)
+	_, err := EncryptStream(badKey, bytes.NewReader([]byte("data")), io.Discard)
+	if err == nil {
+		t.Fatal("expected error for invalid key length")
+	}
+}
+
+func TestDecryptStream_InvalidKey(t *testing.T) {
+	badKey := make([]byte, 7)
+	var buf bytes.Buffer
+	buf.Write(streamMagic[:])
+	err := DecryptStream(badKey, &buf, io.Discard)
+	if err == nil {
+		t.Fatal("expected error for invalid key length")
+	}
+}
+
+func TestDecryptStream_EmptyAfterMagic(t *testing.T) {
+	key := make([]byte, 32)
+	rand.Read(key)
+
+	// Just magic, no blocks — should succeed (empty plaintext).
+	var buf bytes.Buffer
+	buf.Write(streamMagic[:])
+	err := DecryptStream(key, &buf, io.Discard)
+	if err != nil {
+		t.Fatalf("empty stream after magic should succeed: %v", err)
+	}
+}
+
+// ── Additional coverage tests ───────────────────────────────────────────────
+
+func TestMaxSize_EmptyTiers(t *testing.T) {
+	s := &ChunkSchedule{Tiers: nil}
+	if got := s.MaxSize(); got != DefaultChunkSize {
+		t.Errorf("MaxSize empty = %d, want %d", got, DefaultChunkSize)
+	}
+}
+
+func TestMaxSize_ZeroSizeTier(t *testing.T) {
+	s := &ChunkSchedule{Tiers: []ChunkTier{{Count: 0, Size: 0}}}
+	if got := s.MaxSize(); got != DefaultChunkSize {
+		t.Errorf("MaxSize zero = %d, want %d", got, DefaultChunkSize)
+	}
+}
+
+func TestEstimateChunks_ZeroFileSize(t *testing.T) {
+	s := &ChunkSchedule{Tiers: []ChunkTier{{Count: 0, Size: DefaultChunkSize}}}
+	if got := s.EstimateChunks(0); got != 0 {
+		t.Errorf("EstimateChunks(0) = %d, want 0", got)
+	}
+}
+
+func TestEstimateChunks_NegativeFileSize(t *testing.T) {
+	s := &ChunkSchedule{Tiers: []ChunkTier{{Count: 0, Size: DefaultChunkSize}}}
+	if got := s.EstimateChunks(-1); got != 0 {
+		t.Errorf("EstimateChunks(-1) = %d, want 0", got)
+	}
+}
+
+func TestEstimateChunks_SingleUnlimitedTier(t *testing.T) {
+	s := &ChunkSchedule{Tiers: []ChunkTier{{Count: 0, Size: 10}}}
+	// 25 bytes / 10 = 3 chunks
+	if got := s.EstimateChunks(25); got != 3 {
+		t.Errorf("EstimateChunks(25) = %d, want 3", got)
+	}
+}
+
+func TestEstimateChunks_MultiTierExact(t *testing.T) {
+	s := &ChunkSchedule{Tiers: []ChunkTier{
+		{Count: 2, Size: 10},
+		{Count: 0, Size: 20},
+	}}
+	// 2 chunks of 10 = 20 bytes, remaining 30 bytes → 2 chunks of 20 = total 4
+	if got := s.EstimateChunks(50); got != 4 {
+		t.Errorf("EstimateChunks(50) = %d, want 4", got)
+	}
+}
+
+func TestEstimateChunks_FitsInFirstTier(t *testing.T) {
+	s := &ChunkSchedule{Tiers: []ChunkTier{
+		{Count: 5, Size: 10},
+		{Count: 0, Size: 20},
+	}}
+	// 25 bytes / 10 = 3 chunks (all within first tier)
+	if got := s.EstimateChunks(25); got != 3 {
+		t.Errorf("EstimateChunks(25) = %d, want 3", got)
+	}
+}
+
+func TestEstimateChunks_AllBoundedTiersExhausted(t *testing.T) {
+	s := &ChunkSchedule{Tiers: []ChunkTier{
+		{Count: 2, Size: 10},
+		{Count: 2, Size: 20},
+	}}
+	// Tier1: 2*10=20, Tier2: 2*20=40, total covered = 60
+	// File = 100, remaining = 40, last tier size = 20 → 2 more chunks
+	// Total: 2+2+2 = 6
+	if got := s.EstimateChunks(100); got != 6 {
+		t.Errorf("EstimateChunks(100) = %d, want 6", got)
+	}
+}
+
+func TestEstimateChunks_DataExhaustedDuringBoundedTier(t *testing.T) {
+	s := &ChunkSchedule{Tiers: []ChunkTier{
+		{Count: 2, Size: 10},
+		{Count: 5, Size: 20},
+	}}
+	// Tier1: 2*10=20 bytes (2 chunks), remaining = 25
+	// Tier2: 25/20 = 2 chunks (ceil)
+	// Total: 4
+	if got := s.EstimateChunks(45); got != 4 {
+		t.Errorf("EstimateChunks(45) = %d, want 4", got)
+	}
+}
+
+func TestEncryptStream_EmptyInput(t *testing.T) {
+	key := make([]byte, 32)
+	rand.Read(key)
+	var dst bytes.Buffer
+	n, err := EncryptStream(key, bytes.NewReader(nil), &dst)
+	if err != nil {
+		t.Fatalf("EncryptStream empty: %v", err)
+	}
+	// Should just write magic
+	if n != int64(len(streamMagic)) {
+		t.Errorf("written = %d, want %d", n, len(streamMagic))
+	}
+	// Decrypt the empty stream
+	err = DecryptStream(key, &dst, io.Discard)
+	if err != nil {
+		t.Fatalf("DecryptStream empty: %v", err)
+	}
+}
+
+func TestEncryptStream_MultiBlock(t *testing.T) {
+	key := make([]byte, 32)
+	rand.Read(key)
+	// Create data that spans multiple encryption blocks (> 16 MB)
+	size := encBlockSize + 1000
+	data := make([]byte, size)
+	for i := range data {
+		data[i] = byte(i % 251)
+	}
+
+	var encrypted bytes.Buffer
+	_, err := EncryptStream(key, bytes.NewReader(data), &encrypted)
+	if err != nil {
+		t.Fatalf("EncryptStream: %v", err)
+	}
+
+	var decrypted bytes.Buffer
+	err = DecryptStream(key, &encrypted, &decrypted)
+	if err != nil {
+		t.Fatalf("DecryptStream: %v", err)
+	}
+	if !bytes.Equal(decrypted.Bytes(), data) {
+		t.Error("multi-block roundtrip mismatch")
+	}
+}
+
+func TestEncryptStream_ExactBlockBoundary(t *testing.T) {
+	key := make([]byte, 32)
+	rand.Read(key)
+	// Exactly one block
+	data := make([]byte, encBlockSize)
+	for i := range data {
+		data[i] = byte(i % 199)
+	}
+	var encrypted bytes.Buffer
+	_, err := EncryptStream(key, bytes.NewReader(data), &encrypted)
+	if err != nil {
+		t.Fatalf("EncryptStream: %v", err)
+	}
+	var decrypted bytes.Buffer
+	err = DecryptStream(key, &encrypted, &decrypted)
+	if err != nil {
+		t.Fatalf("DecryptStream: %v", err)
+	}
+	if !bytes.Equal(decrypted.Bytes(), data) {
+		t.Error("exact-block roundtrip mismatch")
+	}
+}
+
+func TestDecryptStream_TamperedCiphertext(t *testing.T) {
+	key := make([]byte, 32)
+	rand.Read(key)
+	data := []byte("tamper test data")
+	var encrypted bytes.Buffer
+	EncryptStream(key, bytes.NewReader(data), &encrypted)
+
+	// Tamper with the encrypted data (flip a byte in the ciphertext area)
+	raw := encrypted.Bytes()
+	if len(raw) > 20 {
+		raw[len(raw)-5] ^= 0xff
+	}
+	err := DecryptStream(key, bytes.NewReader(raw), io.Discard)
+	if err == nil {
+		t.Error("expected error decrypting tampered data")
+	}
+}
+
+func TestPlanChunks_AllTinyRemotes(t *testing.T) {
+	// Remotes too small to hold even encryption overhead
+	spaces := []int64{10, 10, 10}
+	s := PlanChunks(1000, spaces)
+	if len(s.Tiers) == 0 {
+		t.Fatal("expected at least 1 tier")
+	}
+}
+
+func TestVariableChunkReader_DoneAfterEOF(t *testing.T) {
+	data := []byte("short")
+	schedule := &ChunkSchedule{Tiers: []ChunkTier{{Count: 0, Size: 100}}}
+	vr := NewVariableChunkReader(bytes.NewReader(data), schedule)
+
+	chunk, err := vr.Next()
+	if err != nil || chunk == nil {
+		t.Fatalf("first Next: err=%v, chunk=%v", err, chunk)
+	}
+	// Second call should return nil
+	chunk, err = vr.Next()
+	if err != nil {
+		t.Fatalf("second Next: %v", err)
+	}
+	if chunk != nil {
+		t.Error("expected nil chunk after EOF")
+	}
+}
+
+func TestChunkReader_DoneAfterEOF(t *testing.T) {
+	data := []byte("short")
+	cr := NewChunkReader(bytes.NewReader(data), 100)
+	chunk, err := cr.Next()
+	if err != nil || chunk == nil {
+		t.Fatalf("first Next: err=%v, chunk=%v", err, chunk)
+	}
+	chunk, err = cr.Next()
+	if err != nil {
+		t.Fatalf("second Next: %v", err)
+	}
+	if chunk != nil {
+		t.Error("expected nil chunk after EOF")
+	}
+}

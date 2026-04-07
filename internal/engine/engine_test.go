@@ -138,6 +138,59 @@ func (f *fakeCloud) TransferStats() rclonerc.TransferProgress {
 	return rclonerc.TransferProgress{}
 }
 
+// objectCount returns the number of objects stored in fakeCloud (thread-safe).
+func (f *fakeCloud) objectCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.objects)
+}
+
+// hasObject checks whether a key exists (thread-safe).
+func (f *fakeCloud) hasObject(remote, path string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	_, ok := f.objects[f.key(remote, path)]
+	return ok
+}
+
+// getObject returns a copy of the object data (thread-safe).
+func (f *fakeCloud) getObject(remote, path string) ([]byte, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	data, ok := f.objects[f.key(remote, path)]
+	if !ok {
+		return nil, false
+	}
+	cp := make([]byte, len(data))
+	copy(cp, data)
+	return cp, true
+}
+
+// setObject stores data under the given key (thread-safe).
+func (f *fakeCloud) setObject(remote, path string, data []byte) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.objects[f.key(remote, path)] = data
+}
+
+// clearObjects removes all stored objects (thread-safe).
+func (f *fakeCloud) clearObjects() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	clear(f.objects)
+}
+
+// objectKeys returns all keys in the objects map (thread-safe).
+func (f *fakeCloud) objectKeys() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	keys := make([]string, 0, len(f.objects))
+	for k := range f.objects {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
 // ── test helpers ─────────────────────────────────────────────────────────────
 
 // newTestEngine creates a fully wired Engine backed by a temp-dir SQLite DB
@@ -186,9 +239,11 @@ func newTestEngine(t *testing.T) (*Engine, *fakeCloud) {
 }
 
 // countNonMeta counts cloud objects excluding the metadata backup (pdrive-meta/).
-func countNonMeta(objects map[string][]byte) int {
+func countNonMeta(fc *fakeCloud) int {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
 	n := 0
-	for k := range objects {
+	for k := range fc.objects {
 		if !strings.Contains(k, "pdrive-meta/") {
 			n++
 		}
@@ -429,9 +484,7 @@ func TestDeleteFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cloud.mu.Lock()
-	n := len(cloud.objects)
-	cloud.mu.Unlock()
+	n := cloud.objectCount()
 	if n == 0 {
 		t.Fatal("expected at least one cloud chunk after write")
 	}
@@ -447,9 +500,7 @@ func TestDeleteFile(t *testing.T) {
 
 	// Cloud chunks cleaned up (async — give it 200ms).
 	time.Sleep(200 * time.Millisecond)
-	cloud.mu.Lock()
-	remaining := countNonMeta(cloud.objects)
-	cloud.mu.Unlock()
+	remaining := countNonMeta(cloud)
 	if remaining != 0 {
 		t.Errorf("expected 0 cloud objects after delete, got %d", remaining)
 	}
@@ -465,9 +516,7 @@ func TestRenameFile_DBOnlyNoReupload(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cloud.mu.Lock()
-	uploadCount := len(cloud.objects)
-	cloud.mu.Unlock()
+	uploadCount := cloud.objectCount()
 
 	if err := eng.RenameFile("/old.txt", "/new.txt"); err != nil {
 		t.Fatalf("RenameFile: %v", err)
@@ -481,9 +530,7 @@ func TestRenameFile_DBOnlyNoReupload(t *testing.T) {
 	}
 
 	// No new cloud uploads.
-	cloud.mu.Lock()
-	afterCount := len(cloud.objects)
-	cloud.mu.Unlock()
+	afterCount := cloud.objectCount()
 	if afterCount != uploadCount {
 		t.Errorf("rename must not upload chunks: before=%d after=%d", uploadCount, afterCount)
 	}
@@ -662,9 +709,7 @@ func TestRenameFile_DestinationExists(t *testing.T) {
 	eng.WriteFileStream("/src.txt", bytes.NewReader([]byte("src content")), 11)
 	eng.WriteFileStream("/dst.txt", bytes.NewReader([]byte("old dst")), 7)
 
-	cloud.mu.Lock()
-	before := len(cloud.objects)
-	cloud.mu.Unlock()
+	before := cloud.objectCount()
 	if before < 2 {
 		t.Fatalf("expected at least 2 cloud objects before rename, got %d", before)
 	}
@@ -695,9 +740,7 @@ func TestDeleteDir(t *testing.T) {
 	eng.WriteFileStream("/movies/b.mkv", bytes.NewReader([]byte("bbb")), 3)
 	eng.WriteFileStream("/other/c.txt", bytes.NewReader([]byte("ccc")), 3)
 
-	cloud.mu.Lock()
-	before := len(cloud.objects)
-	cloud.mu.Unlock()
+	before := cloud.objectCount()
 	if before < 3 {
 		t.Fatalf("expected ≥3 cloud objects before DeleteDir, got %d", before)
 	}
@@ -719,9 +762,7 @@ func TestDeleteDir(t *testing.T) {
 
 	// Cloud chunks for movies cleaned up asynchronously.
 	time.Sleep(300 * time.Millisecond)
-	cloud.mu.Lock()
-	after := countNonMeta(cloud.objects)
-	cloud.mu.Unlock()
+	after := countNonMeta(cloud)
 	if after != 1 {
 		t.Errorf("expected 1 cloud object (/other/c.txt chunk) remaining, got %d", after)
 	}
@@ -1157,17 +1198,13 @@ func TestGCOrphanedChunks_DeletesOrphan(t *testing.T) {
 	eng.WriteFileStream("/keep.txt", bytes.NewReader([]byte("keep")), 4)
 
 	// Inject an orphan directly into fakeCloud — no corresponding DB record.
-	cloud.mu.Lock()
-	cloud.objects[cloud.key("fake:", "pdrive-chunks/orphan-uuid")] = []byte("garbage")
-	cloud.mu.Unlock()
+	cloud.setObject("fake:", "pdrive-chunks/orphan-uuid", []byte("garbage"))
 
 	eng.GCOrphanedChunks()
 
 	// Orphan must be gone.
-	cloud.mu.Lock()
-	_, orphanExists := cloud.objects[cloud.key("fake:", "pdrive-chunks/orphan-uuid")]
-	validCount := len(cloud.objects)
-	cloud.mu.Unlock()
+	orphanExists := cloud.hasObject("fake:", "pdrive-chunks/orphan-uuid")
+	validCount := cloud.objectCount()
 
 	if orphanExists {
 		t.Error("orphaned chunk should have been deleted by GC")
@@ -1185,9 +1222,7 @@ func TestGCOrphanedChunks_RemovesBrokenDBRecord(t *testing.T) {
 	eng.WriteFileStream("/doomed.txt", bytes.NewReader([]byte("doomed")), 6)
 
 	// Nuke all cloud objects but leave DB records intact.
-	cloud.mu.Lock()
-	clear(cloud.objects)
-	cloud.mu.Unlock()
+	cloud.clearObjects()
 
 	eng.GCOrphanedChunks()
 
@@ -1213,9 +1248,7 @@ func TestGCOrphanedChunks_SafetyThreshold(t *testing.T) {
 	}
 
 	// Nuke all cloud objects to simulate remote folder deletion.
-	cloud.mu.Lock()
-	clear(cloud.objects)
-	cloud.mu.Unlock()
+	cloud.clearObjects()
 
 	eng.GCOrphanedChunks()
 
@@ -1248,9 +1281,7 @@ func TestBackupDB_UploadsToCloud(t *testing.T) {
 		t.Fatalf("BackupDB: %v", err)
 	}
 
-	cloud.mu.Lock()
-	data, ok := cloud.objects[cloud.key("fake:", "pdrive-meta/metadata.db.enc")]
-	cloud.mu.Unlock()
+	data, ok := cloud.getObject("fake:", "pdrive-meta/metadata.db.enc")
 
 	if !ok {
 		t.Fatal("BackupDB must upload encrypted metadata.db.enc to cloud")
@@ -1275,9 +1306,7 @@ func TestBackupDB_RoundTrip(t *testing.T) {
 		t.Fatalf("BackupDB: %v", err)
 	}
 
-	cloud.mu.Lock()
-	blob := cloud.objects[cloud.key("fake:", "pdrive-meta/metadata.db.enc")]
-	cloud.mu.Unlock()
+	blob, _ := cloud.getObject("fake:", "pdrive-meta/metadata.db.enc")
 
 	plain, err := chunker.Decrypt(eng.encKey, blob)
 	if err != nil {
@@ -1366,18 +1395,14 @@ func TestContentHashDedup(t *testing.T) {
 		t.Fatalf("WriteFileStream original: %v", err)
 	}
 
-	cloud.mu.Lock()
-	uploadsAfterFirst := len(cloud.objects)
-	cloud.mu.Unlock()
+	uploadsAfterFirst := cloud.objectCount()
 
 	// Write same content to a different path — should dedup.
 	if err := eng.WriteFileStream("/copy.txt", bytes.NewReader(content), int64(len(content))); err != nil {
 		t.Fatalf("WriteFileStream copy: %v", err)
 	}
 
-	cloud.mu.Lock()
-	uploadsAfterSecond := len(cloud.objects)
-	cloud.mu.Unlock()
+	uploadsAfterSecond := cloud.objectCount()
 
 	if uploadsAfterSecond != uploadsAfterFirst {
 		t.Errorf("content-hash dedup should not upload new chunks: before=%d after=%d",
@@ -1406,16 +1431,12 @@ func TestContentHashDedup_DifferentContentUploads(t *testing.T) {
 	if err := eng.WriteFileStream("/a.txt", bytes.NewReader([]byte("aaa")), 3); err != nil {
 		t.Fatal(err)
 	}
-	cloud.mu.Lock()
-	after1 := len(cloud.objects)
-	cloud.mu.Unlock()
+	after1 := cloud.objectCount()
 
 	if err := eng.WriteFileStream("/b.txt", bytes.NewReader([]byte("bbb")), 3); err != nil {
 		t.Fatal(err)
 	}
-	cloud.mu.Lock()
-	after2 := len(cloud.objects)
-	cloud.mu.Unlock()
+	after2 := cloud.objectCount()
 
 	if after2 <= after1 {
 		t.Errorf("different content must upload new chunks: after_a=%d after_b=%d", after1, after2)
@@ -1462,9 +1483,7 @@ func TestConfigurableChunkSize(t *testing.T) {
 	if err := eng.WriteFileStream("/default.bin", bytes.NewReader(data), int64(len(data))); err != nil {
 		t.Fatal(err)
 	}
-	cloud.mu.Lock()
-	defaultChunks := len(cloud.objects)
-	cloud.mu.Unlock()
+	defaultChunks := cloud.objectCount()
 
 	// Override chunk size to 512 bytes → a different file should produce 4 chunks.
 	eng.SetChunkSize(512)
@@ -1475,9 +1494,7 @@ func TestConfigurableChunkSize(t *testing.T) {
 	if err := eng.WriteFileStream("/small-chunks.bin", bytes.NewReader(data2), int64(len(data2))); err != nil {
 		t.Fatal(err)
 	}
-	cloud.mu.Lock()
-	smallChunkTotal := len(cloud.objects)
-	cloud.mu.Unlock()
+	smallChunkTotal := cloud.objectCount()
 
 	newChunks := smallChunkTotal - defaultChunks
 	if newChunks < 4 {
@@ -1591,9 +1608,7 @@ func TestContentHashDedup_DeleteOriginalKeepsClone(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cloud.mu.Lock()
-	chunksBeforeDelete := countNonMeta(cloud.objects)
-	cloud.mu.Unlock()
+	chunksBeforeDelete := countNonMeta(cloud)
 
 	// Delete the original — shared cloud chunks must NOT be removed.
 	if err := eng.DeleteFile("/original.txt"); err != nil {
@@ -1601,9 +1616,7 @@ func TestContentHashDedup_DeleteOriginalKeepsClone(t *testing.T) {
 	}
 	time.Sleep(200 * time.Millisecond) // allow async cleanup goroutine
 
-	cloud.mu.Lock()
-	chunksAfterDelete := countNonMeta(cloud.objects)
-	cloud.mu.Unlock()
+	chunksAfterDelete := countNonMeta(cloud)
 
 	if chunksAfterDelete != chunksBeforeDelete {
 		t.Errorf("shared cloud chunks should NOT be deleted: before=%d after=%d",
@@ -1842,13 +1855,11 @@ func TestFlushBackup(t *testing.T) {
 	eng.FlushBackup()
 
 	count := 0
-	cloud.mu.Lock()
-	for k := range cloud.objects {
+	for _, k := range cloud.objectKeys() {
 		if strings.Contains(k, "pdrive-meta/metadata.db.enc") {
 			count++
 		}
 	}
-	cloud.mu.Unlock()
 	if count == 0 {
 		t.Error("expected at least 1 backup after FlushBackup")
 	}
@@ -1988,7 +1999,7 @@ func TestDeleteDir_WithNestedFiles(t *testing.T) {
 	eng.WriteFileStream("/rm/x.txt", bytes.NewReader([]byte("x")), 1)
 	eng.WriteFileStream("/rm/deep/y.txt", bytes.NewReader([]byte("y")), 1)
 
-	chunksBefore := countNonMeta(cloud.objects)
+	chunksBefore := countNonMeta(cloud)
 	if chunksBefore == 0 {
 		t.Fatal("expected chunks in cloud before delete")
 	}
@@ -2004,7 +2015,7 @@ func TestDeleteDir_WithNestedFiles(t *testing.T) {
 	if ex, _ := eng.FileExists("/rm/deep/y.txt"); ex {
 		t.Error("file /rm/deep/y.txt still exists after DeleteDir")
 	}
-	if n := countNonMeta(cloud.objects); n != 0 {
+	if n := countNonMeta(cloud); n != 0 {
 		t.Errorf("expected 0 cloud chunks after delete, got %d", n)
 	}
 }
@@ -2100,10 +2111,8 @@ func TestBackupDB_WithSalt(t *testing.T) {
 	}
 
 	// Check salt was uploaded.
-	cloud.mu.Lock()
-	defer cloud.mu.Unlock()
 	found := false
-	for k := range cloud.objects {
+	for _, k := range cloud.objectKeys() {
 		if strings.Contains(k, "enc.salt") {
 			found = true
 			break
@@ -2289,9 +2298,7 @@ func TestGCOrphanedChunks_DeletesOrphans(t *testing.T) {
 
 	eng.GCOrphanedChunks()
 
-	cloud.mu.Lock()
-	_, exists := cloud.objects[cloud.key("fake:", "pdrive-chunks/orphan.enc")]
-	cloud.mu.Unlock()
+	exists := cloud.hasObject("fake:", "pdrive-chunks/orphan.enc")
 	if exists {
 		t.Error("expected orphan cloud chunk to be deleted by GC")
 	}
@@ -2304,9 +2311,9 @@ func TestGCOrphanedChunks_KeepsKnownChunks(t *testing.T) {
 	// Write a real file so chunks are in the DB + cloud.
 	eng.WriteFileStream("/keep.txt", bytes.NewReader([]byte("keep me")), 7)
 
-	cloudCountBefore := countNonMeta(cloud.objects)
+	cloudCountBefore := countNonMeta(cloud)
 	eng.GCOrphanedChunks()
-	cloudCountAfter := countNonMeta(cloud.objects)
+	cloudCountAfter := countNonMeta(cloud)
 
 	if cloudCountAfter != cloudCountBefore {
 		t.Errorf("GC deleted known chunks: before=%d, after=%d", cloudCountBefore, cloudCountAfter)
@@ -2444,7 +2451,7 @@ func TestDeleteDir_RemovesCloudChunks(t *testing.T) {
 	// Give cleanup goroutine time to run.
 	time.Sleep(200 * time.Millisecond)
 
-	if n := countNonMeta(cloud.objects); n != 0 {
+	if n := countNonMeta(cloud); n != 0 {
 		t.Errorf("expected 0 cloud chunks after DeleteDir, got %d", n)
 	}
 }
@@ -2526,9 +2533,7 @@ func TestRetryFailedDeletions_Success(t *testing.T) {
 	eng.RetryFailedDeletions()
 
 	// Chunk should be deleted from cloud.
-	cloud.mu.Lock()
-	_, exists := cloud.objects[cloud.key("fake:", "pdrive-chunks/del.enc")]
-	cloud.mu.Unlock()
+	exists := cloud.hasObject("fake:", "pdrive-chunks/del.enc")
 	if exists {
 		t.Error("expected chunk to be deleted on retry")
 	}
@@ -2579,7 +2584,7 @@ func TestDeleteFile_CloudCleanupAsync(t *testing.T) {
 	eng, cloud := newTestEngine(t)
 	eng.WriteFileStream("/del-async.txt", bytes.NewReader([]byte("delete me")), 9)
 
-	beforeCount := countNonMeta(cloud.objects)
+	beforeCount := countNonMeta(cloud)
 	if beforeCount == 0 {
 		t.Fatal("expected at least 1 cloud chunk before delete")
 	}
@@ -2587,7 +2592,7 @@ func TestDeleteFile_CloudCleanupAsync(t *testing.T) {
 	eng.DeleteFile("/del-async.txt")
 	time.Sleep(200 * time.Millisecond) // let background cleanup run
 
-	afterCount := countNonMeta(cloud.objects)
+	afterCount := countNonMeta(cloud)
 	if afterCount != 0 {
 		t.Errorf("expected 0 cloud chunks after delete, got %d", afterCount)
 	}
@@ -2638,9 +2643,7 @@ func TestReadFileToTempFile_DownloadFailure(t *testing.T) {
 	eng.WriteFileStream("/df.txt", bytes.NewReader(content), int64(len(content)))
 
 	// Remove all cloud objects so GetFile fails.
-	cloud.mu.Lock()
-	clear(cloud.objects)
-	cloud.mu.Unlock()
+	cloud.clearObjects()
 
 	_, err := eng.ReadFileToTempFile("/df.txt")
 	if err == nil || !strings.Contains(err.Error(), "downloading chunk") {
@@ -2656,13 +2659,11 @@ func TestReadFileToTempFile_DecryptFailure(t *testing.T) {
 	eng.WriteFileStream("/dcf.txt", bytes.NewReader(content), int64(len(content)))
 
 	// Replace all cloud objects with garbage (not valid AES-GCM).
-	cloud.mu.Lock()
-	for k := range cloud.objects {
+	for _, k := range cloud.objectKeys() {
 		if strings.Contains(k, "pdrive-chunks/") {
-			cloud.objects[k] = []byte("not-encrypted-data")
+			cloud.setObject("fake:", strings.TrimPrefix(k, "fake::"), []byte("not-encrypted-data"))
 		}
 	}
-	cloud.mu.Unlock()
 
 	_, err := eng.ReadFileToTempFile("/dcf.txt")
 	if err == nil || !strings.Contains(err.Error(), "decrypting chunk") {
@@ -2677,14 +2678,12 @@ func TestReadFileToTempFile_ChunkHashMismatch(t *testing.T) {
 	eng.WriteFileStream("/hm.txt", bytes.NewReader(content), int64(len(content)))
 
 	// Replace cloud data with validly encrypted but different content.
-	cloud.mu.Lock()
-	for k := range cloud.objects {
+	for _, k := range cloud.objectKeys() {
 		if strings.Contains(k, "pdrive-chunks/") {
 			enc, _ := chunker.Encrypt(eng.encKey, []byte("different-content"))
-			cloud.objects[k] = enc
+			cloud.setObject("fake:", strings.TrimPrefix(k, "fake::"), enc)
 		}
 	}
-	cloud.mu.Unlock()
 
 	_, err := eng.ReadFileToTempFile("/hm.txt")
 	if err == nil || !strings.Contains(err.Error(), "hash mismatch") {
@@ -2785,9 +2784,7 @@ func TestGCOrphanedChunks_DeleteFailure(t *testing.T) {
 	eng.GCOrphanedChunks()
 
 	// Orphan should still exist since delete failed.
-	cloud.mu.Lock()
-	_, exists := cloud.objects[cloud.key("fake:", "pdrive-chunks/orphan2.enc")]
-	cloud.mu.Unlock()
+	exists := cloud.hasObject("fake:", "pdrive-chunks/orphan2.enc")
 	if !exists {
 		t.Error("orphan should still exist when delete fails")
 	}
@@ -2809,10 +2806,8 @@ func TestBackupDB_MultipleProviders(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cloud.mu.Lock()
-	_, hasFake1 := cloud.objects[cloud.key("fake:", dbSyncRemotePath)]
-	_, hasFake2 := cloud.objects[cloud.key("fake2:", dbSyncRemotePath)]
-	cloud.mu.Unlock()
+	hasFake1 := cloud.hasObject("fake:", dbSyncRemotePath)
+	hasFake2 := cloud.hasObject("fake2:", dbSyncRemotePath)
 	if !hasFake1 {
 		t.Error("expected backup on fake:")
 	}
@@ -2982,7 +2977,7 @@ func TestRenameFile_OverwriteExisting(t *testing.T) {
 	eng.WriteFileStream("/dst.txt", bytes.NewReader([]byte("destination")), 11)
 
 	// Confirm dst has cloud chunks before rename.
-	dstBefore := countNonMeta(cloud.objects)
+	dstBefore := countNonMeta(cloud)
 	if dstBefore == 0 {
 		t.Fatal("expected cloud chunks before rename")
 	}
@@ -3122,7 +3117,7 @@ func TestDeleteDir_WithFilesAndSubdirs(t *testing.T) {
 	}
 
 	// Cloud chunks cleaned.
-	if n := countNonMeta(cloud.objects); n != 0 {
+	if n := countNonMeta(cloud); n != 0 {
 		t.Errorf("expected 0 cloud chunks, got %d", n)
 	}
 }
@@ -3206,12 +3201,12 @@ func TestWriteFileStream_DedupClone(t *testing.T) {
 	content := []byte("dedup content")
 	eng.WriteFileStream("/orig.txt", bytes.NewReader(content), int64(len(content)))
 
-	chunksBefore := countNonMeta(cloud.objects)
+	chunksBefore := countNonMeta(cloud)
 
 	// Write same content to different path — should clone, not re-upload.
 	eng.WriteFileStream("/clone.txt", bytes.NewReader(content), int64(len(content)))
 
-	chunksAfter := countNonMeta(cloud.objects)
+	chunksAfter := countNonMeta(cloud)
 	if chunksAfter != chunksBefore {
 		t.Errorf("expected no new chunks for dedup clone, before=%d after=%d", chunksBefore, chunksAfter)
 	}
@@ -3555,9 +3550,7 @@ func TestGCOrphanedChunks_SkipsDirectoryItems(t *testing.T) {
 	}
 	eng.GCOrphanedChunks()
 	// Orphan file should be deleted; subdir should be silently skipped.
-	cloud.mu.Lock()
-	_, exists := cloud.objects[cloud.key("fake:", "pdrive-chunks/orphan.enc")]
-	cloud.mu.Unlock()
+	exists := cloud.hasObject("fake:", "pdrive-chunks/orphan.enc")
 	if exists {
 		t.Error("expected orphan to be deleted")
 	}
@@ -3574,9 +3567,7 @@ func TestGCOrphanedChunks_PathNormalization(t *testing.T) {
 	eng.GCOrphanedChunks()
 	// The normalised path "pdrive-chunks/orphan-norm.enc" is not in the DB,
 	// so the orphan should be deleted.
-	cloud.mu.Lock()
-	_, exists := cloud.objects[cloud.key("fake:", "pdrive-chunks/orphan-norm.enc")]
-	cloud.mu.Unlock()
+	exists := cloud.hasObject("fake:", "pdrive-chunks/orphan-norm.enc")
 	if exists {
 		t.Error("expected orphan with unnormalised path to be deleted")
 	}
@@ -3852,9 +3843,7 @@ func TestGCOrphanedChunks_DeleteBrokenFileError(t *testing.T) {
 	eng.WriteFileStream("/broken.txt", bytes.NewReader([]byte("broken")), 6)
 
 	// Nuke all cloud objects but keep DB records.
-	cloud.mu.Lock()
-	clear(cloud.objects)
-	cloud.mu.Unlock()
+	cloud.clearObjects()
 
 	// Block file deletion with a trigger.
 	eng.db.Conn().Exec(`CREATE TRIGGER no_gc_del BEFORE DELETE ON files BEGIN SELECT RAISE(ABORT, 'gc blocked'); END`)
