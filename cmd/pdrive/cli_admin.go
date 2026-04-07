@@ -137,6 +137,10 @@ func saveRemotesConfig(configDir string, remotes []string) error {
 	return os.WriteFile(remotesConfigPath(configDir), data, 0600)
 }
 
+// listRemotesFn is the function used to list rclone remotes.
+// It is a variable so that tests can override it.
+var listRemotesFn = listRcloneRemotes
+
 // listRcloneRemotes calls `rclone listremotes` directly (no daemon needed).
 func listRcloneRemotes() ([]string, error) {
 	out, err := exec.Command("rclone", "listremotes").Output()
@@ -183,7 +187,7 @@ func runRemotes(configDir, daemonAddr string, args []string) {
 }
 
 func runRemotesList(configDir string) {
-	allRemotes, err := listRcloneRemotes()
+	allRemotes, err := listRemotesFn()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -229,7 +233,7 @@ func runRemotesList(configDir string) {
 
 func runRemotesAdd(configDir, daemonAddr string, names []string) {
 	// Validate names against actual rclone remotes.
-	allRemotes, err := listRcloneRemotes()
+	allRemotes, err := listRemotesFn()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -281,7 +285,7 @@ func runRemotesRemove(configDir, daemonAddr string, names []string) {
 
 	// If no config exists, we need to populate from all remotes first.
 	if len(enabled) == 0 {
-		allRemotes, err := listRcloneRemotes()
+		allRemotes, err := listRemotesFn()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
