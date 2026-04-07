@@ -17,6 +17,10 @@ import (
 
 const rcloneVersion = "current" // "current" resolves to latest stable
 
+// downloadBaseURL is the base URL for rclone downloads. Package-level so tests
+// can redirect to httptest.Server.
+var downloadBaseURL = "https://downloads.rclone.org"
+
 // EnsureRclone checks for rclone at the given path or downloads it into
 // configDir/bin/rclone. Returns the path to a usable rclone binary.
 func EnsureRclone(configDir string) (string, error) {
@@ -43,8 +47,8 @@ func EnsureRclone(configDir string) (string, error) {
 		return "", fmt.Errorf("unsupported architecture: %s", arch)
 	}
 
-	dlURL := fmt.Sprintf("https://downloads.rclone.org/%s/rclone-%s-%s-%s.zip",
-		rcloneVersion, rcloneVersion, goos, arch)
+	dlURL := fmt.Sprintf("%s/%s/rclone-%s-%s-%s.zip",
+		downloadBaseURL, rcloneVersion, rcloneVersion, goos, arch)
 
 	slog.Info("downloading rclone", "url", dlURL)
 
