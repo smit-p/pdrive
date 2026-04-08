@@ -343,15 +343,6 @@ func (e *Engine) incCounter(counter *atomic.Int64, key string, delta int64) {
 	e.db.IncrementCounter(key, delta) //nolint:errcheck
 }
 
-// chunkSize returns the chunk size to use for a file of the given size.
-// Used by WriteFileStream (fixed-size path) and as fallback.
-func (e *Engine) chunkSize(fileSize int64) int {
-	if e.overrideChunkSize > 0 {
-		return e.overrideChunkSize
-	}
-	return chunker.ChunkSizeForFile(fileSize)
-}
-
 // chunkSchedule returns a variable chunk schedule for the given file size.
 // When an override chunk size is set (tests, CLI flag) a single-tier schedule
 // is returned so the override is respected.

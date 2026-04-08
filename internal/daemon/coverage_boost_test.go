@@ -928,7 +928,7 @@ func TestRcloneManager_MonitorRestartOnFailure(t *testing.T) {
 	if err := rm.spawn(ctx); err != nil {
 		t.Fatalf("manual respawn: %v", err)
 	}
-	if err := rm.waitHealthy(ctx, 5 * time.Second); err != nil {
+	if err := rm.waitHealthy(ctx, 5*time.Second); err != nil {
 		t.Fatalf("waitHealthy after respawn: %v", err)
 	}
 	rm.mu.Unlock()

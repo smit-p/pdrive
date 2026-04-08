@@ -463,7 +463,7 @@ func TestRunCat_ServerError_Exits_StatusCode(t *testing.T) {
 	if os.Getenv("BE_CRASHER") == "1" {
 		mux := http.NewServeMux()
 		mux.HandleFunc("/api/download", func(w http.ResponseWriter, _ *http.Request) {
-			http.Error(w, "server broke", 503)
+			http.Error(w, "server broke", http.StatusServiceUnavailable)
 		})
 		srv := httptest.NewServer(mux)
 		defer srv.Close()
@@ -590,7 +590,7 @@ func TestBrowseModel_DoAction_Unreachable(t *testing.T) {
 func TestBrowseModel_DoAction_ServerError(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/pin", func(w http.ResponseWriter, _ *http.Request) {
-		http.Error(w, "quota exceeded", 507)
+		http.Error(w, "quota exceeded", http.StatusInsufficientStorage)
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)

@@ -417,38 +417,38 @@ func TestDispatchCmd_Unmount(t *testing.T) {
 // Test dispatch with a live mock server for commands that make HTTP calls.
 func newDispatchServer() *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/api/ls":
+		switch r.URL.Path {
+		case "/api/ls":
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"path": "/", "dirs": []string{}, "files": []interface{}{},
 			})
-		case r.URL.Path == "/api/status":
+		case "/api/status":
 			fmt.Fprint(w, `{"Uptime":"1m","Files":0,"Chunks":0}`)
-		case r.URL.Path == "/api/uploads":
+		case "/api/uploads":
 			fmt.Fprint(w, `[]`)
-		case r.URL.Path == "/api/health":
+		case "/api/health":
 			fmt.Fprint(w, `{"status":"ok"}`)
-		case r.URL.Path == "/api/metrics":
+		case "/api/metrics":
 			fmt.Fprint(w, `{"TotalFiles":0}`)
-		case r.URL.Path == "/api/tree":
+		case "/api/tree":
 			fmt.Fprint(w, `[]`)
-		case r.URL.Path == "/api/du":
+		case "/api/du":
 			fmt.Fprint(w, `{"entries":[]}`)
-		case r.URL.Path == "/api/pin", r.URL.Path == "/api/unpin":
+		case "/api/pin", "/api/unpin":
 			w.WriteHeader(200)
-		case r.URL.Path == "/api/download":
+		case "/api/download":
 			w.Write([]byte("data"))
-		case r.URL.Path == "/api/find":
+		case "/api/find":
 			fmt.Fprint(w, `[]`)
-		case r.URL.Path == "/api/mv":
+		case "/api/mv":
 			w.WriteHeader(200)
-		case r.URL.Path == "/api/mkdir":
+		case "/api/mkdir":
 			w.WriteHeader(200)
-		case r.URL.Path == "/api/delete":
+		case "/api/delete":
 			w.WriteHeader(200)
-		case r.URL.Path == "/api/info":
+		case "/api/info":
 			fmt.Fprint(w, `{"Path":"/x","SizeBytes":10,"UploadState":"done","Chunks":[]}`)
-		case r.URL.Path == "/api/upload":
+		case "/api/upload":
 			w.WriteHeader(200)
 		default:
 			w.WriteHeader(404)
@@ -1023,10 +1023,11 @@ func TestRunCat_Non200_Subprocess(t *testing.T) {
 func TestRunPut_UploadDirectory(t *testing.T) {
 	callCount := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/upload" {
+		switch r.URL.Path {
+		case "/api/upload":
 			callCount++
 			w.WriteHeader(200)
-		} else if r.URL.Path == "/api/mkdir" {
+		case "/api/mkdir":
 			w.WriteHeader(200)
 		}
 	}))
