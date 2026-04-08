@@ -136,7 +136,7 @@ func TestRoot_Rename_NonRootParent(t *testing.T) {
 	}
 }
 
-// ── Open with writable flag (exercises fuseFlags = FOPEN_DIRECT_IO) ── 
+// ── Open with writable flag (exercises fuseFlags = FOPEN_DIRECT_IO) ──
 
 func TestRoot_Open_Writable(t *testing.T) {
 	eng, _, spoolDir := newTestEngine(t)

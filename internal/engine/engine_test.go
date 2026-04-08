@@ -4344,7 +4344,7 @@ func TestCloneFileFromDonor_BeginTxError(t *testing.T) {
 	// Close the underlying DB connection.
 	eng.db.Close()
 
-	err := eng.cloneFileFromDonor(donor, "new-id", "/clone.txt", int64(len(content)), donor.SHA256Full)
+	err := eng.cloneFileFromDonor(donor, "new-id", "/clone.txt", int64(len(content)), donor.SHA256Full, "")
 	if err == nil {
 		t.Fatal("expected error when DB is closed")
 	}

@@ -423,15 +423,14 @@ func (e *Engine) WriteFileStream(virtualPath string, r io.ReadSeeker, size int64
 		return err
 	}
 
-	// Delete any existing record (complete or pending) at this path so the
-	// INSERT below never hits a UNIQUE constraint on virtual_path.
+	// Capture existing file info BEFORE the upload, but do NOT delete yet.
+	// Deleting first would cause data loss if the upload fails.
 	existing, _ := e.db.GetFileByPath(virtualPath)
+	var oldID string
+	var oldLocs []metadata.ChunkLocation
 	if existing != nil {
-		locs, _ := e.db.GetChunkLocationsForFile(existing.ID)
-		e.db.DeleteFile(existing.ID) //nolint:errcheck
-		if len(locs) > 0 {
-			go e.deleteCloudChunks(locs)
-		}
+		oldID = existing.ID
+		oldLocs, _ = e.db.GetChunkLocationsForFile(existing.ID)
 	}
 
 	fileID := uuid.New().String()
@@ -447,13 +446,24 @@ func (e *Engine) WriteFileStream(virtualPath string, r io.ReadSeeker, size int64
 	// Content-hash dedup: if a completed file with the same SHA256 already
 	// exists, clone its chunk metadata instead of re-uploading.
 	if donor, _ := e.db.GetCompleteFileByHash(fullHashStr); donor != nil {
-		return e.cloneFileFromDonor(donor, fileID, virtualPath, size, fullHashStr)
+		err := e.cloneFileFromDonor(donor, fileID, virtualPath, size, fullHashStr, oldID)
+		if err == nil && len(oldLocs) > 0 {
+			go e.deleteCloudChunks(oldLocs)
+		}
+		return err
 	}
 
+	// Upload all chunks FIRST — if this fails the old file is preserved.
 	metas, err := e.uploadChunks(r, fileID, size, nil, nil)
 	if err != nil {
 		return err
 	}
+
+	// Upload succeeded — now atomically swap: delete old record, insert new.
+	if oldID != "" {
+		e.db.DeleteFile(oldID) //nolint:errcheck
+	}
+
 	// Insert the file record FIRST — chunk records have a FK to files.id so the
 	// parent row must exist before we insert children.
 	now := time.Now().Unix()
@@ -473,6 +483,12 @@ func (e *Engine) WriteFileStream(virtualPath string, r io.ReadSeeker, size int64
 		e.db.DeleteFile(fileID) //nolint:errcheck
 		return err
 	}
+
+	// Clean up old cloud chunks AFTER the new file is safely recorded.
+	if len(oldLocs) > 0 {
+		go e.deleteCloudChunks(oldLocs)
+	}
+
 	slog.Info("file written", "path", virtualPath, "size", size, "chunks", len(metas))
 	e.incCounter(&e.filesUploaded, "files_uploaded", 1)
 	e.incCounter(&e.bytesUploaded, "bytes_uploaded", size)
@@ -516,14 +532,14 @@ func (e *Engine) WriteFileAsync(virtualPath string, tmpFile *os.File, tmpPath st
 		return fmt.Errorf("rewinding after hash: %w", err)
 	}
 
-	// Delete any existing file at this path.
+	// Capture existing file info BEFORE the upload, but do NOT delete yet.
+	// Deleting first would cause data loss if the async upload fails later.
 	existing, _ := e.db.GetFileByPath(virtualPath)
+	var oldID string
+	var oldLocs []metadata.ChunkLocation
 	if existing != nil {
-		locs, _ := e.db.GetChunkLocationsForFile(existing.ID)
-		e.db.DeleteFile(existing.ID) //nolint:errcheck
-		if len(locs) > 0 {
-			go e.deleteCloudChunks(locs)
-		}
+		oldID = existing.ID
+		oldLocs, _ = e.db.GetChunkLocationsForFile(existing.ID)
 	}
 
 	// Content-hash dedup: if a completed file with the same SHA256 already
@@ -532,11 +548,21 @@ func (e *Engine) WriteFileAsync(virtualPath string, tmpFile *os.File, tmpPath st
 		e.removeUploadProgress(fileID)
 		tmpFile.Close()
 		os.Remove(tmpPath)
-		err := e.cloneFileFromDonor(donor, fileID, virtualPath, size, fullHashStr)
+		err := e.cloneFileFromDonor(donor, fileID, virtualPath, size, fullHashStr, oldID)
 		if err == nil {
+			if len(oldLocs) > 0 {
+				go e.deleteCloudChunks(oldLocs)
+			}
 			e.db.InsertActivity("upload", virtualPath, fmt.Sprintf("%d bytes", size)) //nolint:errcheck
 		}
 		return err
+	}
+
+	// Delete existing file record now so the pending INSERT doesn't conflict.
+	// The old cloud chunks are NOT cleaned up yet — that happens after the
+	// background upload succeeds, preserving the old data if this upload fails.
+	if oldID != "" {
+		e.db.DeleteFile(oldID) //nolint:errcheck
 	}
 
 	now := time.Now().Unix()
@@ -594,6 +620,12 @@ func (e *Engine) WriteFileAsync(virtualPath string, tmpFile *os.File, tmpPath st
 		slog.Info("file written", "path", virtualPath, "size", size, "chunks", len(metas))
 		e.incCounter(&e.filesUploaded, "files_uploaded", 1)
 		e.incCounter(&e.bytesUploaded, "bytes_uploaded", size)
+
+		// Clean up old cloud chunks AFTER the new file is safely recorded.
+		if len(oldLocs) > 0 {
+			e.deleteCloudChunks(oldLocs)
+		}
+
 		e.db.InsertActivity("upload", virtualPath, fmt.Sprintf("%d bytes", size)) //nolint:errcheck
 		e.scheduleBackup()
 	}()
@@ -814,7 +846,9 @@ func (e *Engine) insertChunkMetadata(fileID string, metas []chunkMeta) error {
 // cloneFileFromDonor creates a new file record that shares the same cloud
 // chunks as the donor file (content-hash dedup). No data is uploaded.
 // All inserts are wrapped in a single transaction for atomicity.
-func (e *Engine) cloneFileFromDonor(donor *metadata.File, fileID, virtualPath string, size int64, sha256Full string) error {
+// If replaceFileID is non-empty, that file record is deleted inside the same
+// transaction to avoid a window where neither old nor new record exists.
+func (e *Engine) cloneFileFromDonor(donor *metadata.File, fileID, virtualPath string, size int64, sha256Full, replaceFileID string) error {
 	donorChunks, err := e.db.GetChunksForFile(donor.ID)
 	if err != nil {
 		return fmt.Errorf("getting donor chunks: %w", err)
@@ -839,6 +873,25 @@ func (e *Engine) cloneFileFromDonor(donor *metadata.File, fileID, virtualPath st
 		return fmt.Errorf("begin transaction: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck
+
+	// Verify the donor still exists inside the transaction. If it was deleted
+	// concurrently, its cloud chunks may be getting cleaned up — using those
+	// locations would create a file with orphaned references.
+	var donorExists int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM files WHERE id = ?`, donor.ID).Scan(&donorExists); err != nil {
+		return fmt.Errorf("verifying donor: %w", err)
+	}
+	if donorExists == 0 {
+		return fmt.Errorf("donor file %s was deleted concurrently", donor.VirtualPath)
+	}
+
+	// Delete the old file record atomically within this transaction so
+	// there's no window where the virtual_path is missing.
+	if replaceFileID != "" {
+		if _, err := tx.Exec(`DELETE FROM files WHERE id = ?`, replaceFileID); err != nil {
+			return fmt.Errorf("removing old file record: %w", err)
+		}
+	}
 
 	now := time.Now().Unix()
 	if _, err := tx.Exec(

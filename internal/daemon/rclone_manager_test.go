@@ -35,7 +35,7 @@ func TestWaitHealthy_ImmediateSuccess(t *testing.T) {
 	addr := ln.Addr().String()
 	rm := NewRcloneManager("", "", addr)
 
-	if err := rm.waitHealthy(5 * time.Second); err != nil {
+	if err := rm.waitHealthy(context.Background(), 5 * time.Second); err != nil {
 		t.Fatalf("waitHealthy error: %v", err)
 	}
 }
@@ -51,7 +51,7 @@ func TestWaitHealthy_TimesOut(t *testing.T) {
 
 	rm := NewRcloneManager("", "", addr)
 
-	err = rm.waitHealthy(500 * time.Millisecond)
+	err = rm.waitHealthy(context.Background(), 500 * time.Millisecond)
 	if err == nil {
 		t.Fatal("waitHealthy should have timed out")
 	}
@@ -86,7 +86,7 @@ func TestWaitHealthy_EventualSuccess(t *testing.T) {
 	}()
 
 	rm := NewRcloneManager("", "", addr)
-	err = rm.waitHealthy(3 * time.Second)
+	err = rm.waitHealthy(context.Background(), 3 * time.Second)
 	if err != nil {
 		t.Fatalf("waitHealthy should have succeeded after delay: %v", err)
 	}

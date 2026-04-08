@@ -201,6 +201,12 @@ func DecryptStream(key []byte, src io.Reader, dst io.Writer) error {
 		if encLen < uint32(NonceSize+gcmTagLen) {
 			return fmt.Errorf("encrypted block too short: %d bytes", encLen)
 		}
+		// Guard against corrupted length fields that could cause huge allocations.
+		// A legitimate block is at most encBlockSize + NonceSize + gcmTagLen.
+		const maxEncBlock = encBlockSize + NonceSize + gcmTagLen
+		if encLen > uint32(maxEncBlock) {
+			return fmt.Errorf("encrypted block too large: %d bytes (max %d)", encLen, maxEncBlock)
+		}
 
 		sealed := make([]byte, encLen)
 		if _, err := io.ReadFull(src, sealed); err != nil {

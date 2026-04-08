@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -189,10 +190,13 @@ func TestSyncDir_SuppressEvent(t *testing.T) {
 	sd := NewSyncDir("/sync", nil, "")
 	sd.suppressEvent("/sync/file.txt")
 	sd.supMu.Lock()
-	_, ok := sd.suppress["/sync/file.txt"]
+	expiry, ok := sd.suppress["/sync/file.txt"]
 	sd.supMu.Unlock()
 	if !ok {
 		t.Error("expected file to be in suppress map")
+	}
+	if expiry.Before(time.Now()) {
+		t.Error("expected suppress expiry to be in the future")
 	}
 }
 

@@ -52,7 +52,8 @@ type SyncDir struct {
 	removals map[string]*recentRemoval // keyed by sha256+size
 
 	// suppress watcher events caused by our own writes (downloads).
-	suppress map[string]struct{}
+	// Value is the expiration time — events are suppressed until then.
+	suppress map[string]time.Time
 	supMu    sync.Mutex
 
 	ctx    context.Context
@@ -67,7 +68,7 @@ func NewSyncDir(root string, eng *engine.Engine, spoolDir string) *SyncDir {
 		spoolDir: spoolDir,
 		pending:  make(map[string]*time.Timer),
 		removals: make(map[string]*recentRemoval),
-		suppress: make(map[string]struct{}),
+		suppress: make(map[string]time.Time),
 	}
 }
 
@@ -157,15 +158,21 @@ func (s *SyncDir) handleEvent(ev fsnotify.Event) {
 		return
 	}
 
-	// If we wrote this file ourselves (download), ignore the event.
-	s.supMu.Lock()
-	_, suppressed := s.suppress[absPath]
-	if suppressed {
-		delete(s.suppress, absPath)
-	}
-	s.supMu.Unlock()
-	if suppressed {
-		return
+	// If we wrote this file ourselves (download), ignore Create/Write events.
+	// Remove events are never suppressed — they always reflect user intent.
+	if !ev.Has(fsnotify.Remove) && !ev.Has(fsnotify.Rename) {
+		s.supMu.Lock()
+		expiry, suppressed := s.suppress[absPath]
+		if suppressed {
+			if time.Now().After(expiry) {
+				delete(s.suppress, absPath)
+				suppressed = false
+			}
+		}
+		s.supMu.Unlock()
+		if suppressed {
+			return
+		}
 	}
 
 	switch {
@@ -186,11 +193,15 @@ func (s *SyncDir) handleEvent(ev fsnotify.Event) {
 			return
 		}
 
-		// Rename detection: check if a recent removal matches this file's size.
+		// Rename detection: check if a recent removal matches this file's
+		// size AND content hash. Matching on size alone would silently
+		// serve wrong content when two files happen to have the same size.
+		localHash, hashErr := hashLocalFile(absPath)
 		s.mu.Lock()
 		matched := false
-		for key, rem := range s.removals {
-			if rem.size == info.Size() {
+		if hashErr == nil {
+			key := localHash + fmt.Sprintf(":%d", info.Size())
+			if rem, ok := s.removals[key]; ok {
 				rem.timer.Stop()
 				delete(s.removals, key)
 				s.mu.Unlock()
@@ -203,7 +214,6 @@ func (s *SyncDir) handleEvent(ev fsnotify.Event) {
 					slog.Info("sync: renamed (metadata-only)", "old", rem.virtualPath, "new", vp)
 				}
 				matched = true
-				break
 			}
 		}
 		if !matched {
@@ -358,7 +368,6 @@ func (s *SyncDir) upload(absPath, vp string) {
 		if err := s.engine.WriteFile(vp, data); err != nil {
 			slog.Error("sync: upload failed", "path", vp, "error", err)
 			return
-			return
 		}
 		slog.Info("sync: uploaded", "path", vp, "size", size)
 	}
@@ -457,16 +466,24 @@ func (s *SyncDir) PinFile(virtualPath string) error {
 	os.MkdirAll(filepath.Dir(localPath), 0755)
 	s.suppressEvent(localPath)
 
-	dst, err := os.Create(localPath)
+	// Write to a temp file in the same directory, then atomically rename.
+	// This prevents a partial file on crash from being treated as real data.
+	dst, err := os.CreateTemp(filepath.Dir(localPath), ".pdrive-pin-*")
 	if err != nil {
-		return fmt.Errorf("creating %s: %w", virtualPath, err)
+		return fmt.Errorf("creating temp file for %s: %w", virtualPath, err)
 	}
+	tmpName := dst.Name()
 	n, copyErr := io.Copy(dst, tmp)
 	if closeErr := dst.Close(); closeErr != nil && copyErr == nil {
 		copyErr = closeErr
 	}
 	if copyErr != nil {
+		os.Remove(tmpName)
 		return fmt.Errorf("writing %s: %w", virtualPath, copyErr)
+	}
+	if err := os.Rename(tmpName, localPath); err != nil {
+		os.Remove(tmpName)
+		return fmt.Errorf("renaming temp to %s: %w", virtualPath, err)
 	}
 
 	clearStubMarker(localPath)
@@ -519,7 +536,7 @@ func (s *SyncDir) virtualPath(absPath string) string {
 
 func (s *SyncDir) suppressEvent(absPath string) {
 	s.supMu.Lock()
-	s.suppress[absPath] = struct{}{}
+	s.suppress[absPath] = time.Now().Add(2 * time.Second)
 	s.supMu.Unlock()
 }
 

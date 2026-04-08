@@ -53,7 +53,7 @@ func (rm *RcloneManager) Start(ctx context.Context) error {
 	}
 
 	// Wait for rclone to become healthy.
-	if err := rm.waitHealthy(30 * time.Second); err != nil {
+	if err := rm.waitHealthy(monitorCtx, 30 * time.Second); err != nil {
 		rm.kill()
 		cancel()
 		return fmt.Errorf("rclone failed to start: %w", err)
@@ -113,9 +113,14 @@ func (rm *RcloneManager) kill() {
 	}
 }
 
-func (rm *RcloneManager) waitHealthy(timeout time.Duration) error {
+func (rm *RcloneManager) waitHealthy(ctx context.Context, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
 		if err := rm.client.Ping(); err == nil {
 			return nil
 		}
@@ -137,7 +142,7 @@ func (rm *RcloneManager) monitor(ctx context.Context) {
 				if err := rm.spawn(ctx); err != nil {
 					slog.Error("failed to restart rclone", "error", err)
 				} else {
-					rm.waitHealthy(30 * time.Second)
+					rm.waitHealthy(ctx, 30 * time.Second)
 					slog.Info("rclone restarted successfully")
 				}
 				rm.mu.Unlock()

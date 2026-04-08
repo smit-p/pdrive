@@ -153,19 +153,13 @@ func (b *Broker) EligibleFreeSpaces() ([]int64, error) {
 // TotalFreeSpace returns the aggregate free space across all eligible providers.
 // Providers that are rate-limited or below the min free-space threshold are excluded.
 func (b *Broker) TotalFreeSpace() (int64, error) {
-	providers, err := b.db.GetAllProviders()
+	spaces, err := b.EligibleFreeSpaces()
 	if err != nil {
 		return 0, err
 	}
 	var total int64
-	now := time.Now().Unix()
-	for _, p := range providers {
-		if p.RateLimitedUntil != nil && *p.RateLimitedUntil > now {
-			continue
-		}
-		if p.QuotaFreeBytes != nil {
-			total += *p.QuotaFreeBytes
-		}
+	for _, s := range spaces {
+		total += s
 	}
 	return total, nil
 }
