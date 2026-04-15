@@ -13,7 +13,7 @@ Two free Google accounts (15 GB each) + a free Dropbox account (2 GB) = **32 GB 
 ~/pdrive/                         Cloud Storage
 ┌──────────────────┐              ┌─────────────────────────┐
 │  report.pdf      │──┐           │  Google Drive            │
-│  photos/         │  │  encrypt  │    pdrive-chunks/a1b2..  │
+│  photos/         │  │           │    pdrive-chunks/a1b2..  │
 │  video.mp4       │  ├─ chunk ──▶│    pdrive-chunks/c3d4..  │
 │  ...             │  │  upload   │  Dropbox                 │
 └──────────────────┘  │           │    pdrive-chunks/e5f6..  │
@@ -23,11 +23,10 @@ Two free Google accounts (15 GB each) + a free Dropbox account (2 GB) = **32 GB 
 ```
 
 1. Files dropped into `~/pdrive` are detected via filesystem watcher (fsnotify)
-2. Each file is split into dynamically-sized chunks (32–128 MB, targeting ~25 chunks per file)
-3. Chunks are encrypted with AES-256-GCM
-4. A broker distributes chunks across providers based on available free space
-5. A local SQLite database tracks where every chunk lives
-6. Cloud-only files appear locally as stub files (0-byte with xattrs)
+2. Each file is split into dynamically-sized chunks (32 MB – 4 GiB, targeting ~25 chunks per file)
+3. A broker distributes chunks across providers based on available free space
+4. A local SQLite database tracks where every chunk lives
+5. Cloud-only files appear locally as stub files (0-byte with xattrs)
 
 pdrive uses rclone in RC daemon mode as the transport layer — any rclone-supported backend works.
 
@@ -298,7 +297,7 @@ pdrive unpin /video.mp4       # evict local copy, keep in cloud
 | `--min-free-space` | `256 MB`         | Minimum free bytes per provider                                           |
 | `--chunk-size`     | `0` (dynamic)    | Override chunk size in bytes; 0 = dynamic (32 MB – 4 GiB)                 |
 | `--rate-limit`     | `0`              | Cloud API calls per second (0 = unlimited)                                |
-| `--erasure`        | (none)           | Reed-Solomon erasure coding (e.g. `3+1` = 3 data + 1 parity)             |
+| `--erasure`        | (none)           | Reed-Solomon erasure coding (e.g. `3+1` = 3 data + 1 parity)              |
 | `--skip-restore`   | `false`          | Skip restoring DB from cloud on startup                                   |
 | `--remotes`        | (all)            | Comma-separated rclone remote names to use                                |
 | `--foreground`     | `false`          | Run in foreground instead of backgrounding (for systemd/debugging)        |
@@ -343,16 +342,16 @@ web/                  Browser UI (HTML/CSS/JS single-page app) and Playwright E2
 
 ### Key Paths
 
-| Path                                 | Purpose                                       |
-| ------------------------------------ | --------------------------------------------- |
-| `~/.pdrive/metadata.db`              | SQLite metadata database                      |
-| `~/.pdrive/config.toml`              | Optional TOML configuration file              |
-| `~/.pdrive/remotes.json`             | Persistent remote selection                   |
-| `~/.pdrive/daemon.pid`               | PID file for the background daemon            |
-| `~/.pdrive/spool/`                   | Temp files for in-progress uploads            |
-| `~/pdrive/`                          | Local sync folder                             |
-| Cloud: `pdrive-chunks/*`             | Chunk storage                                 |
-| Cloud: `pdrive-meta/metadata.db`     | Metadata backup                               |
+| Path                             | Purpose                            |
+| -------------------------------- | ---------------------------------- |
+| `~/.pdrive/metadata.db`          | SQLite metadata database           |
+| `~/.pdrive/config.toml`          | Optional TOML configuration file   |
+| `~/.pdrive/remotes.json`         | Persistent remote selection        |
+| `~/.pdrive/daemon.pid`           | PID file for the background daemon |
+| `~/.pdrive/spool/`               | Temp files for in-progress uploads |
+| `~/pdrive/`                      | Local sync folder                  |
+| Cloud: `pdrive-chunks/*`         | Chunk storage                      |
+| Cloud: `pdrive-meta/metadata.db` | Metadata backup                    |
 
 ## Tests
 
