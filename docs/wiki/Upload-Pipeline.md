@@ -29,8 +29,9 @@ The hash is compared against all existing files in the metadata DB via `FindDupl
 | File Size      | Chunk Size          | Target Chunks |
 | -------------- | ------------------- | ------------- |
 | < 32 MB        | File size (1 chunk) | 1             |
-| 32 MB – 3.2 GB | 32 MB (default)     | 1–100         |
-| > 3.2 GB       | Up to 128 MB        | ~25           |
+| 32 MB+         | Dynamic             | ~25           |
+
+Chunk size starts at 32 MB and scales up with file size, capped at 4 GiB.
 
 ### 5. Splitting
 
@@ -49,8 +50,8 @@ Chunks are uploaded concurrently with these controls:
 
 | Parameter              | Value                                 |
 | ---------------------- | ------------------------------------- |
-| Max concurrent workers | 10                                    |
-| Upload rate limit      | 6/sec (burst 10)                      |
+| Max concurrent workers | 12                                    |
+| Upload rate limit      | 12/sec (burst 20)                     |
 | Max retries per chunk  | 5                                     |
 | Backoff                | Exponential: 2s → 4s → 8s → 16s → 32s |
 
@@ -66,7 +67,7 @@ After all chunks are uploaded, the engine:
 4. Logs the upload to `activity_log`
 5. Schedules a debounced metadata backup to all providers
 
-### 10. Async Writes
+### 9. Async Writes
 
 Files smaller than 4 MB (`AsyncWriteThreshold`) are uploaded synchronously — the caller blocks until complete. Larger files are uploaded asynchronously; the engine tracks them via `UploadProgress()` which the CLI and API can poll.
 

@@ -1,10 +1,38 @@
 # HTTP API
 
-The pdrive daemon exposes a JSON API at `http://127.0.0.1:8765`. All endpoints accept GET unless noted otherwise.
+The pdrive daemon exposes an HTTP API at `http://127.0.0.1:8765`.
 
-## File Operations
+## Endpoint Summary
 
-### `GET /api/ls?path=<dir>&sort=<field>&order=<asc|desc>`
+| Endpoint | Method | Description |
+| --- | --- | --- |
+| `/api/ls?path=/` | GET | Directory listing (files + dirs with local state). |
+| `/api/status` | GET | Storage totals and per-provider quota usage. |
+| `/api/remotes` | GET | Configured remotes and active/inactive status. |
+| `/api/health` | GET | Daemon health (`status`, uptime, DB state, uploads). |
+| `/api/metrics` | GET | Engine counters (uploads/downloads/chunks/bytes/dedup). |
+| `/api/uploads` | GET | In-flight upload progress list. |
+| `/api/tree?path=/` | GET | Recursive file tree entries from a root path. |
+| `/api/find?path=/&pattern=*.pdf` | GET | Glob search across files. |
+| `/api/info?path=/file` | GET | File metadata + chunk/provider info. |
+| `/api/du?path=/` | GET | Disk usage summary (`file_count`, `total_bytes`). |
+| `/api/download?path=/file` | GET/HEAD | Stream file content (or headers only for HEAD). |
+| `/api/upload` | POST | Multipart upload (`file` field, optional `dir` form field). |
+| `/api/upload/cancel?path=/file` | POST | Cancel an active upload. |
+| `/api/delete?path=/file-or-dir` | POST | Delete file or directory recursively. |
+| `/api/mv?src=/a&dst=/b` | POST | Move or rename file/directory. |
+| `/api/mkdir?path=/dir` | POST | Create directory. |
+| `/api/pin?path=/file` | POST | Download cloud file to local sync folder. |
+| `/api/unpin?path=/file` | POST | Replace local file with cloud stub. |
+| `/api/verify?path=/file` | GET | Verify chunk integrity for a file. |
+| `/api/activity?limit=50` | GET | Recent activity records. |
+| `/api/resync` | GET/POST | Trigger immediate provider re-sync. |
+| `/api/logs` | GET | Recent daemon logs from in-memory ring buffer. |
+| `/api/logs/stream` | GET | Live server-sent event stream of logs. |
+
+## Selected Responses
+
+### `GET /api/ls?path=<dir>`
 
 List files in a directory.
 
@@ -12,135 +40,59 @@ List files in a directory.
 
 ```json
 {
+  "path": "/",
+  "dirs": ["photos"],
   "files": [
     {
       "name": "report.pdf",
       "path": "/report.pdf",
       "size": 1048576,
-      "hash": "abc123...",
-      "state": "ready",
-      "created_at": "2024-01-15T10:30:00Z"
+      "modified_at": 1712345678,
+      "local_state": "local"
     }
-  ],
-  "dirs": ["/photos", "/documents"]
+  ]
 }
 ```
 
-### `POST /api/upload`
-
-Upload a file. Multipart form with `file` field and optional `path` query parameter.
-
-```bash
-curl -F "file=@report.pdf" "http://127.0.0.1:8765/api/upload?path=/docs/"
-```
-
-### `GET /api/download?path=<file>`
-
-Download a file. Returns the file content with appropriate Content-Type.
-
-### `POST /api/delete?path=<path>`
-
-Delete a file or directory.
-
-### `POST /api/mv?src=<old>&dst=<new>`
-
-Rename or move a file.
-
-### `POST /api/mkdir?path=<dir>`
-
-Create a virtual directory.
-
-## Search & Navigation
-
-### `GET /api/find?pattern=<query>`
-
-Search files by name.
-
-### `GET /api/tree?path=<dir>`
-
-Get directory tree structure.
-
-### `GET /api/du?path=<dir>`
-
-Get disk usage summary.
-
-### `GET /api/info?path=<file>`
-
-Get detailed file information including chunk details.
-
-## Status & Monitoring
-
-### `GET /api/status`
-
-Overall storage status — total/used/free across providers.
-
 ### `GET /api/uploads`
-
-Active upload progress.
 
 **Response:**
 
 ```json
 [
   {
-    "path": "/video.mp4",
-    "total_chunks": 10,
-    "uploaded_chunks": 7,
-    "total_bytes": 335544320,
-    "uploaded_bytes": 234881024
+    "VirtualPath": "/video.mp4",
+    "TotalChunks": 10,
+    "ChunksUploaded": 7,
+    "SizeBytes": 335544320,
+    "BytesDone": 234881024,
+    "BytesTotal": 335544320,
+    "HashBytesRead": 335544320,
+    "HashBytesTotal": 335544320,
+    "SpeedBPS": 10485760,
+    "StartedAt": "2026-04-15T12:00:00Z",
+    "Failed": false,
+    "Preparing": false
   }
 ]
 ```
 
-### `GET /api/remotes`
+### `POST /api/upload`
 
-List configured providers with email identity and quota.
-
-### `GET /api/health`
-
-Daemon health check. Returns 200 with uptime.
-
-### `GET /api/metrics`
-
-Engine telemetry counters (uploads, downloads, deletes, dedup hits).
-
-### `GET /api/activity?limit=<n>`
-
-Recent activity log entries.
-
-## Sync Directory
-
-### `POST /api/pin?path=<file>`
-
-Pin a file — download to the local sync directory.
-
-### `POST /api/unpin?path=<file>`
-
-Unpin a file — remove local copy, replace with stub.
-
-### `POST /api/verify?path=<file>`
-
-Verify file integrity by re-downloading and hash-checking all chunks.
-
-## Provider Management
-
-### `POST /api/resync`
-
-Trigger an immediate re-discovery of rclone remotes. New remotes are automatically picked up every 60 seconds, but this endpoint forces it immediately.
+Upload via multipart form using `file` and optional `dir` form field.
 
 ```bash
-curl -X POST http://127.0.0.1:8765/api/resync
-# {"ok":true}
+curl -F "file=@report.pdf" -F "dir=/docs" http://127.0.0.1:8765/api/upload
 ```
 
 ## WebDAV
 
-The daemon also serves a WebDAV interface at `http://127.0.0.1:8765/dav/`. This can be mounted as a network drive:
+The daemon also serves WebDAV at the same base address (`http://127.0.0.1:8765`). This can be mounted as a network drive:
 
 **macOS Finder:**
 
 1. Finder → Go → Connect to Server
-2. Enter `http://127.0.0.1:8765/dav/`
+2. Enter `http://127.0.0.1:8765`
 3. Browse files as if they were local
 
 **Command line:**
@@ -148,5 +100,5 @@ The daemon also serves a WebDAV interface at `http://127.0.0.1:8765/dav/`. This 
 ```bash
 # Mount via mount_webdav (macOS)
 mkdir ~/pdrive
-mount_webdav http://127.0.0.1:8765/dav/ ~/pdrive
+mount_webdav http://127.0.0.1:8765 ~/pdrive
 ```

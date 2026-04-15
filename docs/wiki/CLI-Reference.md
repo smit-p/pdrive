@@ -11,7 +11,7 @@ pdrive                # Start daemon (background)
 pdrive --foreground   # Start in foreground (for debugging)
 pdrive --debug        # Enable debug logging
 ```
-**Columns:** Name, Size, Age, State
+
 ### `pdrive stop`
 
 Stop the running daemon (sends SIGTERM via PID file).
@@ -58,7 +58,7 @@ pdrive ls              # List root directory
 pdrive ls /photos      # List /photos directory
 ```
 
-**Columns:** Size, Age, Name
+**Columns:** Name, Size, Age, State
 
 ### `pdrive put <local-path> [remote-dir]`
 
@@ -122,8 +122,8 @@ pdrive mkdir /projects/2024
 Search for files by glob pattern.
 
 ```bash
-pdrive find report
-pdrive find .pdf
+pdrive find "report*"
+pdrive find "*.pdf"
 ```
 
 ### `pdrive tree [path]`

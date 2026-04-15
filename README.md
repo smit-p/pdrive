@@ -43,7 +43,7 @@ pdrive uses rclone in RC daemon mode as the transport layer — any rclone-suppo
 - **Interactive TUI** — `pdrive browse` launches a full-screen file browser with keyboard navigation.
 - **Browser UI** — Full-featured file manager at `http://localhost:8765` with dark/light mode. Browse directories, pin/unpin/delete/move/download files, create folders, search by pattern, view tree structure, monitor uploads, and inspect storage metrics — all from the browser.
 - **WebDAV** — Mount as a network drive in Finder, Explorer, or any WebDAV client.
-- **Auto-restart** — Run as a background daemon that auto-starts on login.
+- **Service integration** — launchd/systemd service files are included for optional auto-start on login/boot.
 - **Live remote detection** — New rclone remotes are auto-detected every 60 seconds without a daemon restart. Or trigger immediately with `pdrive remotes add`.
 - **Activity log** — All user-visible actions (uploads, downloads, deletes, moves, pins) are logged with timestamps.
 - **Metadata backup** — SQLite DB is auto-backed up to every cloud provider. On a fresh install, the newest backup is auto-restored — just connect the same cloud accounts. Restored backups are validated against actual cloud chunks before use.

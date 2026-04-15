@@ -2,8 +2,8 @@
 
 ## Prerequisites
 
-- **Go 1.21+** (for building from source)
-- **rclone** (auto-downloaded if not present)
+- **Go 1.26.1+** (for building from source)
+- **rclone** (auto-downloaded on first run if not present)
 - At least one configured rclone remote (Google Drive, Dropbox, etc.)
 
 ## rclone Setup
@@ -55,7 +55,7 @@ pdrive spawns rclone as a child process with RC (remote control) API enabled:
 rclone rcd --rc-addr=127.0.0.1:5572 --rc-no-auth
   --drive-use-trash=false     # Don't use Google Drive trash
   --drive-chunk-size=256M     # Large upload chunks for speed
-  --transfers=8               # Concurrent transfers
+  --transfers=12              # Concurrent transfers
   --drive-pacer-min-sleep=10ms # Fast API pacing
 ```
 
@@ -72,25 +72,25 @@ Both listen only on localhost — not exposed to the network.
 
 ## Engine Tuning
 
-These constants are currently hardcoded in `internal/engine/engine.go`:
+These constants are currently hardcoded:
 
 | Parameter             | Value | Description                                 |
 | --------------------- | ----- | ------------------------------------------- |
-| `uploadRatePerSec`    | 6     | Max upload operations per second            |
-| `uploadRateBurst`     | 10    | Burst allowance for rate limiter            |
-| `maxUploadWorkers`    | 10    | Max concurrent chunk uploads                |
+| `uploadRatePerSec`    | 12    | Max upload API operations per second        |
+| `uploadRateBurst`     | 20    | Burst allowance for rate limiter            |
+| `maxUploadWorkers`    | 12    | Max concurrent chunk uploads                |
 | `maxUploadRetries`    | 5     | Retry count before giving up                |
-| `AsyncWriteThreshold` | 4 MB  | Files below this are uploaded synchronously |
+| `AsyncWriteThreshold` | 4 MB  | Files above this upload asynchronously      |
 
 ## Chunk Sizing
 
 | Parameter              | Value  |
 | ---------------------- | ------ |
 | Default chunk size     | 32 MB  |
-| Max chunk size         | 128 MB |
+| Max chunk size         | 4 GiB  |
 | Target chunks per file | ~25    |
 
-Files smaller than 32 MB are stored as a single chunk. Files larger than ~3.2 GB get chunks up to 128 MB to keep the chunk count around 25.
+Files smaller than 32 MB are stored as a single chunk. Larger files scale chunk size up dynamically (capped at 4 GiB) to keep chunk counts near the target.
 
 ## Config File
 
@@ -124,10 +124,10 @@ pdrive can expose your files as a native filesystem mount using FUSE. This provi
 
 ```bash
 # Start daemon with FUSE backend
-pdrive start --backend fuse --mountpoint ~/pdrive-fuse
+pdrive --backend fuse --mountpoint ~/pdrive-fuse
 
 # Or set it in config.toml and just run:
-pdrive start
+pdrive
 
 # Mount/unmount independently
 pdrive mount
@@ -145,7 +145,7 @@ The FUSE layer translates kernel filesystem calls (open, read, write, mkdir, ren
 A LaunchAgent plist is provided in `scripts/com.pdrive.daemon.plist` to auto-start pdrive on login:
 
 ```bash
-# Edit the plist to set your passphrase and username
+# Edit the plist to set paths and username if needed
 vim scripts/com.pdrive.daemon.plist
 
 # Install
@@ -158,7 +158,7 @@ launchctl load ~/Library/LaunchAgents/com.pdrive.daemon.plist
 A systemd unit file is provided in `scripts/pdrive.service`:
 
 ```bash
-# Edit the unit file to set your passphrase
+# Edit the unit file for your environment
 vim scripts/pdrive.service
 
 # Install

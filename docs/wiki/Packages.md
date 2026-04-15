@@ -49,14 +49,14 @@ File splitting, streaming, and reassembly.
 
 | File           | Key Exports                                                                                                                                                                                                                                      |
 | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `chunker.go`   | `Split()` — Splits an `io.Reader` into `[]Chunk` with SHA-256 hashes. `ChunkReader` — Streaming iterator that yields one chunk at a time (memory-efficient). `ChunkSizeForFile()` — Auto-sizes chunks (32–128 MB) targeting ~25 chunks per file. |
+| `chunker.go`   | `Split()` — Splits an `io.Reader` into `[]Chunk` with SHA-256 hashes. `ChunkReader` — Streaming iterator that yields one chunk at a time (memory-efficient). `ChunkSizeForFile()` — Auto-sizes chunks (32 MB to 4 GiB) targeting ~25 chunks per file. |
 | `assembler.go` | `Assemble()` — Concatenates chunks into an `io.Reader`, verifying SHA-256.                                                                                                                                                                       |
 
 ### `internal/metadata`
 
 SQLite database layer with WAL mode and embedded schema.
 
-**Tables:** `providers`, `files`, `chunks`, `chunk_locations`, `directories`, `failed_deletions`, `activity_log`
+**Tables:** `providers`, `files`, `chunks`, `chunk_locations`, `directories`, `failed_deletions`, `activity_log`, `counters`
 
 Key query methods: `InsertFile`, `InsertChunk`, `SetChunkLocation`, `GetFileByPath`, `GetChunksByFileID`, `ListFiles`, `DeleteFile`, `RenameFile`, `FindDuplicate`, `ListOrphanChunks`, `LogActivity`, and more.
 
@@ -70,7 +70,7 @@ Core orchestrator for all cloud operations.
 - `Engine` — Main struct with rate limiter, file gate, async upload WG, backup timer, telemetry counters
 - `MetricsSnapshot` — Upload/download/delete/dedup counters
 
-**Key constants:** `uploadRatePerSec=6`, `maxUploadWorkers=10`, `maxUploadRetries=5`, `AsyncWriteThreshold=4MB`
+**Key constants:** `uploadRatePerSec=12`, `uploadRateBurst=20`, `maxUploadWorkers=12`, `maxUploadRetries=5`, `AsyncWriteThreshold=4MB`
 
 **Operations:** Upload (with dedup), Download, Delete, Rename, ListFiles, DiskUsage, StorageStatus, GarbageCollect, RetryFailedDeletions, VerifyFile
 

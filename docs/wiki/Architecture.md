@@ -60,7 +60,7 @@ Ties all subsystems together. Manages the rclone child process, opens the metada
 
 ### Chunker (`internal/chunker`)
 
-Splits files into size-appropriate chunks (32–128 MB), provides a streaming `ChunkReader` for memory-efficient splitting, and reassembles chunks with SHA-256 verification.
+Splits files into size-appropriate chunks (32 MB to 4 GiB), provides streaming chunk readers for memory-efficient splitting, and reassembles chunks with SHA-256 verification.
 
 ### Broker (`internal/broker`)
 
@@ -98,7 +98,7 @@ TOML configuration file support. Loads settings from `~/.pdrive/config.toml`, al
 3. Engine computes SHA-256 hash and checks for deduplication
 4. Chunker splits file into appropriately-sized chunks
 5. Broker selects target provider per chunk based on free space
-6. rclonerc uploads chunks concurrently (up to 10 workers) with retry/backoff
+6. rclonerc uploads chunks concurrently (up to 12 workers) with retry/backoff
 7. Metadata DB records file, chunks, and their locations
 
 ### Download
