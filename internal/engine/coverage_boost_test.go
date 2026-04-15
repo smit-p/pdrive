@@ -291,6 +291,77 @@ func TestRegisterQueuedUpload(t *testing.T) {
 	}
 }
 
+func TestRegisterQueuedUpload_NoDuplicateVirtualPath(t *testing.T) {
+	eng, _ := newTestEngine(t)
+	defer eng.Close()
+
+	// Simulate an active upload already tracked under a UUID key.
+	eng.uploadsMu.Lock()
+	eng.uploads["fake-uuid-1"] = &uploadProgress{
+		VirtualPath: "/dup.mkv",
+		SizeBytes:   1000,
+		StartedAt:   time.Now(),
+		cancelCh:    make(chan struct{}),
+	}
+	eng.uploadsMu.Unlock()
+
+	// RegisterQueuedUpload for the same path should NOT create a second entry.
+	key := eng.RegisterQueuedUpload("/dup.mkv", 1000)
+	defer eng.UnregisterQueuedUpload(key)
+
+	progress := eng.UploadProgress()
+	count := 0
+	for _, p := range progress {
+		if p.VirtualPath == "/dup.mkv" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("expected exactly 1 entry for /dup.mkv, got %d", count)
+	}
+}
+
+func TestAdoptQueuedUpload_NoDuplicateVirtualPath(t *testing.T) {
+	eng, _ := newTestEngine(t)
+	defer eng.Close()
+
+	// Simulate an active upload already tracked under a UUID key.
+	eng.uploadsMu.Lock()
+	eng.uploads["existing-uuid"] = &uploadProgress{
+		VirtualPath: "/dup2.mkv",
+		SizeBytes:   2000,
+		StartedAt:   time.Now(),
+		cancelCh:    make(chan struct{}),
+	}
+	eng.uploadsMu.Unlock()
+
+	// adoptQueuedUpload with no queued entry should NOT create a duplicate.
+	eng.adoptQueuedUpload("/dup2.mkv", "new-uuid", 2000)
+
+	progress := eng.UploadProgress()
+	count := 0
+	for _, p := range progress {
+		if p.VirtualPath == "/dup2.mkv" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("expected exactly 1 entry for /dup2.mkv, got %d", count)
+	}
+
+	// Verify the original entry is preserved (not replaced).
+	eng.uploadsMu.RLock()
+	_, hasOriginal := eng.uploads["existing-uuid"]
+	_, hasNew := eng.uploads["new-uuid"]
+	eng.uploadsMu.RUnlock()
+	if !hasOriginal {
+		t.Error("original upload entry should be preserved")
+	}
+	if hasNew {
+		t.Error("new duplicate entry should not have been created")
+	}
+}
+
 // ── helper ──────────────────────────────────────────────────────────────────
 
 func sha256sum(data []byte) string {

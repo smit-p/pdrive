@@ -984,6 +984,14 @@ func (e *Engine) CancelUpload(virtualPath string) bool {
 func (e *Engine) RegisterQueuedUpload(virtualPath string, size int64) string {
 	key := "queued:" + virtualPath
 	e.uploadsMu.Lock()
+	// Don't create a duplicate if an upload for this path is already tracked
+	// (e.g. ResumeUploads started it under a UUID key concurrently).
+	for _, p := range e.uploads {
+		if p.VirtualPath == virtualPath {
+			e.uploadsMu.Unlock()
+			return key // return the key so callers can still call UnregisterQueuedUpload (no-op)
+		}
+	}
 	e.uploads[key] = &uploadProgress{
 		VirtualPath: virtualPath,
 		SizeBytes:   size,
@@ -1014,13 +1022,25 @@ func (e *Engine) adoptQueuedUpload(virtualPath, fileID string, size int64) {
 		p.SizeBytes = size // update in case stat changed
 		e.uploads[fileID] = p
 	} else {
-		// No queued entry (direct WriteFileAsync call, e.g. browser upload).
-		e.uploads[fileID] = &uploadProgress{
-			VirtualPath: virtualPath,
-			SizeBytes:   size,
-			StartedAt:   time.Now(),
-			Preparing:   true,
-			cancelCh:    make(chan struct{}),
+		// Check if an upload for this path is already tracked under a
+		// different key (e.g. a concurrent ResumeUploads call).  If so,
+		// skip creating a duplicate entry.
+		alreadyTracked := false
+		for _, p := range e.uploads {
+			if p.VirtualPath == virtualPath {
+				alreadyTracked = true
+				break
+			}
+		}
+		if !alreadyTracked {
+			// No queued entry (direct WriteFileAsync call, e.g. browser upload).
+			e.uploads[fileID] = &uploadProgress{
+				VirtualPath: virtualPath,
+				SizeBytes:   size,
+				StartedAt:   time.Now(),
+				Preparing:   true,
+				cancelCh:    make(chan struct{}),
+			}
 		}
 	}
 	e.uploadsMu.Unlock()
