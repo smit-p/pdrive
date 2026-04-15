@@ -1,6 +1,11 @@
 # pdrive
 
+[![Go](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go&logoColor=white)](https://go.dev)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 Aggregate multiple cloud storage accounts into a single unified drive. Drop files into `~/pdrive` and they upload automatically — encrypted, chunked, and distributed across Google Drive, Dropbox, OneDrive, Box, or any provider [rclone](https://rclone.org) supports.
+
+Two free Google accounts (15 GB each) + a free Dropbox account (2 GB) = **32 GB of unified, encrypted storage** — accessible as a single folder, network drive, or FUSE mount.
 
 ## How It Works
 
@@ -377,6 +382,16 @@ The Playwright suite covers 82 tests across the web UI: layout, file browser, in
 - [bubbletea](https://github.com/charmbracelet/bubbletea) — terminal UI framework (TUI browser)
 - [go-toml](https://github.com/pelletier/go-toml) — TOML config file parser
 
+## Contributing
+
+Contributions are welcome! Please open an issue to discuss your idea before submitting a pull request.
+
+```bash
+git clone https://github.com/smit-p/pdrive.git && cd pdrive
+go build ./...
+go test ./...
+```
+
 ## License
 
-MIT
+[MIT](LICENSE)
