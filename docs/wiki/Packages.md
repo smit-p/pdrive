@@ -47,10 +47,10 @@ TOML configuration file loading from `~/.pdrive/config.toml`.
 
 File splitting, streaming, and reassembly.
 
-| File           | Key Exports                                                                                                                                                                                                                                      |
-| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| File           | Key Exports                                                                                                                                                                                                                                           |
+| -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `chunker.go`   | `Split()` — Splits an `io.Reader` into `[]Chunk` with SHA-256 hashes. `ChunkReader` — Streaming iterator that yields one chunk at a time (memory-efficient). `ChunkSizeForFile()` — Auto-sizes chunks (32 MB to 4 GiB) targeting ~25 chunks per file. |
-| `assembler.go` | `Assemble()` — Concatenates chunks into an `io.Reader`, verifying SHA-256.                                                                                                                                                                       |
+| `assembler.go` | `Assemble()` — Concatenates chunks into an `io.Reader`, verifying SHA-256.                                                                                                                                                                            |
 
 ### `internal/metadata`
 

@@ -4,31 +4,31 @@ The pdrive daemon exposes an HTTP API at `http://127.0.0.1:8765`.
 
 ## Endpoint Summary
 
-| Endpoint | Method | Description |
-| --- | --- | --- |
-| `/api/ls?path=/` | GET | Directory listing (files + dirs with local state). |
-| `/api/status` | GET | Storage totals and per-provider quota usage. |
-| `/api/remotes` | GET | Configured remotes and active/inactive status. |
-| `/api/health` | GET | Daemon health (`status`, uptime, DB state, uploads). |
-| `/api/metrics` | GET | Engine counters (uploads/downloads/chunks/bytes/dedup). |
-| `/api/uploads` | GET | In-flight upload progress list. |
-| `/api/tree?path=/` | GET | Recursive file tree entries from a root path. |
-| `/api/find?path=/&pattern=*.pdf` | GET | Glob search across files. |
-| `/api/info?path=/file` | GET | File metadata + chunk/provider info. |
-| `/api/du?path=/` | GET | Disk usage summary (`file_count`, `total_bytes`). |
-| `/api/download?path=/file` | GET/HEAD | Stream file content (or headers only for HEAD). |
-| `/api/upload` | POST | Multipart upload (`file` field, optional `dir` form field). |
-| `/api/upload/cancel?path=/file` | POST | Cancel an active upload. |
-| `/api/delete?path=/file-or-dir` | POST | Delete file or directory recursively. |
-| `/api/mv?src=/a&dst=/b` | POST | Move or rename file/directory. |
-| `/api/mkdir?path=/dir` | POST | Create directory. |
-| `/api/pin?path=/file` | POST | Download cloud file to local sync folder. |
-| `/api/unpin?path=/file` | POST | Replace local file with cloud stub. |
-| `/api/verify?path=/file` | GET | Verify chunk integrity for a file. |
-| `/api/activity?limit=50` | GET | Recent activity records. |
-| `/api/resync` | GET/POST | Trigger immediate provider re-sync. |
-| `/api/logs` | GET | Recent daemon logs from in-memory ring buffer. |
-| `/api/logs/stream` | GET | Live server-sent event stream of logs. |
+| Endpoint                         | Method   | Description                                                 |
+| -------------------------------- | -------- | ----------------------------------------------------------- |
+| `/api/ls?path=/`                 | GET      | Directory listing (files + dirs with local state).          |
+| `/api/status`                    | GET      | Storage totals and per-provider quota usage.                |
+| `/api/remotes`                   | GET      | Configured remotes and active/inactive status.              |
+| `/api/health`                    | GET      | Daemon health (`status`, uptime, DB state, uploads).        |
+| `/api/metrics`                   | GET      | Engine counters (uploads/downloads/chunks/bytes/dedup).     |
+| `/api/uploads`                   | GET      | In-flight upload progress list.                             |
+| `/api/tree?path=/`               | GET      | Recursive file tree entries from a root path.               |
+| `/api/find?path=/&pattern=*.pdf` | GET      | Glob search across files.                                   |
+| `/api/info?path=/file`           | GET      | File metadata + chunk/provider info.                        |
+| `/api/du?path=/`                 | GET      | Disk usage summary (`file_count`, `total_bytes`).           |
+| `/api/download?path=/file`       | GET/HEAD | Stream file content (or headers only for HEAD).             |
+| `/api/upload`                    | POST     | Multipart upload (`file` field, optional `dir` form field). |
+| `/api/upload/cancel?path=/file`  | POST     | Cancel an active upload.                                    |
+| `/api/delete?path=/file-or-dir`  | POST     | Delete file or directory recursively.                       |
+| `/api/mv?src=/a&dst=/b`          | POST     | Move or rename file/directory.                              |
+| `/api/mkdir?path=/dir`           | POST     | Create directory.                                           |
+| `/api/pin?path=/file`            | POST     | Download cloud file to local sync folder.                   |
+| `/api/unpin?path=/file`          | POST     | Replace local file with cloud stub.                         |
+| `/api/verify?path=/file`         | GET      | Verify chunk integrity for a file.                          |
+| `/api/activity?limit=50`         | GET      | Recent activity records.                                    |
+| `/api/resync`                    | GET/POST | Trigger immediate provider re-sync.                         |
+| `/api/logs`                      | GET      | Recent daemon logs from in-memory ring buffer.              |
+| `/api/logs/stream`               | GET      | Live server-sent event stream of logs.                      |
 
 ## Selected Responses
 

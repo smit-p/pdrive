@@ -74,21 +74,21 @@ Both listen only on localhost — not exposed to the network.
 
 These constants are currently hardcoded:
 
-| Parameter             | Value | Description                                 |
-| --------------------- | ----- | ------------------------------------------- |
-| `uploadRatePerSec`    | 12    | Max upload API operations per second        |
-| `uploadRateBurst`     | 20    | Burst allowance for rate limiter            |
-| `maxUploadWorkers`    | 12    | Max concurrent chunk uploads                |
-| `maxUploadRetries`    | 5     | Retry count before giving up                |
-| `AsyncWriteThreshold` | 4 MB  | Files above this upload asynchronously      |
+| Parameter             | Value | Description                            |
+| --------------------- | ----- | -------------------------------------- |
+| `uploadRatePerSec`    | 12    | Max upload API operations per second   |
+| `uploadRateBurst`     | 20    | Burst allowance for rate limiter       |
+| `maxUploadWorkers`    | 12    | Max concurrent chunk uploads           |
+| `maxUploadRetries`    | 5     | Retry count before giving up           |
+| `AsyncWriteThreshold` | 4 MB  | Files above this upload asynchronously |
 
 ## Chunk Sizing
 
-| Parameter              | Value  |
-| ---------------------- | ------ |
-| Default chunk size     | 32 MB  |
-| Max chunk size         | 4 GiB  |
-| Target chunks per file | ~25    |
+| Parameter              | Value |
+| ---------------------- | ----- |
+| Default chunk size     | 32 MB |
+| Max chunk size         | 4 GiB |
+| Target chunks per file | ~25   |
 
 Files smaller than 32 MB are stored as a single chunk. Larger files scale chunk size up dynamically (capped at 4 GiB) to keep chunk counts near the target.
 

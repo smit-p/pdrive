@@ -33,11 +33,11 @@ pdrive browse
 
 ## Wiki Pages
 
-| Page                                  | Description                                          |
-| ------------------------------------- | ---------------------------------------------------- |
-| [Architecture](Architecture.md)       | System design, components, and data flow             |
-| [Packages](Packages.md)               | Package-by-package codebase guide                    |
-| [Upload Pipeline](Upload-Pipeline.md) | End-to-end upload lifecycle and failure handling     |
-| [CLI Reference](CLI-Reference.md)     | Commands, flags, and examples                        |
-| [HTTP API](HTTP-API.md)               | `/api/*` endpoints, methods, and response shapes     |
+| Page                                  | Description                                           |
+| ------------------------------------- | ----------------------------------------------------- |
+| [Architecture](Architecture.md)       | System design, components, and data flow              |
+| [Packages](Packages.md)               | Package-by-package codebase guide                     |
+| [Upload Pipeline](Upload-Pipeline.md) | End-to-end upload lifecycle and failure handling      |
+| [CLI Reference](CLI-Reference.md)     | Commands, flags, and examples                         |
+| [HTTP API](HTTP-API.md)               | `/api/*` endpoints, methods, and response shapes      |
 | [Configuration](Configuration.md)     | Paths, defaults, config file, and service integration |

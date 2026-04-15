@@ -26,10 +26,10 @@ The hash is compared against all existing files in the metadata DB via `FindDupl
 
 `ChunkSizeForFile()` auto-selects chunk size based on file size:
 
-| File Size      | Chunk Size          | Target Chunks |
-| -------------- | ------------------- | ------------- |
-| < 32 MB        | File size (1 chunk) | 1             |
-| 32 MB+         | Dynamic             | ~25           |
+| File Size | Chunk Size          | Target Chunks |
+| --------- | ------------------- | ------------- |
+| < 32 MB   | File size (1 chunk) | 1             |
+| 32 MB+    | Dynamic             | ~25           |
 
 Chunk size starts at 32 MB and scales up with file size, capped at 4 GiB.
 
