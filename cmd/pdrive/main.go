@@ -260,7 +260,6 @@ func showRecentLogErrors(logPath string) {
 // runPinUnpin calls the running daemon's /api/pin or /api/unpin endpoint.
 func runPinUnpin(addr, configDir, action string, paths []string) {
 	for _, p := range paths {
-		p = resolveLsArg(p, configDir).Path
 		if !strings.HasPrefix(p, "/") {
 			p = "/" + p
 		}

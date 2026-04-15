@@ -1,15 +1,11 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
-	"path"
-	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -43,106 +39,6 @@ func daemonGet(addr, apiPath string, query url.Values) ([]byte, error) {
 		return nil, fmt.Errorf("daemon returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	return body, nil
-}
-
-// lsCache remembers the last listing so users can refer to items by number.
-type lsCache struct {
-	Dir      string   `json:"dir"`
-	Items    []string `json:"items"`     // ordered list of names (dirs first, then files)
-	DirCount int      `json:"dir_count"` // how many of Items[] are directories
-	Parents  []string `json:"parents"`   // breadcrumb trail of parent dirs
-}
-
-func lsCachePath(configDir string) string {
-	return filepath.Join(configDir, "ls-cache.json")
-}
-
-func readLsCache(configDir string) *lsCache {
-	data, err := os.ReadFile(lsCachePath(configDir))
-	if err != nil {
-		return nil
-	}
-	var c lsCache
-	if json.Unmarshal(data, &c) != nil {
-		return nil
-	}
-	return &c
-}
-
-func writeLsCache(configDir, dir string, items []string, dirCount int, parents []string) {
-	data, _ := json.Marshal(lsCache{Dir: dir, Items: items, DirCount: dirCount, Parents: parents})
-	_ = os.WriteFile(lsCachePath(configDir), data, 0600)
-}
-
-// resolveResult holds the resolved path plus whether it's known to be a file.
-type resolveResult struct {
-	Path   string
-	IsFile bool // true when we know the target is a file (not a directory)
-}
-
-// resolveLsArg handles input forms:
-//  1. ".."                      → parent directory from cache
-//  2. Absolute/relative path    → used as-is
-//  3. Numeric index ("1", "2")  → looked up in the last ls-cache
-//  4. Fuzzy substring           → matched case-insensitively against cache items
-func resolveLsArg(arg, configDir string) resolveResult {
-	// ".." → go to parent of the cached directory.
-	if arg == ".." {
-		if c := readLsCache(configDir); c != nil && c.Dir != "/" {
-			return resolveResult{Path: path.Dir(c.Dir)}
-		}
-		return resolveResult{Path: "/"}
-	}
-
-	// Try numeric index first.
-	if n, err := strconv.Atoi(arg); err == nil && n >= 1 {
-		if c := readLsCache(configDir); c != nil && n <= len(c.Items) {
-			isFile := n > c.DirCount // items past DirCount are files
-			return resolveResult{
-				Path:   path.Join(c.Dir, c.Items[n-1]),
-				IsFile: isFile,
-			}
-		}
-		fmt.Fprintf(os.Stderr, "No item #%d in last listing. Run `pdrive ls` first.\n", n)
-		os.Exit(1)
-	}
-
-	// If it looks like a path (contains /), use as-is.
-	if strings.Contains(arg, "/") {
-		return resolveResult{Path: arg}
-	}
-
-	// Try fuzzy substring match against last listing.
-	if c := readLsCache(configDir); c != nil {
-		needle := strings.ToLower(arg)
-		type match struct {
-			name   string
-			index  int
-			isFile bool
-		}
-		var matches []match
-		for i, item := range c.Items {
-			if strings.Contains(strings.ToLower(item), needle) {
-				matches = append(matches, match{item, i, i >= c.DirCount})
-			}
-		}
-		if len(matches) == 1 {
-			return resolveResult{
-				Path:   path.Join(c.Dir, matches[0].name),
-				IsFile: matches[0].isFile,
-			}
-		}
-		if len(matches) > 1 {
-			fmt.Fprintf(os.Stderr, "Ambiguous match for %q:\n", arg)
-			for _, m := range matches {
-				fmt.Fprintf(os.Stderr, "  %s\n", m.name)
-			}
-			os.Exit(1)
-		}
-	}
-
-	// Fall through — treat as literal path.
-	return resolveResult{Path: arg}
 }
 
 // --- formatting helpers ---
@@ -223,22 +119,22 @@ Usage:
 
 Navigation:
   pdrive browse                   Interactive file browser (TUI)
-  pdrive ls [path|number]         List files and directories
+  pdrive ls [path]                List files and directories
   pdrive tree [path]              Show directory tree recursively
   pdrive find <pattern> [path]    Search for files by name
 
 File operations:
-  pdrive cat <path|number>        Print file contents to stdout
-  pdrive get <path|number> [dest] Download file to local filesystem
+  pdrive cat <path>               Print file contents to stdout
+  pdrive get <path> [dest]        Download file to local filesystem
   pdrive put <local-path> [dir]   Upload local file or directory
-  pdrive pin <path|number> [...]  Download cloud-only files locally
-  pdrive unpin <path|number> [...] Evict local copies (keep in cloud)
+  pdrive pin <path> [...]         Download cloud-only files locally
+  pdrive unpin <path> [...]       Evict local copies (keep in cloud)
   pdrive mv <src> <dst>           Move or rename files/directories
-  pdrive rm <path|number> [...]   Delete files/directories from cloud
+  pdrive rm <path> [...]          Delete files/directories from cloud
   pdrive mkdir <path>             Create a directory
 
 Info:
-  pdrive info <path|number>       Show detailed file metadata and chunks
+  pdrive info <path>              Show detailed file metadata and chunks
   pdrive du [path]                Show disk usage summary
   pdrive status                   Show storage summary and provider quotas
   pdrive remotes                  List rclone remotes and which are enabled
@@ -254,11 +150,6 @@ Management:
   pdrive mount [--mountpoint=PATH] Switch to FUSE backend (default: ~/pdrive)
   pdrive unmount                  Unmount FUSE and stop the daemon
   pdrive help                     Show all daemon flags
-
-Hints:
-  Use numbers from ls output:    pdrive ls → pdrive cat 3
-  Use ".." to go up:             pdrive ls ..
-  Use fuzzy match:               pdrive cat vacation
 
 Flags:
   --backend       Mount backend: webdav (default) or fuse

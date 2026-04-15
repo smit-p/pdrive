@@ -6,7 +6,7 @@
 cmd/pdrive/          CLI entry point and interactive TUI
 internal/
   broker/            Chunk placement policies
-  chunker/           File splitting, encryption, reassembly
+  chunker/           File splitting and reassembly
   config/            TOML configuration file loading
   daemon/            Daemon process, HTTP API, background tasks
   engine/            Core file operations orchestrator
@@ -22,11 +22,11 @@ internal/
 
 ### `cmd/pdrive`
 
-| File        | Purpose                                                                                                                                                                                                                                                             |
-| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `main.go`   | CLI entry point, daemon lifecycle, encryption key setup (Argon2id salt management), daemonize logic, PID file management                                                                                                                                            |
-| `cli.go`    | All client-side CLI commands (`ls`, `status`, `uploads`, `cat`, `get`, `rm`, `tree`, `find`, `mv`, `mkdir`, `info`, `du`, `remotes`, `health`, `metrics`). Uses HTTP calls to the running daemon. Features ls-cache for numeric references and fuzzy path matching. |
-| `browse.go` | Interactive TUI file browser using Bubble Tea and Lip Gloss. Supports keyboard navigation, file preview, upload, download, delete, and rename.                                                                                                                      |
+| File        | Purpose                                                                                                                                                                                           |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `main.go`   | CLI entry point, daemon lifecycle, daemonize logic, PID file management                                                                                                                           |
+| `cli.go`    | All client-side CLI commands (`ls`, `status`, `uploads`, `cat`, `get`, `rm`, `tree`, `find`, `mv`, `mkdir`, `info`, `du`, `remotes`, `health`, `metrics`). Uses HTTP calls to the running daemon. |
+| `browse.go` | Interactive TUI file browser using Bubble Tea and Lip Gloss. Supports keyboard navigation, file preview, upload, download, delete, and rename.                                                    |
 
 ### `internal/broker`
 
@@ -45,13 +45,12 @@ TOML configuration file loading from `~/.pdrive/config.toml`.
 
 ### `internal/chunker`
 
-File splitting, streaming, encryption, and reassembly.
+File splitting, streaming, and reassembly.
 
 | File           | Key Exports                                                                                                                                                                                                                                      |
 | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `chunker.go`   | `Split()` — Splits an `io.Reader` into `[]Chunk` with SHA-256 hashes. `ChunkReader` — Streaming iterator that yields one chunk at a time (memory-efficient). `ChunkSizeForFile()` — Auto-sizes chunks (32–128 MB) targeting ~25 chunks per file. |
-| `crypto.go`    | `DeriveKey()` — Argon2id key derivation. `Encrypt()`/`Decrypt()` — AES-256-GCM with random nonce. `GenerateSalt()` — 16-byte crypto/rand salt.                                                                                                   |
-| `assembler.go` | `Assemble()` — Concatenates decrypted chunks into an `io.Reader`, verifying SHA-256.                                                                                                                                                             |
+| `assembler.go` | `Assemble()` — Concatenates chunks into an `io.Reader`, verifying SHA-256.                                                                                                                                                                       |
 
 ### `internal/metadata`
 

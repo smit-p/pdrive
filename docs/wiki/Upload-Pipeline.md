@@ -5,7 +5,7 @@ This page describes the end-to-end upload flow from file selection to cloud stor
 ## Overview
 
 ```
-File → SHA-256 hash → Dedup check → Chunk → Encrypt → Upload → Record metadata
+File → SHA-256 hash → Dedup check → Chunk → Upload → Record metadata
 ```
 
 ## Detailed Steps
@@ -36,22 +36,14 @@ The hash is compared against all existing files in the metadata DB via `FindDupl
 
 The file is split using `ChunkReader`, a streaming iterator that reads one chunk at a time to keep memory usage constant regardless of file size. Each chunk gets a SHA-256 hash for later verification.
 
-### 6. Encryption
-
-Each chunk is encrypted independently:
-
-- 12-byte random nonce generated via `crypto/rand`
-- AES-256-GCM encryption with the derived key
-- Output: `[nonce][ciphertext][GCM tag]`
-
-### 7. Provider Selection
+### 6. Provider Selection
 
 The `Broker` picks a target provider for each chunk. Two policies:
 
 - **PFRD** — Weighted random selection proportional to free space
 - **MFS** — Always picks the provider with the most free space
 
-### 8. Concurrent Upload
+### 7. Concurrent Upload
 
 Chunks are uploaded concurrently with these controls:
 
@@ -64,7 +56,7 @@ Chunks are uploaded concurrently with these controls:
 
 Each upload uses rclone's async `operations/copyfile` + job polling (exponential backoff from 100ms to 5s, max ~720 iterations ≈ 1 hour timeout).
 
-### 9. Metadata Recording
+### 8. Metadata Recording
 
 After all chunks are uploaded, the engine:
 

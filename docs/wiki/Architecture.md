@@ -27,7 +27,7 @@ pdrive runs as a local daemon process that coordinates several subsystems:
 │              ┌─────────────┼─────────────┐              │
 │         ┌────┴────┐  ┌─────┴─────┐  ┌───┴────┐        │
 │         │ Chunker │  │  Broker   │  │Metadata│        │
-│         │+Crypto  │  │(placement)│  │(SQLite)│        │
+│         │         │  │(placement)│  │(SQLite)│        │
 │         └─────────┘  └───────────┘  └────────┘        │
 │                            │                            │
 │                     ┌──────┴──────┐                     │
@@ -52,7 +52,7 @@ pdrive runs as a local daemon process that coordinates several subsystems:
 
 ### Engine (`internal/engine`)
 
-The core orchestrator. Handles upload (hash → dedup → chunk → encrypt → upload), download (fetch → decrypt → verify → reassemble), delete, rename, dedup detection, orphan garbage collection, failed-deletion retry, and encrypted metadata backup to all providers.
+The core orchestrator. Handles upload (hash → dedup → chunk → upload), download (fetch → verify → reassemble), delete, rename, dedup detection, orphan garbage collection, failed-deletion retry, and metadata backup to all providers.
 
 ### Daemon (`internal/daemon`)
 
@@ -60,7 +60,7 @@ Ties all subsystems together. Manages the rclone child process, opens the metada
 
 ### Chunker (`internal/chunker`)
 
-Splits files into size-appropriate chunks (32–128 MB), provides a streaming `ChunkReader` for memory-efficient splitting, handles AES-256-GCM encryption/decryption, and reassembles chunks with SHA-256 verification.
+Splits files into size-appropriate chunks (32–128 MB), provides a streaming `ChunkReader` for memory-efficient splitting, and reassembles chunks with SHA-256 verification.
 
 ### Broker (`internal/broker`)
 
@@ -97,14 +97,13 @@ TOML configuration file support. Loads settings from `~/.pdrive/config.toml`, al
 2. Engine checks aggregate free space across all providers (rejects if insufficient)
 3. Engine computes SHA-256 hash and checks for deduplication
 4. Chunker splits file into appropriately-sized chunks
-5. Each chunk is encrypted with AES-256-GCM (unique nonce per chunk)
-6. Broker selects target provider per chunk based on free space
-7. rclonerc uploads chunks concurrently (up to 10 workers) with retry/backoff
-8. Metadata DB records file, chunks, and their locations
+5. Broker selects target provider per chunk based on free space
+6. rclonerc uploads chunks concurrently (up to 10 workers) with retry/backoff
+7. Metadata DB records file, chunks, and their locations
 
 ### Download
 
 1. Engine looks up file metadata and chunk locations
 2. Chunks are downloaded sequentially via rclonerc
-3. Each chunk is decrypted and SHA-256 verified
+3. Each chunk is SHA-256 verified
 4. Chunks are reassembled into the original file

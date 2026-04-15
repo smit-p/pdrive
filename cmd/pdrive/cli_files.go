@@ -12,7 +12,6 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -35,29 +34,11 @@ type cliLsResponse struct {
 }
 
 func runLs(addr, configDir string, args []string) {
-	var prevCache *lsCache
-	var p string
-
-	switch {
-	case len(args) > 0:
-		prevCache = readLsCache(configDir)
-		res := resolveLsArg(args[0], configDir)
-		p = res.Path
+	p := "/"
+	if len(args) > 0 {
+		p = args[0]
 		if !strings.HasPrefix(p, "/") {
 			p = "/" + p
-		}
-		// If the user selected a file, show its info instead of an empty listing.
-		if res.IsFile {
-			runInfo(addr, configDir, []string{p})
-			return
-		}
-	default:
-		// No args: re-list the current cached directory (or root if no cache).
-		if c := readLsCache(configDir); c != nil {
-			prevCache = c
-			p = c.Dir
-		} else {
-			p = "/"
 		}
 	}
 
@@ -91,60 +72,15 @@ func runLs(addr, configDir string, args []string) {
 		return resp.Files[i].Name < resp.Files[j].Name
 	})
 
-	items := append([]string{}, resp.Dirs...)
-	for _, f := range resp.Files {
-		items = append(items, f.Name)
-	}
-
-	// Build parents breadcrumb trail.
-	var parents []string
-	if prevCache != nil && prevCache.Parents != nil {
-		parents = prevCache.Parents
-	}
-	// Keep parents consistent: if we navigated deeper, push the previous dir.
-	// If we went up (..), trim the trail.
-	if prevCache != nil {
-		if strings.HasPrefix(resp.Path, prevCache.Dir+"/") {
-			// Went deeper — add previous dir to parents
-			parents = append(parents, prevCache.Dir)
-		} else if len(parents) > 0 {
-			// Went up or sideways — find the right level in parents
-			for len(parents) > 0 && !strings.HasPrefix(resp.Path, parents[len(parents)-1]) {
-				parents = parents[:len(parents)-1]
-			}
-		}
-	}
-	if resp.Path == "/" {
-		parents = nil
-	}
-
-	// Save cache for future numeric/fuzzy access.
-	writeLsCache(configDir, resp.Path, items, len(resp.Dirs), parents)
-
-	// How wide is the index column?
-	idxWidth := len(strconv.Itoa(len(items)))
-	if idxWidth < 2 {
-		idxWidth = 2
-	}
-
 	w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
 
-	// Show ".." navigation hint when not at root.
-	if resp.Path != "/" {
-		fmt.Fprintf(w, "  %*s  ../\n", idxWidth, "..")
-	}
-
-	idx := 1
-
 	for _, d := range resp.Dirs {
-		fmt.Fprintf(w, "  %*d  %s/\n", idxWidth, idx, d)
-		idx++
+		fmt.Fprintf(w, "  %s/\n", d)
 	}
 
 	for _, f := range resp.Files {
 		state := stateLabel(f.LocalState)
-		fmt.Fprintf(w, "  %*d  %s\t%s\t%s\t%s\n", idxWidth, idx, f.Name, fmtSize(f.Size), fmtAge(f.ModifiedAt), state)
-		idx++
+		fmt.Fprintf(w, "  %s\t%s\t%s\t%s\n", f.Name, fmtSize(f.Size), fmtAge(f.ModifiedAt), state)
 	}
 	w.Flush()
 }
@@ -153,10 +89,10 @@ func runLs(addr, configDir string, args []string) {
 
 func runCat(addr, configDir string, args []string) {
 	if len(args) < 1 {
-		fmt.Fprintf(os.Stderr, "Usage: pdrive cat <path|number>\n")
+		fmt.Fprintf(os.Stderr, "Usage: pdrive cat <path>\n")
 		os.Exit(1)
 	}
-	p := resolveLsArg(args[0], configDir).Path
+	p := args[0]
 	if !strings.HasPrefix(p, "/") {
 		p = "/" + p
 	}
@@ -188,10 +124,10 @@ func runCat(addr, configDir string, args []string) {
 
 func runGet(addr, configDir string, args []string) {
 	if len(args) < 1 {
-		fmt.Fprintf(os.Stderr, "Usage: pdrive get <path|number> [destination]\n")
+		fmt.Fprintf(os.Stderr, "Usage: pdrive get <path> [destination]\n")
 		os.Exit(1)
 	}
-	p := resolveLsArg(args[0], configDir).Path
+	p := args[0]
 	if !strings.HasPrefix(p, "/") {
 		p = "/" + p
 	}
@@ -257,7 +193,7 @@ func runGet(addr, configDir string, args []string) {
 
 func runRm(addr, configDir string, args []string) {
 	for _, arg := range args {
-		p := resolveLsArg(arg, configDir).Path
+		p := arg
 		if !strings.HasPrefix(p, "/") {
 			p = "/" + p
 		}
@@ -287,7 +223,7 @@ type treeEntry struct {
 func runTree(addr, configDir string, args []string) {
 	p := "/"
 	if len(args) > 0 {
-		p = resolveLsArg(args[0], configDir).Path
+		p = args[0]
 		if !strings.HasPrefix(p, "/") {
 			p = "/" + p
 		}
@@ -412,7 +348,7 @@ func runFind(addr, configDir string, args []string) {
 	pattern := args[0]
 	root := "/"
 	if len(args) >= 2 {
-		root = resolveLsArg(args[1], configDir).Path
+		root = args[1]
 		if !strings.HasPrefix(root, "/") {
 			root = "/" + root
 		}
@@ -450,7 +386,7 @@ func runMv(addr, configDir string, args []string) {
 		fmt.Fprintf(os.Stderr, "Usage: pdrive mv <src> <dst>\n")
 		os.Exit(1)
 	}
-	src := resolveLsArg(args[0], configDir).Path
+	src := args[0]
 	if !strings.HasPrefix(src, "/") {
 		src = "/" + src
 	}
@@ -522,10 +458,10 @@ type cliChunkInfo struct {
 
 func runInfo(addr, configDir string, args []string) {
 	if len(args) < 1 {
-		fmt.Fprintf(os.Stderr, "Usage: pdrive info <path|number>\n")
+		fmt.Fprintf(os.Stderr, "Usage: pdrive info <path>\n")
 		os.Exit(1)
 	}
-	p := resolveLsArg(args[0], configDir).Path
+	p := args[0]
 	if !strings.HasPrefix(p, "/") {
 		p = "/" + p
 	}
@@ -571,7 +507,7 @@ type cliDuResponse struct {
 func runDu(addr, configDir string, args []string) {
 	p := "/"
 	if len(args) > 0 {
-		p = resolveLsArg(args[0], configDir).Path
+		p = args[0]
 		if !strings.HasPrefix(p, "/") {
 			p = "/" + p
 		}

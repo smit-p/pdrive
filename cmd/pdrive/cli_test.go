@@ -16,138 +16,6 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// resolveLsArg
-// ---------------------------------------------------------------------------
-
-func TestResolveLsArg_NumericIndex(t *testing.T) {
-	dir := t.TempDir()
-	// 2 dirs (notes, photos) then 1 file (readme.txt)
-	writeLsCache(dir, "/docs", []string{"notes", "photos", "readme.txt"}, 2, nil)
-
-	tests := []struct {
-		arg    string
-		want   string
-		isFile bool
-	}{
-		{"1", "/docs/notes", false},
-		{"2", "/docs/photos", false},
-		{"3", "/docs/readme.txt", true},
-	}
-	for _, tt := range tests {
-		got := resolveLsArg(tt.arg, dir)
-		if got.Path != tt.want {
-			t.Errorf("resolveLsArg(%q).Path = %q, want %q", tt.arg, got.Path, tt.want)
-		}
-		if got.IsFile != tt.isFile {
-			t.Errorf("resolveLsArg(%q).IsFile = %v, want %v", tt.arg, got.IsFile, tt.isFile)
-		}
-	}
-}
-
-func TestResolveLsArg_DotDot(t *testing.T) {
-	dir := t.TempDir()
-
-	// From /docs/notes, .. should resolve to /docs
-	writeLsCache(dir, "/docs/notes", []string{"file1.txt"}, 0, []string{"/"})
-	got := resolveLsArg("..", dir)
-	if got.Path != "/docs" {
-		t.Errorf("resolveLsArg(..) from /docs/notes = %q, want /docs", got.Path)
-	}
-
-	// From /docs, .. should resolve to /
-	writeLsCache(dir, "/docs", []string{"notes"}, 1, nil)
-	got = resolveLsArg("..", dir)
-	if got.Path != "/" {
-		t.Errorf("resolveLsArg(..) from /docs = %q, want /", got.Path)
-	}
-
-	// From /, .. should still be /
-	writeLsCache(dir, "/", []string{"docs"}, 1, nil)
-	got = resolveLsArg("..", dir)
-	if got.Path != "/" {
-		t.Errorf("resolveLsArg(..) from / = %q, want /", got.Path)
-	}
-}
-
-func TestResolveLsArg_FuzzyMatch(t *testing.T) {
-	dir := t.TempDir()
-	writeLsCache(dir, "/", []string{"Documents", "Photos", "Music"}, 3, nil)
-
-	got := resolveLsArg("photo", dir)
-	if got.Path != "/Photos" {
-		t.Errorf("resolveLsArg(photo) = %q, want /Photos", got.Path)
-	}
-	got = resolveLsArg("doc", dir)
-	if got.Path != "/Documents" {
-		t.Errorf("resolveLsArg(doc) = %q, want /Documents", got.Path)
-	}
-}
-
-func TestResolveLsArg_PathPassthrough(t *testing.T) {
-	dir := t.TempDir()
-	// Absolute paths pass through untouched
-	got := resolveLsArg("/my/path", dir)
-	if got.Path != "/my/path" {
-		t.Errorf("resolveLsArg(/my/path) = %q", got.Path)
-	}
-	// Relative paths with separators pass through
-	got = resolveLsArg("sub/dir", dir)
-	if got.Path != "sub/dir" {
-		t.Errorf("resolveLsArg(sub/dir) = %q", got.Path)
-	}
-}
-
-func TestResolveLsArg_NoCache(t *testing.T) {
-	dir := t.TempDir()
-	got := resolveLsArg("something", dir)
-	if got.Path != "something" {
-		t.Errorf("resolveLsArg(something) with no cache = %q", got.Path)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// ls cache round-trip
-// ---------------------------------------------------------------------------
-
-func TestLsCache_ReadWrite(t *testing.T) {
-	dir := t.TempDir()
-	writeLsCache(dir, "/test/path", []string{"a", "b", "c"}, 2, []string{"/", "/test"})
-	c := readLsCache(dir)
-	if c == nil {
-		t.Fatal("readLsCache returned nil")
-	}
-	if c.Dir != "/test/path" {
-		t.Errorf("Dir = %q, want /test/path", c.Dir)
-	}
-	if len(c.Items) != 3 {
-		t.Errorf("Items len = %d, want 3", len(c.Items))
-	}
-	if len(c.Parents) != 2 {
-		t.Errorf("Parents len = %d, want 2", len(c.Parents))
-	}
-	if c.DirCount != 2 {
-		t.Errorf("DirCount = %d, want 2", c.DirCount)
-	}
-}
-
-func TestLsCache_ReadMissing(t *testing.T) {
-	dir := t.TempDir()
-	if c := readLsCache(dir); c != nil {
-		t.Errorf("expected nil for missing cache, got %+v", c)
-	}
-}
-
-func TestLsCache_ReadCorrupt(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "ls-cache.json"), []byte("{bad"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if c := readLsCache(dir); c != nil {
-		t.Errorf("expected nil for corrupt cache, got %+v", c)
-	}
-}
-
-// ---------------------------------------------------------------------------
 // formatting helpers
 // ---------------------------------------------------------------------------
 
@@ -408,47 +276,6 @@ func TestRunLs_Root(t *testing.T) {
 			t.Errorf("ls root missing %q:\n%s", want, output)
 		}
 	}
-	// cache should have been written
-	c := readLsCache(configDir)
-	if c == nil {
-		t.Fatal("cache not written after ls")
-	}
-	if c.Dir != "/" {
-		t.Errorf("cached dir = %q, want /", c.Dir)
-	}
-	if len(c.Items) != 3 { // 2 dirs + 1 file
-		t.Errorf("cached items = %d, want 3", len(c.Items))
-	}
-}
-
-func TestRunLs_NumericNavigation(t *testing.T) {
-	addr := mockDaemon(t)
-	configDir := t.TempDir()
-
-	// Populate cache by listing root
-	captureStdout(t, func() { runLs(addr, configDir, nil) })
-
-	// ls 1 → first item "docs"
-	output := captureStdout(t, func() { runLs(addr, configDir, []string{"1"}) })
-
-	if !strings.Contains(output, "notes.md") {
-		t.Errorf("ls 1 should show docs contents:\n%s", output)
-	}
-	if !strings.Contains(output, "/docs") {
-		t.Errorf("ls should show breadcrumb:\n%s", output)
-	}
-}
-
-func TestRunLs_DotDotNavigation(t *testing.T) {
-	addr := mockDaemon(t)
-	configDir := t.TempDir()
-
-	writeLsCache(configDir, "/docs", []string{"notes.md"}, 0, []string{"/"})
-
-	output := captureStdout(t, func() { runLs(addr, configDir, []string{".."}) })
-	if !strings.Contains(output, "docs/") {
-		t.Errorf("ls .. from /docs should show root:\n%s", output)
-	}
 }
 
 func TestRunStatus(t *testing.T) {
@@ -554,17 +381,6 @@ func TestRunCat(t *testing.T) {
 	}
 }
 
-func TestRunCat_NumericIndex(t *testing.T) {
-	addr := mockDaemon(t)
-	configDir := t.TempDir()
-	writeLsCache(configDir, "/", []string{"docs", "photos", "readme.txt"}, 2, nil)
-
-	output := captureStdout(t, func() { runCat(addr, configDir, []string{"3"}) })
-	if output != "file content here" {
-		t.Errorf("cat 3 = %q, want 'file content here'", output)
-	}
-}
-
 func TestRunGet(t *testing.T) {
 	addr := mockDaemon(t)
 	configDir := t.TempDir()
@@ -628,14 +444,13 @@ func TestRunGet_NoDestination(t *testing.T) {
 func TestRunPinUnpin(t *testing.T) {
 	addr := mockDaemon(t)
 	configDir := t.TempDir()
-	writeLsCache(configDir, "/docs", []string{"notes.md"}, 0, nil)
 
-	output := captureStdout(t, func() { runPinUnpin(addr, configDir, "pin", []string{"1"}) })
+	output := captureStdout(t, func() { runPinUnpin(addr, configDir, "pin", []string{"/docs/notes.md"}) })
 	if !strings.Contains(output, "Downloaded") {
 		t.Errorf("pin missing 'Downloaded':\n%s", output)
 	}
 
-	output = captureStdout(t, func() { runPinUnpin(addr, configDir, "unpin", []string{"1"}) })
+	output = captureStdout(t, func() { runPinUnpin(addr, configDir, "unpin", []string{"/docs/notes.md"}) })
 	if !strings.Contains(output, "Evicted") {
 		t.Errorf("unpin missing 'Evicted':\n%s", output)
 	}
@@ -644,9 +459,8 @@ func TestRunPinUnpin(t *testing.T) {
 func TestRunRm(t *testing.T) {
 	addr := mockDaemon(t)
 	configDir := t.TempDir()
-	writeLsCache(configDir, "/docs", []string{"notes.md"}, 0, nil)
 
-	output := captureStdout(t, func() { runRm(addr, configDir, []string{"1"}) })
+	output := captureStdout(t, func() { runRm(addr, configDir, []string{"/docs/notes.md"}) })
 	if !strings.Contains(output, "Deleted") {
 		t.Errorf("rm missing 'Deleted':\n%s", output)
 	}
@@ -813,8 +627,7 @@ func TestFmtAge_DaysAgo(t *testing.T) {
 func TestRunTree_WithPath(t *testing.T) {
 	addr := mockDaemon(t)
 	configDir := t.TempDir()
-	writeLsCache(configDir, "/", []string{"docs", "photos"}, 2, nil)
-	output := captureStdout(t, func() { runTree(addr, configDir, []string{"1"}) })
+	output := captureStdout(t, func() { runTree(addr, configDir, []string{"/docs"}) })
 	if !strings.Contains(output, "files") {
 		t.Errorf("tree with path arg missing summary:\n%s", output)
 	}
@@ -827,8 +640,7 @@ func TestRunTree_WithPath(t *testing.T) {
 func TestRunFind_WithPath(t *testing.T) {
 	addr := mockDaemon(t)
 	configDir := t.TempDir()
-	writeLsCache(configDir, "/", []string{"docs", "photos"}, 2, nil)
-	output := captureStdout(t, func() { runFind(addr, configDir, []string{"md", "1"}) })
+	output := captureStdout(t, func() { runFind(addr, configDir, []string{"md", "/docs"}) })
 	// should still find readme.md
 	if !strings.Contains(output, "readme.md") {
 		t.Errorf("find with path missing readme.md:\n%s", output)
@@ -841,20 +653,6 @@ func TestRunFind_NoResults(t *testing.T) {
 	output := captureStdout(t, func() { runFind(addr, configDir, []string{"zzzzz"}) })
 	if !strings.Contains(output, "No matches") {
 		t.Errorf("find no results missing 'No matches':\n%s", output)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// mv with numeric index
-// ---------------------------------------------------------------------------
-
-func TestRunMv_WithIndex(t *testing.T) {
-	addr := mockDaemon(t)
-	configDir := t.TempDir()
-	writeLsCache(configDir, "/docs", []string{"notes.md"}, 0, nil)
-	output := captureStdout(t, func() { runMv(addr, configDir, []string{"1", "/docs/old.md"}) })
-	if !strings.Contains(output, "Moved") {
-		t.Errorf("mv with index missing 'Moved':\n%s", output)
 	}
 }
 
@@ -947,23 +745,7 @@ func TestRunDu_WithPath(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// ls with file index (shows cat-like behavior)
-// ---------------------------------------------------------------------------
-
-func TestRunLs_FuzzyNavigation(t *testing.T) {
-	addr := mockDaemon(t)
-	configDir := t.TempDir()
-	// Populate cache by listing root
-	captureStdout(t, func() { runLs(addr, configDir, nil) })
-	// Fuzzy navigate to "doc"
-	output := captureStdout(t, func() { runLs(addr, configDir, []string{"doc"}) })
-	if !strings.Contains(output, "notes.md") {
-		t.Errorf("ls fuzzy 'doc' should show docs contents:\n%s", output)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// cat with numeric index that resolves to dir
+// cat with relative path
 // ---------------------------------------------------------------------------
 
 func TestRunCat_RelativePath(t *testing.T) {
@@ -972,64 +754,6 @@ func TestRunCat_RelativePath(t *testing.T) {
 	output := captureStdout(t, func() { runCat(addr, configDir, []string{"readme.txt"}) })
 	if output != "file content here" {
 		t.Errorf("cat = %q, want 'file content here'", output)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// info with numeric index
-// ---------------------------------------------------------------------------
-
-func TestRunInfo_NumericIndex(t *testing.T) {
-	addr := mockDaemon(t)
-	configDir := t.TempDir()
-	writeLsCache(configDir, "/docs", []string{"notes.md"}, 0, nil)
-	output := captureStdout(t, func() { runInfo(addr, configDir, []string{"1"}) })
-	if !strings.Contains(output, "complete") {
-		t.Errorf("info with index missing state:\n%s", output)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// resolveLsArg edge cases
-// ---------------------------------------------------------------------------
-
-func TestResolveLsArg_DotDotFromRoot(t *testing.T) {
-	dir := t.TempDir()
-	writeLsCache(dir, "/", []string{"docs"}, 1, nil)
-	got := resolveLsArg("..", dir)
-	if got.Path != "/" {
-		t.Errorf("resolveLsArg(..) from / = %q, want /", got.Path)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// resolveLsArg: ambiguous match
-// ---------------------------------------------------------------------------
-
-func TestResolveLsArg_AmbiguousMatch(t *testing.T) {
-	dir := t.TempDir()
-	writeLsCache(dir, "/", []string{"Documents", "Downloads", "Music"}, 3, nil)
-
-	// "Do" matches both Documents and Downloads
-	// This calls os.Exit(1), so just verify it panics or prints to stderr.
-	// We can't easily test os.Exit calls, but let's verify the code path
-	// by testing a non-ambiguous prefix instead.
-	got := resolveLsArg("music", dir)
-	if got.Path != "/Music" {
-		t.Errorf("resolveLsArg(music) = %q, want /Music", got.Path)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// resolveLsArg: no fuzzy match falls through to literal
-// ---------------------------------------------------------------------------
-
-func TestResolveLsArg_NoFuzzyMatch(t *testing.T) {
-	dir := t.TempDir()
-	writeLsCache(dir, "/", []string{"Documents"}, 1, nil)
-	got := resolveLsArg("zzzzz", dir)
-	if got.Path != "zzzzz" {
-		t.Errorf("resolveLsArg(zzzzz) = %q, want literal passthrough", got.Path)
 	}
 }
 
@@ -1050,63 +774,6 @@ func TestRunLs_EmptyDir(t *testing.T) {
 	output := captureStdout(t, func() { runLs(addr, configDir, []string{"/empty"}) })
 	if !strings.Contains(output, "(empty)") {
 		t.Errorf("empty ls missing '(empty)':\n%s", output)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Ls: selecting a file shows info instead
-// ---------------------------------------------------------------------------
-
-func TestRunLs_FileIndex(t *testing.T) {
-	addr := mockDaemon(t)
-	configDir := t.TempDir()
-	// "docs" is dir (index 1,2 = dirs), "readme.txt" is file (index 3)
-	writeLsCache(configDir, "/", []string{"docs", "photos", "readme.txt"}, 2, nil)
-
-	// Selecting index 3 (a file) should run info instead of ls
-	output := captureStdout(t, func() { runLs(addr, configDir, []string{"3"}) })
-	// Should show file info (from mock /api/info)
-	if !strings.Contains(output, "complete") {
-		t.Errorf("ls file index should show info:\n%s", output)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Ls: re-list cached dir (no args, has prior cache)
-// ---------------------------------------------------------------------------
-
-func TestRunLs_ReListCachedDir(t *testing.T) {
-	addr := mockDaemon(t)
-	configDir := t.TempDir()
-	writeLsCache(configDir, "/docs", []string{"notes.md"}, 0, []string{"/"})
-
-	output := captureStdout(t, func() { runLs(addr, configDir, nil) })
-	if !strings.Contains(output, "notes.md") {
-		t.Errorf("re-list should show /docs contents:\n%s", output)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Ls: breadcrumb navigation (going deeper then back up)
-// ---------------------------------------------------------------------------
-
-func TestRunLs_BreadcrumbNavigation(t *testing.T) {
-	addr := mockDaemon(t)
-	configDir := t.TempDir()
-
-	// Start at root
-	captureStdout(t, func() { runLs(addr, configDir, nil) })
-
-	// Navigate deeper to /docs
-	captureStdout(t, func() { runLs(addr, configDir, []string{"1"}) })
-
-	// Check cache was updated to /docs
-	c := readLsCache(configDir)
-	if c == nil {
-		t.Fatal("expected cache after navigation")
-	}
-	if c.Dir != "/docs" {
-		t.Errorf("cache.Dir = %q, want /docs", c.Dir)
 	}
 }
 
@@ -1185,45 +852,14 @@ func TestRunStatus_NilQuotas(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Du with numeric index
-// ---------------------------------------------------------------------------
-
-func TestRunDu_NumericIndex(t *testing.T) {
-	addr := mockDaemon(t)
-	configDir := t.TempDir()
-	writeLsCache(configDir, "/", []string{"docs", "photos"}, 2, nil)
-
-	output := captureStdout(t, func() { runDu(addr, configDir, []string{"1"}) })
-	if !strings.Contains(output, "42 files") {
-		t.Errorf("du with numeric index missing file count:\n%s", output)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Find with path argument using numeric index
-// ---------------------------------------------------------------------------
-
-func TestRunFind_NumericRootIndex(t *testing.T) {
-	addr := mockDaemon(t)
-	configDir := t.TempDir()
-	writeLsCache(configDir, "/", []string{"docs", "photos"}, 2, nil)
-
-	output := captureStdout(t, func() { runFind(addr, configDir, []string{"readme", "1"}) })
-	if !strings.Contains(output, "readme.md") {
-		t.Errorf("find with numeric root missing match:\n%s", output)
-	}
-}
-
-// ---------------------------------------------------------------------------
 // Pin/Unpin with multiple paths
 // ---------------------------------------------------------------------------
 
 func TestRunPinUnpin_MultiplePaths(t *testing.T) {
 	addr := mockDaemon(t)
 	configDir := t.TempDir()
-	writeLsCache(configDir, "/docs", []string{"a.txt", "b.txt"}, 0, nil)
 
-	output := captureStdout(t, func() { runPinUnpin(addr, configDir, "pin", []string{"1", "2"}) })
+	output := captureStdout(t, func() { runPinUnpin(addr, configDir, "pin", []string{"/docs/a.txt", "/docs/b.txt"}) })
 	if !strings.Contains(output, "Downloaded") {
 		t.Errorf("pin multiple missing 'Downloaded':\n%s", output)
 	}
@@ -1268,29 +904,6 @@ func TestRunCat_AbsolutePath(t *testing.T) {
 	output := captureStdout(t, func() { runCat(addr, configDir, []string{"/readme.txt"}) })
 	if output != "file content here" {
 		t.Errorf("cat absolute = %q, want 'file content here'", output)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Get with numeric index
-// ---------------------------------------------------------------------------
-
-func TestRunGet_NumericIndex(t *testing.T) {
-	addr := mockDaemon(t)
-	configDir := t.TempDir()
-	writeLsCache(configDir, "/", []string{"docs", "photos", "readme.txt"}, 2, nil)
-
-	dest := filepath.Join(t.TempDir(), "out.txt")
-	output := captureStdout(t, func() { runGet(addr, configDir, []string{"3", dest}) })
-	if !strings.Contains(output, "Downloaded") {
-		t.Errorf("get with index missing 'Downloaded':\n%s", output)
-	}
-	content, err := os.ReadFile(dest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(content) != "file content here" {
-		t.Errorf("content = %q", string(content))
 	}
 }
 
@@ -1351,23 +964,6 @@ func TestPrintTree_NestedDirs(t *testing.T) {
 	}
 	if !strings.Contains(output, "c.txt") {
 		t.Errorf("tree missing 'c.txt':\n%s", output)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Ls with navigation going up from deeper path
-// ---------------------------------------------------------------------------
-
-func TestRunLs_NavigateUp(t *testing.T) {
-	addr := mockDaemon(t)
-	configDir := t.TempDir()
-	// Simulate being deep in /docs (with parents trail)
-	writeLsCache(configDir, "/docs", []string{"notes.md"}, 0, []string{"/"})
-
-	output := captureStdout(t, func() { runLs(addr, configDir, []string{".."}) })
-	// Should show root
-	if !strings.Contains(output, "docs/") {
-		t.Errorf("ls .. from /docs should show root:\n%s", output)
 	}
 }
 
@@ -1672,27 +1268,6 @@ func TestDaemonGet_ReadBodyError(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Ls: parent navigation breadcrumb trimming (sideways navigation)
-// ---------------------------------------------------------------------------
-
-func TestRunLs_NavigateSideways(t *testing.T) {
-	addr := mockDaemon(t)
-	configDir := t.TempDir()
-	// Simulate being in /docs with parents ["/"]
-	writeLsCache(configDir, "/docs", []string{"notes.md"}, 0, []string{"/"})
-	// Navigate to root (sideways/up)
-	captureStdout(t, func() { runLs(addr, configDir, []string{"/"}) })
-	// Check that parents were trimmed
-	c := readLsCache(configDir)
-	if c == nil {
-		t.Fatal("expected cache")
-	}
-	if len(c.Parents) != 0 {
-		t.Errorf("parents should be nil/empty at root, got %v", c.Parents)
-	}
-}
-
-// ---------------------------------------------------------------------------
 // Status: provider with partial quota info
 // ---------------------------------------------------------------------------
 
@@ -1735,26 +1310,6 @@ func TestRunUploads_MixedStates(t *testing.T) {
 	}
 	if !strings.Contains(output, "0/0") {
 		t.Errorf("uploads should show 0/0 chunks:\n%s", output)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Ls: navigate from deeper path to root (resets parents)
-// ---------------------------------------------------------------------------
-
-func TestRunLs_NavigateDeepToRoot(t *testing.T) {
-	addr := mockDaemon(t)
-	configDir := t.TempDir()
-	// Simulate being deep with parents
-	writeLsCache(configDir, "/docs/sub", []string{"file.txt"}, 0, []string{"/", "/docs"})
-	// Navigate to root
-	captureStdout(t, func() { runLs(addr, configDir, []string{"/"}) })
-	c := readLsCache(configDir)
-	if c == nil {
-		t.Fatal("expected cache")
-	}
-	if c.Dir != "/" {
-		t.Errorf("cache.Dir = %q, want /", c.Dir)
 	}
 }
 
@@ -2387,78 +1942,8 @@ func TestRunGet_ServerError_Exits(t *testing.T) {
 	}
 }
 
-// Test resolveLsArg numeric index out of range (os.Exit path).
-
-func TestResolveLsArg_NumericOutOfRange_Exits(t *testing.T) {
-	if exitTestHelper("resolve_oor") {
-		dir := t.TempDir()
-		writeLsCache(dir, "/", []string{"one"}, 1, nil)
-		resolveLsArg("99", dir)
-		return
-	}
-	cmd := exec.Command(os.Args[0], "-test.run=TestResolveLsArg_NumericOutOfRange_Exits")
-	cmd.Env = append(os.Environ(), "CLI_EXIT_TEST=resolve_oor")
-	err := cmd.Run()
-	if err == nil {
-		t.Error("expected non-zero exit for out-of-range index")
-	}
-}
-
-// Test resolveLsArg ambiguous match (os.Exit path).
-
-func TestResolveLsArg_Ambiguous_Exits(t *testing.T) {
-	if exitTestHelper("resolve_ambig") {
-		dir := t.TempDir()
-		writeLsCache(dir, "/", []string{"Documents", "Downloads"}, 2, nil)
-		resolveLsArg("Do", dir)
-		return
-	}
-	cmd := exec.Command(os.Args[0], "-test.run=TestResolveLsArg_Ambiguous_Exits")
-	cmd.Env = append(os.Environ(), "CLI_EXIT_TEST=resolve_ambig")
-	err := cmd.Run()
-	if err == nil {
-		t.Error("expected non-zero exit for ambiguous match")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Breadcrumb trimming: navigate deep then sideways so parent trail is pruned.
-// Covers cli.go line 239: parents = parents[:len(parents)-1]
-// ---------------------------------------------------------------------------
-
-func TestRunLs_BreadcrumbTrimming(t *testing.T) {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/ls", func(w http.ResponseWriter, r *http.Request) {
-		p := r.URL.Query().Get("path")
-		switch p {
-		case "/alpha":
-			json.NewEncoder(w).Encode(cliLsResponse{Path: "/alpha", Dirs: []string{"sub"}})
-		case "/alpha/sub":
-			json.NewEncoder(w).Encode(cliLsResponse{Path: "/alpha/sub", Files: []cliLsFile{{Name: "file.txt", Path: "/alpha/sub/file.txt", Size: 10}}})
-		case "/beta":
-			json.NewEncoder(w).Encode(cliLsResponse{Path: "/beta", Files: []cliLsFile{{Name: "data.txt", Path: "/beta/data.txt", Size: 20}}})
-		default:
-			json.NewEncoder(w).Encode(cliLsResponse{Path: p})
-		}
-	})
-	srv := httptest.NewServer(mux)
-	t.Cleanup(srv.Close)
-	addr := strings.TrimPrefix(srv.URL, "http://")
-	configDir := t.TempDir()
-
-	// Step 1: list /alpha → cache Dir="/alpha", Parents=nil
-	captureStdout(t, func() { runLs(addr, configDir, []string{"/alpha"}) })
-
-	// Step 2: list /alpha/sub (deeper → Parents=["/alpha"])
-	captureStdout(t, func() { runLs(addr, configDir, []string{"/alpha/sub"}) })
-
-	// Step 3: list /beta (sideways → for loop trims Parents)
-	captureStdout(t, func() { runLs(addr, configDir, []string{"/beta"}) })
-}
-
 // ---------------------------------------------------------------------------
 // Tree: ≥2 files at the same directory level triggers file sort comparator.
-// Covers cli.go line 686 (files sort.Slice body).
 // ---------------------------------------------------------------------------
 
 func TestRunTree_MultipleFilesInDir(t *testing.T) {
@@ -2479,38 +1964,8 @@ func TestRunTree_MultipleFilesInDir(t *testing.T) {
 	}
 }
 
-// TestRunLs_FileSelection_TriggersInfo verifies that selecting a file (not dir)
-// by numeric index redirects to runInfo (line 175: if res.IsFile).
-func TestRunLs_FileSelection_TriggersInfo(t *testing.T) {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/info", func(w http.ResponseWriter, r *http.Request) {
-		p := r.URL.Query().Get("path")
-		json.NewEncoder(w).Encode(cliFileInfo{
-			Path: p, SizeBytes: 2048, CreatedAt: 1700000000, ModifiedAt: 1700001000,
-			SHA256: "abc123", UploadState: "complete",
-			Chunks: []cliChunkInfo{{Sequence: 0, SizeBytes: 2048, CloudSize: 2048, Providers: []string{"gdrive"}}},
-		})
-	})
-	srv := httptest.NewServer(mux)
-	t.Cleanup(srv.Close)
-	addr := strings.TrimPrefix(srv.URL, "http://")
-
-	configDir := t.TempDir()
-	// Cache has 2 dirs + 1 file; index 3 points to the file.
-	writeLsCache(configDir, "/", []string{"docs", "photos", "readme.txt"}, 2, nil)
-
-	output := captureStdout(t, func() { runLs(addr, configDir, []string{"3"}) })
-	// runInfo should print the file info, not a directory listing.
-	if !strings.Contains(output, "readme.txt") {
-		t.Errorf("expected file info for readme.txt, got:\n%s", output)
-	}
-	if !strings.Contains(output, "abc123") {
-		t.Errorf("expected SHA256 in output, got:\n%s", output)
-	}
-}
-
-// TestRunLs_SortMultipleFiles verifies that the sort.Slice comparator at
-// line 219 fires when the response contains 2+ files.
+// TestRunLs_SortMultipleFiles verifies that the sort.Slice comparator
+// fires when the response contains 2+ files.
 func TestRunLs_SortMultipleFiles(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/ls", func(w http.ResponseWriter, _ *http.Request) {

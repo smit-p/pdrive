@@ -185,7 +185,7 @@ mount -t davfs http://localhost:8765 /mnt/pdrive
 | `/api/tree?path=/`         | GET    | Recursive directory tree                                    |
 | `/api/find?pattern=*.pdf`  | GET    | Glob search across all files                                |
 | `/api/du?path=/`           | GET    | Disk usage summary for a directory                          |
-| `/api/download?path=/file` | GET    | Download decrypted file content                             |
+| `/api/download?path=/file` | GET    | Download file content                                       |
 | `/api/activity`            | GET    | Recent activity log entries                                 |
 | `/api/verify`              | GET    | Verify chunk integrity on cloud providers                   |
 | `/api/pin?path=/file`      | POST   | Download cloud file to local                                |
@@ -208,22 +208,22 @@ pdrive                          Start the daemon (default)
 
 Navigation:
   pdrive browse                   Interactive file browser (TUI)
-  pdrive ls [path|number]         List files and directories
+  pdrive ls [path]                List files and directories
   pdrive tree [path]              Show directory tree recursively
   pdrive find <pattern> [path]    Search for files by name
 
 File operations:
-  pdrive cat <path|number>        Print file contents to stdout
-  pdrive get <path|number> [dest] Download file to local filesystem
+  pdrive cat <path>               Print file contents to stdout
+  pdrive get <path> [dest]        Download file to local filesystem
   pdrive put <local-path> [dir]   Upload local file or directory
-  pdrive pin <path|number> [...]  Download cloud-only files locally
-  pdrive unpin <path|number> [...] Evict local copies (keep in cloud)
+  pdrive pin <path> [...]         Download cloud-only files locally
+  pdrive unpin <path> [...]       Evict local copies (keep in cloud)
   pdrive mv <src> <dst>           Move or rename files/directories
-  pdrive rm <path|number> [...]   Delete files/directories from cloud
+  pdrive rm <path> [...]          Delete files/directories from cloud
   pdrive mkdir <path>             Create a directory
 
 Info:
-  pdrive info <path|number>       Show detailed file metadata and chunks
+  pdrive info <path>              Show detailed file metadata and chunks
   pdrive du [path]                Show disk usage summary
   pdrive status                   Show storage summary and provider quotas
   pdrive remotes                  List rclone remotes and which are enabled
@@ -243,8 +243,6 @@ Management:
 ```
 
 All subcommands talk to the running daemon over HTTP — you need the daemon running first (`pdrive` to start).
-
-Use numbers from `ls` output as shorthand: `pdrive ls` → `pdrive cat 3`. Use `..` to go up a directory. Fuzzy matching works too: `pdrive cat vacation`.
 
 ### Remote Management
 
@@ -288,7 +286,7 @@ pdrive unpin /video.mp4       # evict local copy, keep in cloud
 
 | Flag               | Default          | Description                                                               |
 | ------------------ | ---------------- | ------------------------------------------------------------------------- |
-| `--config-dir`     | `~/.pdrive`      | Configuration directory (DB, spool, key)                                  |
+| `--config-dir`     | `~/.pdrive`      | Configuration directory (DB, spool)                                       |
 | `--sync-dir`       | `~/pdrive`       | Local sync folder; empty disables sync                                    |
 | `--webdav-addr`    | `127.0.0.1:8765` | HTTP/WebDAV listen address                                                |
 | `--rclone-addr`    | `127.0.0.1:5572` | rclone RC address                                                         |

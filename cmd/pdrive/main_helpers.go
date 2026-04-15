@@ -122,7 +122,7 @@ func dispatchCmd(args []string, addr, configDir, mountPoint string) (bool, error
 	switch args[0] {
 	case "pin", "unpin":
 		if len(args) < 2 {
-			return true, fmt.Errorf("usage: pdrive %s <path|number>", args[0])
+			return true, fmt.Errorf("usage: pdrive %s <path>", args[0])
 		}
 		runPinUnpin(addr, configDir, args[0], args[1:])
 	case "ls":
@@ -148,7 +148,7 @@ func dispatchCmd(args []string, addr, configDir, mountPoint string) (bool, error
 		runPut(addr, args[1:])
 	case "rm":
 		if len(args) < 2 {
-			return true, fmt.Errorf("usage: pdrive rm <path|number> [<path|number>...]")
+			return true, fmt.Errorf("usage: pdrive rm <path> [<path>...]")
 		}
 		runRm(addr, configDir, args[1:])
 	case "tree":
@@ -170,7 +170,7 @@ func dispatchCmd(args []string, addr, configDir, mountPoint string) (bool, error
 		runMkdir(addr, args[1:])
 	case "info":
 		if len(args) < 2 {
-			return true, fmt.Errorf("usage: pdrive info <path|number>")
+			return true, fmt.Errorf("usage: pdrive info <path>")
 		}
 		runInfo(addr, configDir, args[1:])
 	case "du":
@@ -188,6 +188,7 @@ func dispatchCmd(args []string, addr, configDir, mountPoint string) (bool, error
 	case "help":
 		printCLIUsage()
 		fmt.Fprintf(os.Stderr, "\nAll daemon flags:\n\n")
+		flag.CommandLine.PrintDefaults()
 	default:
 		return true, fmt.Errorf("unknown subcommand: %s", args[0])
 	}

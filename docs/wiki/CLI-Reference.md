@@ -4,14 +4,14 @@
 
 ### `pdrive`
 
-Start the pdrive daemon. Prompts for encryption passphrase on first run. Runs in the background by default.
+Start the pdrive daemon. Runs in the background by default.
 
 ```bash
 pdrive                # Start daemon (background)
 pdrive --foreground   # Start in foreground (for debugging)
 pdrive --debug        # Enable debug logging
 ```
-
+**Columns:** Name, Size, Age, State
 ### `pdrive stop`
 
 Stop the running daemon (sends SIGTERM via PID file).
@@ -51,15 +51,14 @@ pdrive health
 
 ### `pdrive ls [path]`
 
-List files in a directory. Supports numeric references from previous listings.
+List files in a directory.
 
 ```bash
 pdrive ls              # List root directory
 pdrive ls /photos      # List /photos directory
-pdrive ls 3            # Open item #3 from last listing
 ```
 
-**Columns:** Index, Size, Age, Name
+**Columns:** Size, Age, Name
 
 ### `pdrive put <local-path> [remote-dir]`
 
@@ -118,9 +117,9 @@ pdrive mkdir /projects/2024
 
 ## Search and Discovery
 
-### `pdrive find <query>`
+### `pdrive find <pattern>`
 
-Search for files by name (fuzzy matching).
+Search for files by glob pattern.
 
 ```bash
 pdrive find report
