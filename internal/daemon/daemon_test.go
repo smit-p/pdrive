@@ -1257,7 +1257,7 @@ func TestInfoEndpoint_WithChunks(t *testing.T) {
 	seedFile(t, db, "f-info-c", "/info/detailed.txt", 50)
 	// Insert a chunk + location so the info response has chunk data.
 	db.Conn().Exec(
-		`INSERT INTO chunks (id, file_id, sequence, size_bytes, sha256, encrypted_size) VALUES (?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO chunks (id, file_id, sequence, size_bytes, sha256, cloud_size) VALUES (?, ?, ?, ?, ?, ?)`,
 		"c-info1", "f-info-c", 0, 50, "fakehash", 66,
 	)
 	db.Conn().Exec(
@@ -1273,10 +1273,10 @@ func TestInfoEndpoint_WithChunks(t *testing.T) {
 	}
 	var resp struct {
 		Chunks []struct {
-			Sequence      int      `json:"sequence"`
-			SizeBytes     int      `json:"size_bytes"`
-			EncryptedSize int      `json:"encrypted_size"`
-			Providers     []string `json:"providers"`
+			Sequence  int      `json:"sequence"`
+			SizeBytes int      `json:"size_bytes"`
+			CloudSize int      `json:"cloud_size"`
+			Providers []string `json:"providers"`
 		} `json:"chunks"`
 	}
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {

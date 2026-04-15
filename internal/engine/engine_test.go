@@ -2226,7 +2226,7 @@ func TestReadFileToTempFile_NoChunkLocations(t *testing.T) {
 	})
 	// Insert a chunk but no chunk_location.
 	eng.db.Conn().Exec(
-		`INSERT INTO chunks (id, file_id, sequence, size_bytes, sha256, encrypted_size) VALUES (?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO chunks (id, file_id, sequence, size_bytes, sha256, cloud_size) VALUES (?, ?, ?, ?, ?, ?)`,
 		"c-noloc", "noloc", 0, 5, "fakehash", 21,
 	)
 
@@ -2247,11 +2247,11 @@ func TestReadFileToTempFile_ChunkSequenceGap(t *testing.T) {
 	})
 	// Insert chunks with sequence 0 and 2 (skipping 1).
 	eng.db.Conn().Exec(
-		`INSERT INTO chunks (id, file_id, sequence, size_bytes, sha256, encrypted_size) VALUES (?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO chunks (id, file_id, sequence, size_bytes, sha256, cloud_size) VALUES (?, ?, ?, ?, ?, ?)`,
 		"c-gap0", "gap", 0, 5, "h0", 21,
 	)
 	eng.db.Conn().Exec(
-		`INSERT INTO chunks (id, file_id, sequence, size_bytes, sha256, encrypted_size) VALUES (?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO chunks (id, file_id, sequence, size_bytes, sha256, cloud_size) VALUES (?, ?, ?, ?, ?, ?)`,
 		"c-gap2", "gap", 2, 5, "h2", 21,
 	)
 
@@ -3613,7 +3613,7 @@ func TestWriteFileStream_InsertChunkMetaRollback(t *testing.T) {
 func TestGCOrphanedChunks_SweepOrphanedRecords(t *testing.T) {
 	eng, _ := newTestEngine(t)
 	// Insert a chunk record whose file_id doesn't exist in files table.
-	eng.db.Conn().Exec(`INSERT INTO chunks (id, file_id, sequence, size_bytes, sha256, encrypted_size) VALUES ('orphan-c1', 'nonexistent-file', 0, 100, 'abc', 120)`)
+	eng.db.Conn().Exec(`INSERT INTO chunks (id, file_id, sequence, size_bytes, sha256, cloud_size) VALUES ('orphan-c1', 'nonexistent-file', 0, 100, 'abc', 120)`)
 	eng.db.Conn().Exec(`INSERT INTO chunk_locations (chunk_id, provider_id, remote_path, upload_confirmed_at) VALUES ('orphan-c1', 'p1', 'pdrive-chunks/orphan-c1', 0)`)
 
 	eng.GCOrphanedChunks()

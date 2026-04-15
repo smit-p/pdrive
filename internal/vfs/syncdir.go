@@ -312,7 +312,10 @@ func (s *SyncDir) upload(absPath, vp string) {
 	val, _ := s.pathLocks.LoadOrStore(vp, &sync.Mutex{})
 	pathMu := val.(*sync.Mutex)
 	pathMu.Lock()
-	defer pathMu.Unlock()
+	defer func() {
+		pathMu.Unlock()
+		s.pathLocks.Delete(vp)
+	}()
 
 	info, err := os.Stat(absPath)
 	if err != nil || info.IsDir() {

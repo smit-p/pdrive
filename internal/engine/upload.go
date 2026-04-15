@@ -39,6 +39,8 @@ type uploadProgress struct {
 	SizeBytes      int64
 	BytesDone      int64 // encrypted bytes of completed chunks
 	BytesTotal     int64 // total encrypted size (all chunks)
+	HashBytesRead  int64 // bytes hashed so far (Preparing phase)
+	HashBytesTotal int64 // total bytes to hash (== SizeBytes)
 	StartedAt      time.Time
 	Failed         bool
 	Preparing      bool // true while hashing / spooling, before chunks start
@@ -57,6 +59,8 @@ type UploadProgressInfo struct {
 	SizeBytes      int64     `json:"SizeBytes"`
 	BytesDone      int64     `json:"BytesDone"`
 	BytesTotal     int64     `json:"BytesTotal"`
+	HashBytesRead  int64     `json:"HashBytesRead"`
+	HashBytesTotal int64     `json:"HashBytesTotal"`
 	SpeedBPS       float64   `json:"SpeedBPS"`
 	StartedAt      time.Time `json:"StartedAt"`
 	Failed         bool      `json:"Failed"`
@@ -69,7 +73,7 @@ type chunkMeta struct {
 	sequence      int
 	size          int
 	sha256        string
-	encryptedSize int
+	cloudSize int
 	dataShards    int
 	parityShards  int
 	shards        []shardMeta
@@ -81,6 +85,26 @@ type shardMeta struct {
 	providerID string
 	remotePath string
 	size       int
+}
+
+// countingReader wraps an io.Reader and calls onProgress with the cumulative
+// byte count after each Read, throttled to avoid excessive lock contention.
+type countingReader struct {
+	r          io.Reader
+	total      int64
+	lastReport int64
+	onProgress func(int64)
+}
+
+func (cr *countingReader) Read(p []byte) (int, error) {
+	n, err := cr.r.Read(p)
+	cr.total += int64(n)
+	// Report at most every 256 KB to avoid lock contention on fast I/O.
+	if cr.total-cr.lastReport >= 256*1024 || err != nil {
+		cr.onProgress(cr.total)
+		cr.lastReport = cr.total
+	}
+	return n, err
 }
 
 // WriteFile writes a file to the virtual filesystem, chunking and encrypting it.
@@ -185,6 +209,13 @@ func (e *Engine) WriteFileAsync(virtualPath string, tmpFile *os.File, tmpPath st
 	// Adopt the queued placeholder (set by SyncDir) or create a fresh entry.
 	e.adoptQueuedUpload(virtualPath, fileID, size)
 
+	// Set hash total so the UI can show determinate progress.
+	e.uploadsMu.Lock()
+	if p, ok := e.uploads[fileID]; ok {
+		p.HashBytesTotal = size
+	}
+	e.uploadsMu.Unlock()
+
 	// Pre-upload space check: reject early if the file won't fit.
 	if err := e.CheckSpace(size); err != nil {
 		e.removeUploadProgress(fileID)
@@ -194,8 +225,16 @@ func (e *Engine) WriteFileAsync(virtualPath string, tmpFile *os.File, tmpPath st
 	}
 
 	// Hash synchronously so we can write the pending DB record now.
+	// Use a counting wrapper to feed progress back to the UI.
 	hasher := sha256.New()
-	if _, err := io.Copy(hasher, tmpFile); err != nil {
+	hashReader := &countingReader{r: tmpFile, onProgress: func(n int64) {
+		e.uploadsMu.Lock()
+		if p, ok := e.uploads[fileID]; ok {
+			p.HashBytesRead = n
+		}
+		e.uploadsMu.Unlock()
+	}}
+	if _, err := io.Copy(hasher, hashReader); err != nil {
 		e.removeUploadProgress(fileID)
 		tmpFile.Close()
 		os.Remove(tmpPath)
@@ -395,7 +434,7 @@ func (e *Engine) uploadChunks(r io.ReadSeeker, fileID string, fileSize int64, sc
 			sequence:      seq,
 			size:          int(chunkPlain),
 			sha256:        chunkHash,
-			encryptedSize: int(chunkPlain),
+			cloudSize: int(chunkPlain),
 		}
 
 		type shardFile struct {
@@ -659,8 +698,8 @@ func (e *Engine) insertChunkMetadata(fileID string, metas []chunkMeta) error {
 	confirmTime := time.Now().Unix()
 	for _, m := range metas {
 		if _, err := tx.Exec(
-			`INSERT INTO chunks (id, file_id, sequence, size_bytes, sha256, encrypted_size, data_shards, parity_shards) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-			m.chunkID, fileID, m.sequence, m.size, m.sha256, m.encryptedSize, m.dataShards, m.parityShards,
+			`INSERT INTO chunks (id, file_id, sequence, size_bytes, sha256, cloud_size, data_shards, parity_shards) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			m.chunkID, fileID, m.sequence, m.size, m.sha256, m.cloudSize, m.dataShards, m.parityShards,
 		); err != nil {
 			return fmt.Errorf("inserting chunk record: %w", err)
 		}
@@ -737,8 +776,8 @@ func (e *Engine) cloneFileFromDonor(donor *metadata.File, fileID, virtualPath st
 	for _, dc := range donorChunks {
 		newChunkID := uuid.New().String()
 		if _, err := tx.Exec(
-			`INSERT INTO chunks (id, file_id, sequence, size_bytes, sha256, encrypted_size, data_shards, parity_shards) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-			newChunkID, fileID, dc.Sequence, dc.SizeBytes, dc.SHA256, dc.EncryptedSize, dc.DataShards, dc.ParityShards,
+			`INSERT INTO chunks (id, file_id, sequence, size_bytes, sha256, cloud_size, data_shards, parity_shards) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			newChunkID, fileID, dc.Sequence, dc.SizeBytes, dc.SHA256, dc.CloudSize, dc.DataShards, dc.ParityShards,
 		); err != nil {
 			return fmt.Errorf("cloning chunk record: %w", err)
 		}
@@ -896,6 +935,8 @@ func (e *Engine) UploadProgress() []UploadProgressInfo {
 			SizeBytes:      p.SizeBytes,
 			BytesDone:      bytesDone,
 			BytesTotal:     p.BytesTotal,
+			HashBytesRead:  p.HashBytesRead,
+			HashBytesTotal: p.HashBytesTotal,
 			SpeedBPS:       stats.SpeedBytes,
 			StartedAt:      p.StartedAt,
 			Failed:         p.Failed,

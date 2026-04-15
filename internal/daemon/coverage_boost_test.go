@@ -1229,7 +1229,7 @@ func TestValidateRestoredDB_ChunksExist_ListDirError(t *testing.T) {
 	// Insert a file record.
 	db.Conn().Exec(`INSERT INTO files (id, virtual_path, size_bytes, sha256_full, created_at, modified_at, upload_state) VALUES ('f1', '/test.txt', 100, 'abc123', 1000, 1000, 'complete')`)
 	// Insert a chunk record.
-	db.Conn().Exec(`INSERT INTO chunks (id, file_id, sequence, size_bytes, sha256, encrypted_size) VALUES ('c1', 'f1', 0, 100, 'chunk_hash', 128)`)
+	db.Conn().Exec(`INSERT INTO chunks (id, file_id, sequence, size_bytes, sha256, cloud_size) VALUES ('c1', 'f1', 0, 100, 'chunk_hash', 128)`)
 	// Insert a chunk location pointing to gdrive.
 	db.Conn().Exec(`INSERT INTO chunk_locations (chunk_id, provider_id, remote_path) VALUES ('c1', 'gdrive', 'pdrive-chunks/c1')`)
 
@@ -1255,7 +1255,7 @@ func TestValidateRestoredDB_QueryFailure(t *testing.T) {
 		RcloneRemote: "gdrive", QuotaTotalBytes: &total, QuotaFreeBytes: &free,
 	})
 	db.Conn().Exec(`INSERT INTO files (id, virtual_path, size_bytes, sha256_full, created_at, modified_at, upload_state) VALUES ('f1', '/t.txt', 10, 'h', 1, 1, 'complete')`)
-	db.Conn().Exec(`INSERT INTO chunks (id, file_id, sequence, size_bytes, sha256, encrypted_size) VALUES ('c1', 'f1', 0, 10, 'h', 16)`)
+	db.Conn().Exec(`INSERT INTO chunks (id, file_id, sequence, size_bytes, sha256, cloud_size) VALUES ('c1', 'f1', 0, 10, 'h', 16)`)
 	db.Conn().Exec(`INSERT INTO chunk_locations (chunk_id, provider_id, remote_path) VALUES ('c1', 'gdrive', 'pdrive-chunks/c1')`)
 
 	// Now rename the providers table so the JOIN errors.
@@ -1303,7 +1303,7 @@ func TestValidateRestoredDB_ScanError(t *testing.T) {
 	// Insert a provider with NULL rclone_remote via raw SQL.
 	db.Conn().Exec(`INSERT INTO providers (id, type, display_name, rclone_remote) VALUES ('pnull', 'drive', 'NullRemote', NULL)`)
 	db.Conn().Exec(`INSERT INTO files (id, virtual_path, size_bytes, sha256_full, created_at, modified_at, upload_state) VALUES ('f1', '/test.txt', 100, 'abc', 1, 1, 'complete')`)
-	db.Conn().Exec(`INSERT INTO chunks (id, file_id, sequence, size_bytes, sha256, encrypted_size) VALUES ('c1', 'f1', 0, 100, 'h', 128)`)
+	db.Conn().Exec(`INSERT INTO chunks (id, file_id, sequence, size_bytes, sha256, cloud_size) VALUES ('c1', 'f1', 0, 100, 'h', 128)`)
 	db.Conn().Exec(`INSERT INTO chunk_locations (chunk_id, provider_id, remote_path) VALUES ('c1', 'pnull', 'pdrive-chunks/c1')`)
 
 	// validateRestoredDB should hit Scan error (NULL → string) and continue,

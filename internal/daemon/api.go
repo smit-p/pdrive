@@ -581,10 +581,10 @@ func (h *browserHandler) serveAPIInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	type chunkJSON struct {
-		Sequence      int      `json:"sequence"`
-		SizeBytes     int      `json:"size_bytes"`
-		EncryptedSize int      `json:"encrypted_size"`
-		Providers     []string `json:"providers"`
+		Sequence  int      `json:"sequence"`
+		SizeBytes int      `json:"size_bytes"`
+		CloudSize int      `json:"cloud_size"`
+		Providers []string `json:"providers"`
 	}
 	type infoJSON struct {
 		Path        string      `json:"path"`
@@ -606,10 +606,10 @@ func (h *browserHandler) serveAPIInfo(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, c := range info.Chunks {
 		resp.Chunks = append(resp.Chunks, chunkJSON{
-			Sequence:      c.Sequence,
-			SizeBytes:     c.SizeBytes,
-			EncryptedSize: c.EncryptedSize,
-			Providers:     c.Providers,
+			Sequence:  c.Sequence,
+			SizeBytes: c.SizeBytes,
+			CloudSize: c.CloudSize,
+			Providers: c.Providers,
 		})
 	}
 	w.Header().Set("Content-Type", "application/json")

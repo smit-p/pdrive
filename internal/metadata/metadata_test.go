@@ -150,8 +150,8 @@ func TestChunkAndLocationCRUD(t *testing.T) {
 	db.InsertFile(&File{ID: "f1", VirtualPath: "/data.bin", SizeBytes: 8 * 1024 * 1024, CreatedAt: now, ModifiedAt: now, SHA256Full: "fullhash"})
 
 	// Insert chunks.
-	db.InsertChunk(&ChunkRecord{ID: "c1", FileID: "f1", Sequence: 0, SizeBytes: 4 * 1024 * 1024, SHA256: "hash1", EncryptedSize: 4*1024*1024 + 28})
-	db.InsertChunk(&ChunkRecord{ID: "c2", FileID: "f1", Sequence: 1, SizeBytes: 4 * 1024 * 1024, SHA256: "hash2", EncryptedSize: 4*1024*1024 + 28})
+	db.InsertChunk(&ChunkRecord{ID: "c1", FileID: "f1", Sequence: 0, SizeBytes: 4 * 1024 * 1024, SHA256: "hash1", CloudSize: 4*1024*1024 + 28})
+	db.InsertChunk(&ChunkRecord{ID: "c2", FileID: "f1", Sequence: 1, SizeBytes: 4 * 1024 * 1024, SHA256: "hash2", CloudSize: 4*1024*1024 + 28})
 
 	chunks, err := db.GetChunksForFile("f1")
 	if err != nil {
@@ -207,7 +207,7 @@ func TestCascadeDelete(t *testing.T) {
 
 	now := time.Now().Unix()
 	db.InsertFile(&File{ID: "f1", VirtualPath: "/cascade.bin", SizeBytes: 100, CreatedAt: now, ModifiedAt: now, SHA256Full: "h"})
-	db.InsertChunk(&ChunkRecord{ID: "c1", FileID: "f1", Sequence: 0, SizeBytes: 100, SHA256: "ch", EncryptedSize: 128})
+	db.InsertChunk(&ChunkRecord{ID: "c1", FileID: "f1", Sequence: 0, SizeBytes: 100, SHA256: "ch", CloudSize: 128})
 	db.InsertChunkLocation(&ChunkLocation{ChunkID: "c1", ProviderID: "p1", RemotePath: "pdrive-chunks/c1"})
 
 	// Delete file — should cascade to chunks and locations.
@@ -488,7 +488,7 @@ func TestFKConstraintEnforced(t *testing.T) {
 		Sequence:      0,
 		SizeBytes:     100,
 		SHA256:        "hash",
-		EncryptedSize: 128,
+		CloudSize: 128,
 	})
 	if err == nil {
 		t.Error("InsertChunk with non-existent file_id must fail (FK constraint)")
@@ -518,7 +518,7 @@ func TestConcurrentWritesFK(t *testing.T) {
 			}
 			if err := db.InsertChunk(&ChunkRecord{
 				ID: chunkID, FileID: fileID, Sequence: 0,
-				SizeBytes: 100, SHA256: "h", EncryptedSize: 128,
+				SizeBytes: 100, SHA256: "h", CloudSize: 128,
 			}); err != nil {
 				errs <- err
 				return
@@ -777,8 +777,8 @@ func TestRemotePathRefCount(t *testing.T) {
 	now := time.Now().Unix()
 	db.InsertFile(&File{ID: "f1", VirtualPath: "/a.txt", SizeBytes: 100, CreatedAt: now, ModifiedAt: now, SHA256Full: "h1"})
 	db.InsertFile(&File{ID: "f2", VirtualPath: "/b.txt", SizeBytes: 100, CreatedAt: now, ModifiedAt: now, SHA256Full: "h2"})
-	db.InsertChunk(&ChunkRecord{ID: "c1", FileID: "f1", Sequence: 0, SizeBytes: 100, SHA256: "ch", EncryptedSize: 128})
-	db.InsertChunk(&ChunkRecord{ID: "c2", FileID: "f2", Sequence: 0, SizeBytes: 100, SHA256: "ch", EncryptedSize: 128})
+	db.InsertChunk(&ChunkRecord{ID: "c1", FileID: "f1", Sequence: 0, SizeBytes: 100, SHA256: "ch", CloudSize: 128})
+	db.InsertChunk(&ChunkRecord{ID: "c2", FileID: "f2", Sequence: 0, SizeBytes: 100, SHA256: "ch", CloudSize: 128})
 
 	// Both chunks point to the same remote_path (dedup scenario).
 	db.InsertChunkLocation(&ChunkLocation{ChunkID: "c1", ProviderID: "p1", RemotePath: "pdrive-chunks/shared"})
@@ -870,8 +870,8 @@ func TestGetChunkLocationsByProvider(t *testing.T) {
 	// Create a file with two chunks on different providers.
 	now := time.Now().Unix()
 	db.InsertFile(&File{ID: "f1", VirtualPath: "/test.txt", SizeBytes: 100, CreatedAt: now, ModifiedAt: now, SHA256Full: "abc", UploadState: "complete"})
-	db.InsertChunk(&ChunkRecord{ID: "c1", FileID: "f1", Sequence: 0, SizeBytes: 50, SHA256: "h1", EncryptedSize: 60})
-	db.InsertChunk(&ChunkRecord{ID: "c2", FileID: "f1", Sequence: 1, SizeBytes: 50, SHA256: "h2", EncryptedSize: 60})
+	db.InsertChunk(&ChunkRecord{ID: "c1", FileID: "f1", Sequence: 0, SizeBytes: 50, SHA256: "h1", CloudSize: 60})
+	db.InsertChunk(&ChunkRecord{ID: "c2", FileID: "f1", Sequence: 1, SizeBytes: 50, SHA256: "h2", CloudSize: 60})
 	conf := now
 	db.InsertChunkLocation(&ChunkLocation{ChunkID: "c1", ProviderID: "p1", RemotePath: "pdrive-chunks/c1", UploadConfirmedAt: &conf})
 	db.InsertChunkLocation(&ChunkLocation{ChunkID: "c2", ProviderID: "p2", RemotePath: "pdrive-chunks/c2", UploadConfirmedAt: &conf})
@@ -911,7 +911,7 @@ func TestGetAllChunkLocations(t *testing.T) {
 
 	now := time.Now().Unix()
 	db.InsertFile(&File{ID: "f1", VirtualPath: "/a.txt", SizeBytes: 50, CreatedAt: now, ModifiedAt: now, SHA256Full: "h1", UploadState: "complete"})
-	db.InsertChunk(&ChunkRecord{ID: "c1", FileID: "f1", Sequence: 0, SizeBytes: 50, SHA256: "ch1", EncryptedSize: 60})
+	db.InsertChunk(&ChunkRecord{ID: "c1", FileID: "f1", Sequence: 0, SizeBytes: 50, SHA256: "ch1", CloudSize: 60})
 	db.InsertChunkLocation(&ChunkLocation{ChunkID: "c1", ProviderID: "p1", RemotePath: "pdrive-chunks/c1"})
 
 	locs, err := db.GetAllChunkLocations()
@@ -1211,9 +1211,9 @@ func TestGetProviderChunkBytes_WithData(t *testing.T) {
 	now := time.Now().Unix()
 	db.InsertFile(&File{ID: "f1", VirtualPath: "/a.txt", SizeBytes: 100, CreatedAt: now, ModifiedAt: now, SHA256Full: "abc", UploadState: "complete"})
 
-	// Chunks with encrypted_size.
-	db.InsertChunk(&ChunkRecord{ID: "c1", FileID: "f1", Sequence: 0, SizeBytes: 50, SHA256: "h1", EncryptedSize: 60})
-	db.InsertChunk(&ChunkRecord{ID: "c2", FileID: "f1", Sequence: 1, SizeBytes: 50, SHA256: "h2", EncryptedSize: 70})
+	// Chunks with cloud_size.
+	db.InsertChunk(&ChunkRecord{ID: "c1", FileID: "f1", Sequence: 0, SizeBytes: 50, SHA256: "h1", CloudSize: 60})
+	db.InsertChunk(&ChunkRecord{ID: "c2", FileID: "f1", Sequence: 1, SizeBytes: 50, SHA256: "h2", CloudSize: 70})
 
 	// Chunk locations.
 	confirmed := now
@@ -1237,7 +1237,7 @@ func TestConfirmUpload_Success(t *testing.T) {
 
 	db.UpsertProvider(&Provider{ID: "p1", Type: "drive", DisplayName: "Drive", RcloneRemote: "drive"})
 	db.InsertFile(&File{ID: "f1", VirtualPath: "/a.txt", SizeBytes: 10, CreatedAt: now, ModifiedAt: now, SHA256Full: "abc", UploadState: "complete"})
-	db.InsertChunk(&ChunkRecord{ID: "c1", FileID: "f1", Sequence: 0, SizeBytes: 10, SHA256: "h1", EncryptedSize: 15})
+	db.InsertChunk(&ChunkRecord{ID: "c1", FileID: "f1", Sequence: 0, SizeBytes: 10, SHA256: "h1", CloudSize: 15})
 	db.InsertChunkLocation(&ChunkLocation{ChunkID: "c1", ProviderID: "p1", RemotePath: "c1.enc"})
 
 	err := db.ConfirmUpload("c1", 0)
@@ -1365,8 +1365,8 @@ func TestGetChunksForFile(t *testing.T) {
 	db := testDB(t)
 	now := time.Now().Unix()
 	db.InsertFile(&File{ID: "f1", VirtualPath: "/x.txt", SizeBytes: 100, CreatedAt: now, ModifiedAt: now, SHA256Full: "hash", UploadState: "complete"})
-	db.InsertChunk(&ChunkRecord{ID: "c1", FileID: "f1", Sequence: 0, SizeBytes: 50, SHA256: "h1", EncryptedSize: 60})
-	db.InsertChunk(&ChunkRecord{ID: "c2", FileID: "f1", Sequence: 1, SizeBytes: 50, SHA256: "h2", EncryptedSize: 60})
+	db.InsertChunk(&ChunkRecord{ID: "c1", FileID: "f1", Sequence: 0, SizeBytes: 50, SHA256: "h1", CloudSize: 60})
+	db.InsertChunk(&ChunkRecord{ID: "c2", FileID: "f1", Sequence: 1, SizeBytes: 50, SHA256: "h2", CloudSize: 60})
 
 	chunks, err := db.GetChunksForFile("f1")
 	if err != nil {
@@ -1580,7 +1580,7 @@ func TestGetChunkLocations(t *testing.T) {
 	db := testDB(t)
 	now := time.Now().Unix()
 	db.InsertFile(&File{ID: "cl1", VirtualPath: "/cl.txt", SizeBytes: 10, CreatedAt: now, ModifiedAt: now, SHA256Full: "h", UploadState: "complete"})
-	db.InsertChunk(&ChunkRecord{ID: "ccl1", FileID: "cl1", Sequence: 0, SizeBytes: 10, SHA256: "h", EncryptedSize: 26})
+	db.InsertChunk(&ChunkRecord{ID: "ccl1", FileID: "cl1", Sequence: 0, SizeBytes: 10, SHA256: "h", CloudSize: 26})
 	db.UpsertProvider(&Provider{ID: "pcl1", Type: "drive", DisplayName: "D1", RcloneRemote: "d1"})
 	db.InsertChunkLocation(&ChunkLocation{ChunkID: "ccl1", ProviderID: "pcl1", RemotePath: "chunks/ccl1.enc"})
 
@@ -2039,7 +2039,7 @@ func TestGetChunksForFile_ScanError(t *testing.T) {
 	db := testDB(t)
 	now := time.Now().Unix()
 	db.InsertFile(&File{ID: "f1", VirtualPath: "/x.txt", SizeBytes: 100, CreatedAt: now, ModifiedAt: now, SHA256Full: "h1", UploadState: "complete"})
-	db.conn.Exec(`INSERT INTO chunks(id, file_id, sequence, size_bytes, sha256, encrypted_size) VALUES ('c1','f1',0,50,'h1',60)`)
+	db.conn.Exec(`INSERT INTO chunks(id, file_id, sequence, size_bytes, sha256, cloud_size) VALUES ('c1','f1',0,50,'h1',60)`)
 	// Break chunks table schema
 	db.conn.Exec("ALTER TABLE chunks RENAME TO chunks_old")
 	db.conn.Exec(`CREATE TABLE chunks (id TEXT PRIMARY KEY)`)
@@ -2054,7 +2054,7 @@ func TestGetChunkLocations_ScanError(t *testing.T) {
 	db := testDB(t)
 	now := time.Now().Unix()
 	db.InsertFile(&File{ID: "f1", VirtualPath: "/x.txt", SizeBytes: 100, CreatedAt: now, ModifiedAt: now, SHA256Full: "h1", UploadState: "complete"})
-	db.conn.Exec(`INSERT INTO chunks(id, file_id, sequence, size_bytes, sha256, encrypted_size) VALUES ('c1','f1',0,50,'h1',60)`)
+	db.conn.Exec(`INSERT INTO chunks(id, file_id, sequence, size_bytes, sha256, cloud_size) VALUES ('c1','f1',0,50,'h1',60)`)
 	db.conn.Exec(`INSERT INTO chunk_locations(chunk_id, provider_id, remote_path, verified_at) VALUES ('c1','p1','path',0)`)
 	// Break the table
 	db.conn.Exec("ALTER TABLE chunk_locations RENAME TO cl_old")
@@ -2097,7 +2097,7 @@ func TestGetChunkLocationsForFile_ScanError(t *testing.T) {
 	db := testDB(t)
 	now := time.Now().Unix()
 	db.InsertFile(&File{ID: "f1", VirtualPath: "/x.txt", SizeBytes: 100, CreatedAt: now, ModifiedAt: now, SHA256Full: "h1", UploadState: "complete"})
-	db.conn.Exec(`INSERT INTO chunks(id, file_id, sequence, size_bytes, sha256, encrypted_size) VALUES ('c1','f1',0,50,'h1',60)`)
+	db.conn.Exec(`INSERT INTO chunks(id, file_id, sequence, size_bytes, sha256, cloud_size) VALUES ('c1','f1',0,50,'h1',60)`)
 	db.conn.Exec(`INSERT INTO chunk_locations(chunk_id, provider_id, remote_path, verified_at) VALUES ('c1','p1','path',0)`)
 	db.conn.Exec("ALTER TABLE chunk_locations RENAME TO cl_old2")
 	db.conn.Exec(`CREATE TABLE chunk_locations (chunk_id TEXT PRIMARY KEY)`)
@@ -2112,7 +2112,7 @@ func TestGetAllChunkLocations_ScanError(t *testing.T) {
 	db := testDB(t)
 	now := time.Now().Unix()
 	db.InsertFile(&File{ID: "f1", VirtualPath: "/x.txt", SizeBytes: 100, CreatedAt: now, ModifiedAt: now, SHA256Full: "h1", UploadState: "complete"})
-	db.conn.Exec(`INSERT INTO chunks(id, file_id, sequence, size_bytes, sha256, encrypted_size) VALUES ('c1','f1',0,50,'h1',60)`)
+	db.conn.Exec(`INSERT INTO chunks(id, file_id, sequence, size_bytes, sha256, cloud_size) VALUES ('c1','f1',0,50,'h1',60)`)
 	db.conn.Exec(`INSERT INTO chunk_locations(chunk_id, provider_id, remote_path, verified_at) VALUES ('c1','p1','path',0)`)
 	db.conn.Exec("ALTER TABLE chunk_locations RENAME TO cl_old3")
 	db.conn.Exec(`CREATE TABLE chunk_locations (chunk_id TEXT PRIMARY KEY)`)
@@ -2155,7 +2155,7 @@ func TestGetChunkLocationsByProvider_ScanError(t *testing.T) {
 	db := testDB(t)
 	now := time.Now().Unix()
 	db.InsertFile(&File{ID: "f1", VirtualPath: "/x.txt", SizeBytes: 100, CreatedAt: now, ModifiedAt: now, SHA256Full: "h1", UploadState: "complete"})
-	db.conn.Exec(`INSERT INTO chunks(id, file_id, sequence, size_bytes, sha256, encrypted_size) VALUES ('c1','f1',0,50,'h1',60)`)
+	db.conn.Exec(`INSERT INTO chunks(id, file_id, sequence, size_bytes, sha256, cloud_size) VALUES ('c1','f1',0,50,'h1',60)`)
 	db.conn.Exec(`INSERT INTO chunk_locations(chunk_id, provider_id, remote_path, verified_at) VALUES ('c1','p1','path',0)`)
 	db.conn.Exec("ALTER TABLE chunk_locations RENAME TO cl_old4")
 	db.conn.Exec(`CREATE TABLE chunk_locations (chunk_id TEXT PRIMARY KEY)`)
@@ -2201,12 +2201,12 @@ func TestGetProviderChunkBytes_ScanError(t *testing.T) {
 	now := time.Now().Unix()
 	db.UpsertProvider(&Provider{ID: "p1", Type: "drive", DisplayName: "D1", RcloneRemote: "d1"})
 	db.InsertFile(&File{ID: "f1", VirtualPath: "/x.txt", SizeBytes: 100, CreatedAt: now, ModifiedAt: now, SHA256Full: "h1", UploadState: "complete"})
-	db.conn.Exec(`INSERT INTO chunks(id, file_id, sequence, size_bytes, sha256, encrypted_size) VALUES ('c1','f1',0,50,'h1',60)`)
+	db.conn.Exec(`INSERT INTO chunks(id, file_id, sequence, size_bytes, sha256, cloud_size) VALUES ('c1','f1',0,50,'h1',60)`)
 	db.conn.Exec(`INSERT INTO chunk_locations(chunk_id, provider_id, remote_path, verified_at) VALUES ('c1','p1','path',0)`)
 	// Break chunk_locations to make the SUM query return wrong column types
 	db.conn.Exec("ALTER TABLE chunk_locations RENAME TO cl_old5")
 	db.conn.Exec(`CREATE TABLE chunk_locations (chunk_id TEXT, provider_id TEXT, remote_path TEXT, verified_at INTEGER)`)
-	// But the join won't have encrypted_size. Let me break chunks instead.
+	// But the join won't have cloud_size. Let me break chunks instead.
 	db.conn.Exec("ALTER TABLE chunk_locations RENAME TO cl_old6") // undo
 	db.conn.Exec("ALTER TABLE cl_old5 RENAME TO chunk_locations") // restore
 	// Actually breaking the SUM is hard, so just close the DB and test the query error.
@@ -2355,7 +2355,7 @@ func TestGetChunkLocationsForFile_ViewScanError(t *testing.T) {
 	db := testDB(t)
 	// Disable FK first so we can insert a chunk with a fake file_id.
 	db.conn.Exec("PRAGMA foreign_keys=OFF")
-	db.conn.Exec(`INSERT INTO chunks (id, file_id, sequence, size_bytes, sha256, encrypted_size) VALUES ('cid','fid',0,100,'abc',200)`)
+	db.conn.Exec(`INSERT INTO chunks (id, file_id, sequence, size_bytes, sha256, cloud_size) VALUES ('cid','fid',0,100,'abc',200)`)
 	replaceChunkLocationsWithBadView(t, db)
 	_, err := db.GetChunkLocationsForFile("fid")
 	if err == nil {
@@ -2393,7 +2393,7 @@ func replaceChunksWithBadView(t *testing.T, db *DB) {
 		'not-a-number' as sequence,
 		'not-a-number' as size_bytes,
 		'sha' as sha256,
-		'not-a-number' as encrypted_size`)
+		'not-a-number' as cloud_size`)
 }
 
 func TestGetChunksForFile_ViewScanError(t *testing.T) {

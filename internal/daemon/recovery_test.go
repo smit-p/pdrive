@@ -334,7 +334,7 @@ func insertTestChunkLocation(t *testing.T, db *metadata.DB, providerID, provider
 		VALUES ('f1', '/test.txt', 1024, 'abc', 'complete', 1700000000, 1700000000)`); err != nil {
 		t.Fatalf("inserting file: %v", err)
 	}
-	if _, err := db.Conn().Exec(`INSERT INTO chunks (id, file_id, sequence, size_bytes, encrypted_size, sha256)
+	if _, err := db.Conn().Exec(`INSERT INTO chunks (id, file_id, sequence, size_bytes, cloud_size, sha256)
 		VALUES ('c1', 'f1', 0, 1024, 1040, 'abc')`); err != nil {
 		t.Fatalf("inserting chunk: %v", err)
 	}

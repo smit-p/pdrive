@@ -514,10 +514,10 @@ type cliFileInfo struct {
 }
 
 type cliChunkInfo struct {
-	Sequence      int      `json:"sequence"`
-	SizeBytes     int      `json:"size_bytes"`
-	EncryptedSize int      `json:"encrypted_size"`
-	Providers     []string `json:"providers"`
+	Sequence  int      `json:"sequence"`
+	SizeBytes int      `json:"size_bytes"`
+	CloudSize int      `json:"cloud_size"`
+	Providers []string `json:"providers"`
 }
 
 func runInfo(addr, configDir string, args []string) {
@@ -552,9 +552,9 @@ func runInfo(addr, configDir string, args []string) {
 	if len(info.Chunks) > 0 {
 		fmt.Printf("\nChunks: %d\n", len(info.Chunks))
 		w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-		fmt.Fprintf(w, "  #\tSize\tEncrypted\tProviders\n")
+		fmt.Fprintf(w, "  #\tSize\tCloud\tProviders\n")
 		for _, c := range info.Chunks {
-			fmt.Fprintf(w, "  %d\t%s\t%s\t%s\n", c.Sequence, fmtSize(int64(c.SizeBytes)), fmtSize(int64(c.EncryptedSize)), strings.Join(c.Providers, ", "))
+			fmt.Fprintf(w, "  %d\t%s\t%s\t%s\n", c.Sequence, fmtSize(int64(c.SizeBytes)), fmtSize(int64(c.CloudSize)), strings.Join(c.Providers, ", "))
 		}
 		w.Flush()
 	}

@@ -60,6 +60,10 @@ func Open(dbPath string) (*DB, error) {
 		return nil, fmt.Errorf("running schema: %w", err)
 	}
 
+	// Migrate: rename encrypted_size → cloud_size (encryption was removed).
+	// The column may still have the old name in databases created before this change.
+	conn.Exec("ALTER TABLE chunks RENAME COLUMN encrypted_size TO cloud_size") //nolint:errcheck — fails harmlessly if already renamed or column doesn't exist
+
 	return &DB{conn: conn}, nil
 }
 

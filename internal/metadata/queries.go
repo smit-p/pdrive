@@ -33,7 +33,7 @@ type ChunkRecord struct {
 	Sequence      int
 	SizeBytes     int
 	SHA256        string
-	EncryptedSize int
+	CloudSize int
 	DataShards    int
 	ParityShards  int
 }
@@ -60,11 +60,11 @@ type Provider struct {
 	RateLimitedUntil *int64
 }
 
-// GetProviderChunkBytes returns the total encrypted bytes pdrive has stored on
+// GetProviderChunkBytes returns the total cloud bytes pdrive has stored on
 // each provider, keyed by provider ID.
 func (db *DB) GetProviderChunkBytes() (map[string]int64, error) {
 	rows, err := db.conn.Query(`
-		SELECT cl.provider_id, COALESCE(SUM(c.encrypted_size), 0)
+		SELECT cl.provider_id, COALESCE(SUM(c.cloud_size), 0)
 		FROM chunk_locations cl
 		JOIN chunks c ON c.id = cl.chunk_id
 		GROUP BY cl.provider_id`)
@@ -136,9 +136,9 @@ func (db *DB) InsertChunk(c *ChunkRecord) error {
 		ds = 1
 	}
 	_, err := db.conn.Exec(
-		`INSERT INTO chunks (id, file_id, sequence, size_bytes, sha256, encrypted_size, data_shards, parity_shards)
+		`INSERT INTO chunks (id, file_id, sequence, size_bytes, sha256, cloud_size, data_shards, parity_shards)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		c.ID, c.FileID, c.Sequence, c.SizeBytes, c.SHA256, c.EncryptedSize, ds, c.ParityShards,
+		c.ID, c.FileID, c.Sequence, c.SizeBytes, c.SHA256, c.CloudSize, ds, c.ParityShards,
 	)
 	return err
 }
@@ -216,7 +216,7 @@ func (db *DB) GetCompleteFileByHash(sha256Full string) (*File, error) {
 // GetChunksForFile returns all chunks for a file, ordered by sequence.
 func (db *DB) GetChunksForFile(fileID string) ([]ChunkRecord, error) {
 	rows, err := db.conn.Query(
-		`SELECT id, file_id, sequence, size_bytes, sha256, encrypted_size, data_shards, parity_shards
+		`SELECT id, file_id, sequence, size_bytes, sha256, cloud_size, data_shards, parity_shards
 		 FROM chunks WHERE file_id = ? ORDER BY sequence`, fileID,
 	)
 	if err != nil {
@@ -227,7 +227,7 @@ func (db *DB) GetChunksForFile(fileID string) ([]ChunkRecord, error) {
 	var chunks []ChunkRecord
 	for rows.Next() {
 		var c ChunkRecord
-		if err := rows.Scan(&c.ID, &c.FileID, &c.Sequence, &c.SizeBytes, &c.SHA256, &c.EncryptedSize, &c.DataShards, &c.ParityShards); err != nil {
+		if err := rows.Scan(&c.ID, &c.FileID, &c.Sequence, &c.SizeBytes, &c.SHA256, &c.CloudSize, &c.DataShards, &c.ParityShards); err != nil {
 			return nil, err
 		}
 		chunks = append(chunks, c)

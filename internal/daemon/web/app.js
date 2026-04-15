@@ -593,9 +593,16 @@ function refreshUploads(){
         +'</div>';
       if(dir)html+='<div class="upload-dir">'+esc(dir)+'</div>';
       if(u.Preparing){
-        html+='<div class="upload-bar"><div class="upload-bar-fill preparing"></div></div>'
-          +'<div class="upload-meta"><span>Preparing… hashing file</span>'
-          +'<span>'+fmtSize(u.SizeBytes)+'</span></div></div>';
+        var hashPct=u.HashBytesTotal>0?Math.min(100,Math.round(u.HashBytesRead/u.HashBytesTotal*100)):0;
+        if(hashPct>0){
+          html+='<div class="upload-bar"><div class="upload-bar-fill" style="width:'+hashPct+'%"></div></div>'
+            +'<div class="upload-meta"><span>Hashing… '+hashPct+'%</span>'
+            +'<span>'+fmtSize(u.HashBytesRead)+' / '+fmtSize(u.SizeBytes)+'</span></div></div>';
+        } else {
+          html+='<div class="upload-bar"><div class="upload-bar-fill preparing"></div></div>'
+            +'<div class="upload-meta"><span>Preparing…</span>'
+            +'<span>'+fmtSize(u.SizeBytes)+'</span></div></div>';
+        }
       } else {
         var speed=u.SpeedBPS>0?fmtSize(u.SpeedBPS)+'/s':'';
         var eta='';
@@ -1232,7 +1239,19 @@ var uploadTracker={
     // Wire up toggle/close
     var self=this;
     var cancelBtn=document.getElementById('upload-drawer-cancel');
-    if(cancelBtn)cancelBtn.addEventListener('click',function(e){e.stopPropagation();_uploadCancelled=true;});
+    if(cancelBtn)cancelBtn.addEventListener('click',function(e){
+      e.stopPropagation();
+      _uploadCancelled=true;
+      // Also cancel any uploads already submitted to the backend.
+      self.items.forEach(function(it){
+        if(it.status==='submitted'&&it.virtualPath){
+          api.cancelUpload(it.virtualPath).catch(function(){});
+          it.status='fail';
+          it.error='cancelled';
+        }
+      });
+      self.render();
+    });
     var toggleBtn=document.getElementById('upload-drawer-min');
     if(toggleBtn)toggleBtn.addEventListener('click',function(e){e.stopPropagation();self.toggle()});
     var closeBtn=document.getElementById('upload-drawer-close');

@@ -311,7 +311,7 @@ func mockDaemon(t *testing.T) (addr string) {
 		json.NewEncoder(w).Encode(cliFileInfo{
 			Path: p, SizeBytes: 1024, CreatedAt: 1700000000, ModifiedAt: 1700001000,
 			SHA256: "abcdef1234567890", UploadState: "complete",
-			Chunks: []cliChunkInfo{{Sequence: 0, SizeBytes: 1024, EncryptedSize: 1024, Providers: []string{"gdrive"}}},
+			Chunks: []cliChunkInfo{{Sequence: 0, SizeBytes: 1024, CloudSize: 1024, Providers: []string{"gdrive"}}},
 		})
 	})
 
@@ -1509,8 +1509,8 @@ func TestRunInfo_MultiChunk(t *testing.T) {
 			Path: "/big.bin", SizeBytes: 200e6, CreatedAt: 1700000000, ModifiedAt: 1700001000,
 			SHA256: "deadbeef", UploadState: "complete",
 			Chunks: []cliChunkInfo{
-				{Sequence: 0, SizeBytes: 100e6, EncryptedSize: 100e6, Providers: []string{"gdrive", "dropbox"}},
-				{Sequence: 1, SizeBytes: 100e6, EncryptedSize: 100e6, Providers: []string{"gdrive"}},
+				{Sequence: 0, SizeBytes: 100e6, CloudSize: 100e6, Providers: []string{"gdrive", "dropbox"}},
+				{Sequence: 1, SizeBytes: 100e6, CloudSize: 100e6, Providers: []string{"gdrive"}},
 			},
 		})
 	}))
@@ -2488,7 +2488,7 @@ func TestRunLs_FileSelection_TriggersInfo(t *testing.T) {
 		json.NewEncoder(w).Encode(cliFileInfo{
 			Path: p, SizeBytes: 2048, CreatedAt: 1700000000, ModifiedAt: 1700001000,
 			SHA256: "abc123", UploadState: "complete",
-			Chunks: []cliChunkInfo{{Sequence: 0, SizeBytes: 2048, EncryptedSize: 2048, Providers: []string{"gdrive"}}},
+			Chunks: []cliChunkInfo{{Sequence: 0, SizeBytes: 2048, CloudSize: 2048, Providers: []string{"gdrive"}}},
 		})
 	})
 	srv := httptest.NewServer(mux)

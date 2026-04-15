@@ -5,26 +5,26 @@
 //  1. File is hashed (SHA-256) for content-hash deduplication.
 //  2. If a matching file already exists, chunk metadata is cloned (zero upload).
 //  3. Otherwise the file is split into chunks via [chunker.ChunkReader],
-//     each chunk is AES-256-GCM encrypted, then uploaded concurrently with
-//     retry and exponential backoff through the [CloudStorage] interface.
+//     then uploaded concurrently with retry and exponential backoff through
+//     the [CloudStorage] interface.
 //  4. Files larger than [AsyncWriteThreshold] upload in the background so
 //     WebDAV PUT returns quickly.
 //
 // Download pipeline:
-//  1. Chunks are downloaded sequentially, decrypted, SHA-256 verified,
+//  1. Chunks are downloaded sequentially, SHA-256 verified,
 //     and written to a temp file.
 //  2. A full-file hash check is performed before returning.
 //
 // The engine also manages:
-//   - Debounced encrypted metadata DB backup to all providers
+//   - Debounced metadata DB backup to all providers
 //   - Orphan GC (cloud objects with no DB record, and vice versa)
 //   - Failed-deletion retry queue
 //   - Telemetry counters (files/chunks/bytes uploaded, downloads, dedup hits)
 //
 // File layout:
 //   - engine.go — types, constructors, lifecycle, config, metrics, queries
-//   - upload.go — upload pipeline (write, chunk, encrypt, dedup, progress)
-//   - download.go — download pipeline (read, decrypt, stream, verify)
+//   - upload.go — upload pipeline (write, chunk, dedup, progress)
+//   - download.go — download pipeline (read, stream, verify)
 //   - delete.go — delete pipeline (file/dir delete, cloud cleanup, retry)
 //   - dbsync.go — DB backup, restore, orphan GC
 package engine
@@ -81,7 +81,7 @@ type Engine struct {
 	overrideChunkSize int
 
 	// erasureEnc, when non-nil, enables Reed-Solomon erasure coding.
-	// Each encrypted chunk is split into data+parity shards spread
+	// Each chunk is split into data+parity shards spread
 	// across distinct providers.
 	erasureEnc *erasure.Encoder
 
@@ -339,7 +339,7 @@ func (e *Engine) chunkSchedule(fileSize int64) *chunker.ChunkSchedule {
 // scaled inversely with the maximum chunk size to keep peak memory bounded.
 // Peak in-flight memory ≈ workers × maxChunkSize.
 func uploadWorkersForSchedule(s *chunker.ChunkSchedule) int {
-	const memBudget = 6 << 30 // 6 GiB target for in-flight encrypted data
+	const memBudget = 6 << 30 // 6 GiB target for in-flight data
 	maxChunk := int64(s.MaxSize())
 	if maxChunk <= 0 {
 		return maxUploadWorkers
@@ -428,7 +428,7 @@ type StorageStatus struct {
 	TotalFiles    int64
 	TotalBytes    int64
 	Providers     []metadata.Provider
-	ProviderBytes map[string]int64 // encrypted bytes stored per provider ID
+	ProviderBytes map[string]int64 // cloud bytes stored per provider ID
 }
 
 // StorageStatus returns total file count, total bytes stored, and per-provider quota info.
@@ -489,7 +489,7 @@ type FileInfo struct {
 type ChunkInfo struct {
 	Sequence      int
 	SizeBytes     int
-	EncryptedSize int
+	CloudSize int
 	Providers     []string // provider display names
 }
 
@@ -523,7 +523,7 @@ func (e *Engine) GetFileInfo(virtualPath string) (*FileInfo, error) {
 		infos = append(infos, ChunkInfo{
 			Sequence:      c.Sequence,
 			SizeBytes:     c.SizeBytes,
-			EncryptedSize: c.EncryptedSize,
+			CloudSize: c.CloudSize,
 			Providers:     names,
 		})
 	}

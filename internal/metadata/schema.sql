@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS chunks (
     sequence    INTEGER NOT NULL,
     size_bytes  INTEGER NOT NULL,
     sha256      TEXT NOT NULL,
-    encrypted_size INTEGER NOT NULL,
+    cloud_size  INTEGER NOT NULL,
     data_shards    INTEGER NOT NULL DEFAULT 1,
     parity_shards  INTEGER NOT NULL DEFAULT 0
 );

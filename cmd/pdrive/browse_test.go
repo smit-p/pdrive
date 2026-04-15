@@ -568,7 +568,7 @@ func TestBrowseModel_View_FileInfo(t *testing.T) {
 	m := testModelWithItems()
 	m.fileInfo = &cliFileInfo{
 		Path: "/docs/readme.md", SizeBytes: 1024, UploadState: "complete",
-		Chunks: []cliChunkInfo{{Sequence: 0, SizeBytes: 1024, EncryptedSize: 1024, Providers: []string{"gdrive"}}},
+		Chunks: []cliChunkInfo{{Sequence: 0, SizeBytes: 1024, CloudSize: 1024, Providers: []string{"gdrive"}}},
 	}
 	v := m.View()
 	if !strings.Contains(v, "readme.md") {
@@ -618,8 +618,8 @@ func TestRenderInfoPanel(t *testing.T) {
 		SizeBytes:   1024,
 		UploadState: "complete",
 		Chunks: []cliChunkInfo{
-			{Sequence: 0, SizeBytes: 512, EncryptedSize: 512, Providers: []string{"gdrive", "dropbox"}},
-			{Sequence: 1, SizeBytes: 512, EncryptedSize: 512, Providers: []string{"gdrive"}},
+			{Sequence: 0, SizeBytes: 512, CloudSize: 512, Providers: []string{"gdrive", "dropbox"}},
+			{Sequence: 1, SizeBytes: 512, CloudSize: 512, Providers: []string{"gdrive"}},
 		},
 	}
 	panel := renderInfoPanel(info)
