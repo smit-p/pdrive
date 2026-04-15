@@ -261,9 +261,9 @@ Hints:
   Use fuzzy match:               pdrive cat vacation
 
 Flags:
-  --password      Encryption password (derives AES-256 key via Argon2id)
   --backend       Mount backend: webdav (default) or fuse
   --mountpoint    FUSE mount point path (default: ~/pdrive)
+  --erasure       Reed-Solomon erasure coding (e.g. 3+1)
   --remotes       Override remote selection (comma-separated; prefer remotes add/remove)
   --webdav-addr   Daemon address (default 127.0.0.1:8765)
   --foreground    Run in foreground (for systemd/debugging)

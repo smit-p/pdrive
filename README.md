@@ -3,9 +3,9 @@
 [![Go](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Aggregate multiple cloud storage accounts into a single unified drive. Drop files into `~/pdrive` and they upload automatically — encrypted, chunked, and distributed across Google Drive, Dropbox, OneDrive, Box, or any provider [rclone](https://rclone.org) supports.
+Aggregate multiple cloud storage accounts into a single unified drive. Drop files into `~/pdrive` and they upload automatically — chunked and distributed across Google Drive, Dropbox, OneDrive, Box, or any provider [rclone](https://rclone.org) supports.
 
-Two free Google accounts (15 GB each) + a free Dropbox account (2 GB) = **32 GB of unified, encrypted storage** — accessible as a single folder, network drive, or FUSE mount.
+Two free Google accounts (15 GB each) + a free Dropbox account (2 GB) = **32 GB of unified storage** — accessible as a single folder, network drive, or FUSE mount.
 
 ## How It Works
 
@@ -35,9 +35,9 @@ pdrive uses rclone in RC daemon mode as the transport layer — any rclone-suppo
 
 - **Local sync folder** — `~/pdrive` works like Dropbox. Drop files in, they upload in the background. Delete or rename files locally, changes sync to cloud.
 - **FUSE mount** — Native kernel-level filesystem mount via go-fuse. Full read/write support with temp-file staging and async uploads. Works with any application.
-- **Encryption at rest** — AES-256-GCM with password-based key derivation (Argon2id). Set a password on first run and use it on any machine. Legacy raw key files (`~/.pdrive/enc.key`) still supported.
 - **Content-hash dedup** — Files with identical SHA-256 share cloud chunks. No duplicate uploads.
-- **Dynamic chunk sizing** — Small files get 32 MB chunks, large files up to 128 MB, keeping API call count low.
+- **Dynamic chunk sizing** — Small files get 32 MB chunks, large files up to 4 GiB, targeting ~25 chunks per file.
+- **Erasure coding** — Optional Reed-Solomon parity shards (e.g. `3+1`) so files survive the loss of a cloud provider.
 - **Pre-upload space validation** — Checks aggregate free space across all providers before uploading. Rejects files that won't fit with a clear error.
 - **Stub files** — Cloud-only files appear as 0-byte stubs with xattrs marking them as cloud-only. Use `pdrive pin` to download on demand.
 - **Full CLI** — List, upload, download, pin/unpin, move, search, and inspect storage from the terminal. No GUI needed.
@@ -47,7 +47,7 @@ pdrive uses rclone in RC daemon mode as the transport layer — any rclone-suppo
 - **Auto-restart** — Run as a background daemon that auto-starts on login.
 - **Live remote detection** — New rclone remotes are auto-detected every 60 seconds without a daemon restart. Or trigger immediately with `pdrive remotes add`.
 - **Activity log** — All user-visible actions (uploads, downloads, deletes, moves, pins) are logged with timestamps.
-- **Metadata backup** — SQLite DB is encrypted (AES-256-GCM) and auto-backed up to every cloud provider. The Argon2id salt is stored alongside the backup so the same password works on any machine. On a fresh install, the newest backup is auto-restored — just connect the same cloud accounts and enter your password. Restored backups are validated against actual cloud chunks before use.
+- **Metadata backup** — SQLite DB is auto-backed up to every cloud provider. On a fresh install, the newest backup is auto-restored — just connect the same cloud accounts. Restored backups are validated against actual cloud chunks before use.
 - **Interrupted upload resume** — Daemon restart picks up where it left off.
 - **Orphan GC** — Periodic garbage collection removes cloud chunks with no DB record and purges DB records with missing cloud data.
 - **Failed deletion retry** — Cloud deletions that fail are persisted and retried hourly (up to 10 attempts).
@@ -72,10 +72,10 @@ brew install smit-p/tap/pdrive
 curl -fsSL https://raw.githubusercontent.com/smit-p/pdrive/main/install.sh | bash
 ```
 
-**Go install:**
+**Go install (requires C toolchain for CGO):**
 
 ```bash
-go install github.com/smit-p/pdrive/cmd/pdrive@latest
+CGO_ENABLED=1 go install github.com/smit-p/pdrive/cmd/pdrive@latest
 ```
 
 **From source:**
@@ -102,10 +102,9 @@ pdrive --debug
 That's it. On first run, pdrive will:
 
 1. Download rclone if not found on your system
-2. Prompt you to set an encryption password (Argon2id → AES-256)
-3. Start rclone RC in the background
-4. Create `~/pdrive` as the sync folder
-5. Start the HTTP/WebDAV server at `localhost:8765`
+2. Start rclone RC in the background
+3. Create `~/pdrive` as the sync folder
+4. Start the HTTP/WebDAV server at `localhost:8765`
 
 ### Install as a Service
 
@@ -196,7 +195,10 @@ mount -t davfs http://localhost:8765 /mnt/pdrive
 | `/api/mv?src=/a&dst=/b`    | POST   | Move or rename a file                                       |
 | `/api/mkdir?path=/dir`     | POST   | Create a new directory                                      |
 | `/api/upload`              | POST   | Upload a file (multipart form)                              |
+| `/api/upload/cancel`       | POST   | Cancel an in-progress upload                                |
 | `/api/resync`              | POST   | Trigger immediate provider re-discovery from rclone         |
+| `/api/logs`                | GET    | Recent daemon log entries                                   |
+| `/api/logs/stream`         | GET    | Server-sent event stream of live log entries                |
 
 ## CLI Reference
 
@@ -292,12 +294,11 @@ pdrive unpin /video.mp4       # evict local copy, keep in cloud
 | `--webdav-addr`    | `127.0.0.1:8765` | HTTP/WebDAV listen address                                                |
 | `--rclone-addr`    | `127.0.0.1:5572` | rclone RC address                                                         |
 | `--rclone-bin`     | (auto-detected)  | Path to rclone binary                                                     |
-| `--password`       | (interactive)    | Encryption password (derives AES-256 key via Argon2id)                    |
-| `--enc-key`        | (none)           | Legacy: 64-char hex AES-256 key; prefer `--password`                      |
 | `--broker-policy`  | `pfrd`           | Placement policy: `pfrd` (weighted random) or `mfs` (most free space)     |
 | `--min-free-space` | `256 MB`         | Minimum free bytes per provider                                           |
-| `--chunk-size`     | `0` (dynamic)    | Override chunk size in bytes; 0 = dynamic (32–128 MB)                     |
-| `--rate-limit`     | `6`              | Cloud API calls per second                                                |
+| `--chunk-size`     | `0` (dynamic)    | Override chunk size in bytes; 0 = dynamic (32 MB – 4 GiB)                 |
+| `--rate-limit`     | `0`              | Cloud API calls per second (0 = unlimited)                                |
+| `--erasure`        | (none)           | Reed-Solomon erasure coding (e.g. `3+1` = 3 data + 1 parity)             |
 | `--skip-restore`   | `false`          | Skip restoring DB from cloud on startup                                   |
 | `--remotes`        | (all)            | Comma-separated rclone remote names to use                                |
 | `--foreground`     | `false`          | Run in foreground instead of backgrounding (for systemd/debugging)        |
@@ -313,19 +314,21 @@ internal/
   daemon/             Lifecycle: rclone subprocess, HTTP server, browser UI, periodic provider sync
   engine/             Core I/O: write/read/delete, chunked upload, DB sync, GC, space checks
   broker/             Chunk placement: assigns chunks to providers by free space
-  chunker/            Split, encrypt (AES-256-GCM), decrypt, reassemble
+  chunker/            Split, hash (SHA-256), reassemble
   config/             TOML config file loading and defaults
+  erasure/            Reed-Solomon erasure coding (data + parity shards)
   fusefs/             FUSE filesystem backend (go-fuse)
   junkfile/           Detection and purging of OS junk files (.DS_Store, Thumbs.db, etc.)
+  logutil/            Structured logging helpers and WebSocket log streaming
   metadata/           SQLite schema, migrations, all CRUD queries
   rclonebin/          Auto-download and management of the rclone binary
   rclonerc/           HTTP client for rclone RC API, provider identity detection
   vfs/                WebDAV filesystem, sync folder watcher, stub files
-scripts/              E2E test scripts
-web/                  Browser UI (HTML/CSS/JS single-page app)
+scripts/              Service files (launchd, systemd) and E2E test scripts
+web/                  Browser UI (HTML/CSS/JS single-page app) and Playwright E2E tests
 ```
 
-### Database Schema (7 tables)
+### Database Schema (8 tables)
 
 | Table              | Purpose                                     |
 | ------------------ | ------------------------------------------- |
@@ -336,6 +339,7 @@ web/                  Browser UI (HTML/CSS/JS single-page app)
 | `directories`      | Explicit directory records                  |
 | `failed_deletions` | Tracks failed cloud deletions for retry     |
 | `activity_log`     | Timestamped log of user-visible actions     |
+| `counters`         | Cumulative telemetry (bytes up/down, etc.)  |
 
 ### Key Paths
 
@@ -343,15 +347,12 @@ web/                  Browser UI (HTML/CSS/JS single-page app)
 | ------------------------------------ | --------------------------------------------- |
 | `~/.pdrive/metadata.db`              | SQLite metadata database                      |
 | `~/.pdrive/config.toml`              | Optional TOML configuration file              |
-| `~/.pdrive/enc.salt`                 | Argon2id salt for password-derived key        |
-| `~/.pdrive/enc.key`                  | Legacy AES-256 key (raw 32 bytes)             |
 | `~/.pdrive/remotes.json`             | Persistent remote selection                   |
 | `~/.pdrive/daemon.pid`               | PID file for the background daemon            |
 | `~/.pdrive/spool/`                   | Temp files for in-progress uploads            |
 | `~/pdrive/`                          | Local sync folder                             |
-| Cloud: `pdrive-chunks/*`             | Encrypted chunk storage                       |
-| Cloud: `pdrive-meta/metadata.db.enc` | Encrypted metadata backup                     |
-| Cloud: `pdrive-meta/enc.salt`        | Argon2id salt (for multi-machine portability) |
+| Cloud: `pdrive-chunks/*`             | Chunk storage                                 |
+| Cloud: `pdrive-meta/metadata.db`     | Metadata backup                               |
 
 ## Tests
 
@@ -379,6 +380,7 @@ The Playwright suite covers 82 tests across the web UI: layout, file browser, in
 - [golang.org/x/net/webdav](https://pkg.go.dev/golang.org/x/net/webdav) — WebDAV server
 - [go-fuse](https://github.com/hanwen/go-fuse) — FUSE filesystem bindings
 - [fsnotify](https://github.com/fsnotify/fsnotify) — filesystem event watcher
+- [reedsolomon](https://github.com/klauspost/reedsolomon) — Reed-Solomon erasure coding
 - [bubbletea](https://github.com/charmbracelet/bubbletea) — terminal UI framework (TUI browser)
 - [go-toml](https://github.com/pelletier/go-toml) — TOML config file parser
 
