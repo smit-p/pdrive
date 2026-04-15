@@ -282,8 +282,8 @@ func (d *Daemon) Start(ctx context.Context) error {
 		}
 	}()
 
-	// Run orphan GC: first pass after 60s (let any in-progress uploads settle),
-	// then every 24h. If deferred (upload active), retry in 5 minutes.
+	// Run orphan GC: first pass after 60s, then every 24h.
+	// Also triggered on-demand (e.g. after upload failure) via gcNotify.
 	go func() {
 		timer := time.NewTimer(60 * time.Second)
 		defer timer.Stop()
@@ -293,16 +293,22 @@ func (d *Daemon) Start(ctx context.Context) error {
 		case <-timer.C:
 		}
 		const gcInterval = 24 * time.Hour
-		const gcRetry = 5 * time.Minute
+		const gcNudgeDelay = 2 * time.Minute
 		for {
-			wait := gcInterval
-			if !d.engine.GCOrphanedChunks() {
-				wait = gcRetry
-			}
+			d.engine.GCOrphanedChunks()
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(wait):
+			case <-time.After(gcInterval):
+				// Regular 24h cycle.
+			case <-d.engine.GCNotify():
+				// Upload failure — wait briefly for in-flight cleanup,
+				// then sweep any leftovers.
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(gcNudgeDelay):
+				}
 			}
 		}
 	}()

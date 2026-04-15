@@ -248,6 +248,7 @@ func newTestEngine(t *testing.T) (*Engine, *fakeCloud) {
 		fileGate:        make(chan struct{}, 1),
 		uploads:         make(map[string]*uploadProgress),
 		closeCh:         make(chan struct{}),
+		gcNotify:        make(chan struct{}, 1),
 	}
 	// Pre-fill all tokens so uploads never block on the rate limiter in tests.
 	for i := 0; i < uploadRateBurst+100; i++ {
@@ -2814,6 +2815,7 @@ func TestWriteFileStream_NoProviders(t *testing.T) {
 		fileGate:        make(chan struct{}, 1),
 		uploads:         make(map[string]*uploadProgress),
 		closeCh:         make(chan struct{}),
+		gcNotify:        make(chan struct{}, 1),
 	}
 	for i := 0; i < uploadRateBurst+100; i++ {
 		eng.uploadTokens <- struct{}{}

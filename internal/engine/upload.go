@@ -680,6 +680,8 @@ func (e *Engine) uploadChunks(r io.ReadSeeker, fileID string, fileSize int64, sc
 			slog.Info("cleaning up partial upload", "uploaded_shards", len(uploadedLocs))
 			go e.deleteCloudChunks(uploadedLocs)
 		}
+		// Nudge GC to sweep any orphans that deleteCloudChunks might miss.
+		e.nudgeGC()
 		return nil, firstErr
 	}
 

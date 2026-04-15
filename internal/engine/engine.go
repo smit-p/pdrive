@@ -102,6 +102,10 @@ type Engine struct {
 	// BackupDB defers work while uploading to avoid competing for provider quota.
 	uploading atomic.Int32
 
+	// gcNotify is signalled after an upload failure so the GC goroutine
+	// can promptly sweep any orphaned chunks left behind.
+	gcNotify chan struct{}
+
 	// Telemetry counters (atomic).
 	filesUploaded   atomic.Int64
 	filesDownloaded atomic.Int64
@@ -158,6 +162,7 @@ func newEngine(db *metadata.DB, dbPath string, rc CloudStorage, b *broker.Broker
 		fileGate:     make(chan struct{}, 1),
 		uploads:      make(map[string]*uploadProgress),
 		closeCh:      make(chan struct{}),
+		gcNotify:     make(chan struct{}, 1),
 	}
 	// Seed in-memory counters from persisted DB values.
 	if counters, err := db.LoadCounters(); err == nil {
@@ -221,6 +226,19 @@ func (e *Engine) DB() *metadata.DB { return e.db }
 // WaitUploads blocks until all in-flight async uploads have completed.
 // Intended for tests; production code should use Shutdown().
 func (e *Engine) WaitUploads() { e.asyncWG.Wait() }
+
+// GCNotify returns a channel that is signalled when the GC goroutine
+// should run ahead of schedule (e.g. after an upload failure leaves
+// orphaned chunks).
+func (e *Engine) GCNotify() <-chan struct{} { return e.gcNotify }
+
+// nudgeGC non-blockingly signals the GC goroutine to run soon.
+func (e *Engine) nudgeGC() {
+	select {
+	case e.gcNotify <- struct{}{}:
+	default: // already pending
+	}
+}
 
 // SetChunkSize overrides the dynamic chunk-size calculation with a fixed value.
 // Pass 0 to revert to the default dynamic behaviour.

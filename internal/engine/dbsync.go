@@ -13,6 +13,11 @@ import (
 
 const dbSyncRemotePath = "pdrive-meta/metadata.db"
 
+// gcGracePeriod is the minimum age of a cloud object before GC considers it
+// orphaned. Objects younger than this may belong to in-progress uploads that
+// haven't committed their DB records yet.
+const gcGracePeriod = 10 * time.Minute
+
 // backupHeader is a 16-byte header prepended to the plaintext before encryption.
 // Layout: [8-byte magic "pdriveDB"] [8-byte Unix timestamp (big-endian nanoseconds)]
 // This lets restore pick the newest backup across providers.
@@ -122,29 +127,21 @@ func (e *Engine) BackupDB() error {
 //   - Cloud objects with no DB record → deleted (true orphans from failed uploads/crashes)
 //   - DB records with no cloud object → logged as warnings (broken/unreadable files)
 //
-// Safe to call concurrently with uploads; it only touches objects in pdrive-chunks/
-// and never removes anything that has a valid DB entry.
-//
-// Returns true if the scan ran, false if deferred (e.g. upload in progress).
-func (e *Engine) GCOrphanedChunks() bool {
+// Safe to call concurrently with uploads: cloud objects younger than
+// gcGracePeriod are skipped so that in-flight uploads are never touched.
+func (e *Engine) GCOrphanedChunks() {
 	if e.rc == nil {
-		return true
-	}
-
-	// Defer the GC scan if a file upload is in progress — listing and
-	// deleting orphans would consume API quota that the upload needs.
-	if e.uploading.Load() > 0 {
-		slog.Debug("deferring orphan GC while upload is active")
-		return false
+		return
 	}
 
 	providers, err := e.db.GetAllProviders()
 	if err != nil || len(providers) == 0 {
-		return true
+		return
 	}
 
-	var orphansDeleted, brokenRecords int
+	var orphansDeleted, skippedRecent, brokenRecords int
 	brokenFileIDs := make(map[string]bool)
+	now := time.Now()
 
 	for _, p := range providers {
 		// Query chunk locations only for this provider instead of loading the
@@ -181,6 +178,16 @@ func (e *Engine) GCOrphanedChunks() bool {
 			}
 
 			if !known[remotePath] {
+				// Skip objects younger than the grace period — they may
+				// belong to an in-progress upload that hasn't committed
+				// its DB records yet.
+				if modTime, err := time.Parse(time.RFC3339Nano, item.ModTime); err == nil {
+					if now.Sub(modTime) < gcGracePeriod {
+						skippedRecent++
+						continue
+					}
+				}
+
 				slog.Info("gc: deleting orphaned chunk",
 					"provider", p.DisplayName, "path", remotePath)
 				<-e.uploadTokens
@@ -269,6 +276,7 @@ func (e *Engine) GCOrphanedChunks() bool {
 
 	slog.Info("gc: orphan scan complete",
 		"orphans_deleted", orphansDeleted,
+		"skipped_recent", skippedRecent,
 		"broken_db_records", brokenRecords,
 		"broken_files_removed", len(brokenFileIDs))
 
@@ -280,5 +288,4 @@ func (e *Engine) GCOrphanedChunks() bool {
 			}
 		}
 	}
-	return true
 }
