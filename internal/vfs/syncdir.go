@@ -48,6 +48,11 @@ type SyncDir struct {
 	pending map[string]*time.Timer
 	mu      sync.Mutex
 
+	// pathLocks prevents concurrent uploads to the same virtual path.
+	// Each in-flight upload holds a per-path mutex; a second upload of the
+	// same path blocks until the first finishes.
+	pathLocks sync.Map // virtualPath → *sync.Mutex
+
 	// removals tracks recently removed files for rename detection.
 	removals map[string]*recentRemoval // keyed by sha256+size
 
@@ -303,6 +308,12 @@ func (s *SyncDir) debounce(absPath, vp string) {
 }
 
 func (s *SyncDir) upload(absPath, vp string) {
+	// Acquire per-path lock to prevent concurrent uploads of the same file.
+	val, _ := s.pathLocks.LoadOrStore(vp, &sync.Mutex{})
+	pathMu := val.(*sync.Mutex)
+	pathMu.Lock()
+	defer pathMu.Unlock()
+
 	info, err := os.Stat(absPath)
 	if err != nil || info.IsDir() {
 		return
@@ -512,6 +523,35 @@ func (s *SyncDir) UnpinFile(virtualPath string) error {
 
 	slog.Info("sync: unpinned (evicted local data)", "path", virtualPath, "size", f.SizeBytes)
 	return nil
+}
+
+// WriteLocalCopy places a copy of src in the sync directory at virtualPath,
+// suppressing the fsnotify watcher so the file isn't re-uploaded.  This is
+// used by the web upload handler to keep uploaded files pinned locally.
+func (s *SyncDir) WriteLocalCopy(virtualPath string, src io.Reader) error {
+	localPath := filepath.Join(s.root, virtualPath)
+	os.MkdirAll(filepath.Dir(localPath), 0755)
+
+	// Write to a temp file, then atomically rename.
+	// The temp name starts with ".pdrive-" so the watcher ignores it via
+	// shouldSkipPath. We suppress localPath right before the rename so
+	// the window isn't wasted waiting for a long io.Copy.
+	tmp, err := os.CreateTemp(filepath.Dir(localPath), ".pdrive-upload-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	if _, err := io.Copy(tmp, src); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	s.suppressEvent(localPath)
+	return os.Rename(tmpName, localPath)
 }
 
 // IsStub returns true if the local copy of virtualPath is a cloud-only stub.

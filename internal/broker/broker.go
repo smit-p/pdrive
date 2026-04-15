@@ -163,3 +163,92 @@ func (b *Broker) TotalFreeSpace() (int64, error) {
 	}
 	return total, nil
 }
+
+// AssignShards returns provider IDs for n shards.  It tries to place each
+// shard on a distinct provider for maximum redundancy, falling back to
+// reusing providers when fewer than n providers are available.  Each shard
+// is sized shardSizeBytes for the free-space check.
+func (b *Broker) AssignShards(n int, shardSizeBytes int64) ([]string, error) {
+	candidates, err := b.eligible(shardSizeBytes)
+	if err != nil {
+		return nil, err
+	}
+	if len(candidates) == 0 {
+		return nil, ErrNoSpace
+	}
+
+	assigned := make([]string, 0, n)
+	used := make(map[string]bool)
+
+	// First pass: assign to distinct providers.
+	for len(assigned) < n && len(assigned) < len(candidates) {
+		var pick string
+		switch b.policy {
+		case PolicyMFS:
+			pick = b.pickMFSExcluding(candidates, used)
+		default:
+			pick = b.pickPFRDExcluding(candidates, used)
+		}
+		if pick == "" {
+			break
+		}
+		assigned = append(assigned, pick)
+		used[pick] = true
+	}
+
+	// Second pass: if we still need more shards than distinct providers,
+	// cycle through candidates round-robin.
+	for i := 0; len(assigned) < n; i++ {
+		assigned = append(assigned, candidates[i%len(candidates)].ID)
+	}
+
+	return assigned, nil
+}
+
+// pickMFSExcluding returns the provider with most free space, skipping those in exclude.
+func (b *Broker) pickMFSExcluding(candidates []metadata.Provider, exclude map[string]bool) string {
+	var bestID string
+	var bestFree int64 = -1
+	for _, p := range candidates {
+		if exclude[p.ID] {
+			continue
+		}
+		if *p.QuotaFreeBytes > bestFree {
+			bestFree = *p.QuotaFreeBytes
+			bestID = p.ID
+		}
+	}
+	return bestID
+}
+
+// pickPFRDExcluding selects a provider weighted by free space, skipping those in exclude.
+func (b *Broker) pickPFRDExcluding(candidates []metadata.Provider, exclude map[string]bool) string {
+	var totalFree int64
+	for _, p := range candidates {
+		if exclude[p.ID] {
+			continue
+		}
+		totalFree += *p.QuotaFreeBytes
+	}
+	if totalFree <= 0 {
+		// All excluded or no free space — pick first non-excluded.
+		for _, p := range candidates {
+			if !exclude[p.ID] {
+				return p.ID
+			}
+		}
+		return ""
+	}
+	pick := rand.Int64N(totalFree)
+	var cumulative int64
+	for _, p := range candidates {
+		if exclude[p.ID] {
+			continue
+		}
+		cumulative += *p.QuotaFreeBytes
+		if pick < cumulative {
+			return p.ID
+		}
+	}
+	return ""
+}

@@ -10,7 +10,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/smit-p/pdrive/internal/chunker"
 	"github.com/smit-p/pdrive/internal/engine"
 	"github.com/smit-p/pdrive/internal/metadata"
 )
@@ -74,7 +73,19 @@ func newRecoveryRCServer(t *testing.T, cfg recoveryRCServer) *httptest.Server {
 				http.Error(w, err.Error(), 500)
 				return
 			}
-			json.NewEncoder(w).Encode(map[string]any{})
+			// Support async mode: return a jobid so waitForJob can poll.
+			if _, isAsync := body["_async"]; isAsync {
+				json.NewEncoder(w).Encode(map[string]any{"jobid": 1})
+			} else {
+				json.NewEncoder(w).Encode(map[string]any{})
+			}
+
+		case "/job/status":
+			// All jobs complete immediately in tests.
+			json.NewEncoder(w).Encode(map[string]any{
+				"finished": true,
+				"success":  true,
+			})
 
 		case "/operations/list":
 			fs, _ := body["fs"].(string)
@@ -114,7 +125,6 @@ func newRecoveryDaemon(t *testing.T, srv *httptest.Server) (*Daemon, *metadata.D
 	d := &Daemon{
 		config: Config{
 			ConfigDir: dir,
-			Password:  "test-password",
 		},
 		db:     db,
 		rclone: rm,
@@ -122,187 +132,36 @@ func newRecoveryDaemon(t *testing.T, srv *httptest.Server) (*Daemon, *metadata.D
 	return d, db
 }
 
-// makeTestEncKey creates a real 32-byte encryption key from password + salt.
-func makeTestEncKey(password string, salt []byte) []byte {
-	return chunker.DeriveKey(password, salt)
-}
-
-// makeTestBackupPayload creates a realistic encrypted backup payload.
-func makeTestBackupPayload(t *testing.T, key []byte, dbData []byte) []byte {
+// makeTestBackupPayload creates a realistic backup payload (magic + timestamp + data).
+func makeTestBackupPayload(t *testing.T, dbData []byte) []byte {
 	t.Helper()
-	// Build backup payload: [8-byte magic "pdriveDB"] [8-byte timestamp] [db data]
 	hdr := make([]byte, 16)
 	copy(hdr[:8], engine.BackupMagic[:])
 	binary.BigEndian.PutUint64(hdr[8:16], uint64(1700000000000000000)) // fixed timestamp
-	plain := append(hdr, dbData...)
-
-	enc, err := chunker.Encrypt(key, plain)
-	if err != nil {
-		t.Fatalf("encrypting backup: %v", err)
-	}
-	return enc
+	return append(hdr, dbData...)
 }
 
 // ---------------------------------------------------------------------------
-// resolveCloudSalt tests
+// tryDownloadBackup tests
 // ---------------------------------------------------------------------------
 
-func TestResolveCloudSalt_FindsSaltOnCloud(t *testing.T) {
-	salt, err := chunker.GenerateSalt()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	srv := newRecoveryRCServer(t, recoveryRCServer{
-		remotes: map[string]string{"gdrive": "drive"},
-		files: map[string][]byte{
-			"gdrive:pdrive-meta/enc.salt": salt,
-		},
-	})
-	defer srv.Close()
-
-	d, _ := newRecoveryDaemon(t, srv)
-
-	if err := d.resolveCloudSalt(); err != nil {
-		t.Fatalf("resolveCloudSalt() error: %v", err)
-	}
-
-	// EncKey should be set
-	if len(d.config.EncKey) != 32 {
-		t.Errorf("EncKey length = %d, want 32", len(d.config.EncKey))
-	}
-
-	// Password should be cleared
-	if d.config.Password != "" {
-		t.Error("Password should be cleared after key derivation")
-	}
-
-	// Salt should be saved locally
-	localSalt, err := os.ReadFile(filepath.Join(d.config.ConfigDir, "enc.salt"))
-	if err != nil {
-		t.Fatalf("reading local salt: %v", err)
-	}
-	if len(localSalt) != chunker.SaltSize {
-		t.Errorf("local salt size = %d, want %d", len(localSalt), chunker.SaltSize)
-	}
-}
-
-func TestResolveCloudSalt_GeneratesFreshWhenNoCloud(t *testing.T) {
-	srv := newRecoveryRCServer(t, recoveryRCServer{
-		remotes: map[string]string{"gdrive": "drive"},
-		files:   map[string][]byte{}, // no salt file on cloud
-	})
-	defer srv.Close()
-
-	d, _ := newRecoveryDaemon(t, srv)
-
-	if err := d.resolveCloudSalt(); err != nil {
-		t.Fatalf("resolveCloudSalt() error: %v", err)
-	}
-
-	if len(d.config.EncKey) != 32 {
-		t.Errorf("EncKey length = %d, want 32", len(d.config.EncKey))
-	}
-	if d.config.Password != "" {
-		t.Error("Password should be cleared")
-	}
-
-	// Fresh salt should be saved locally
-	localSalt, err := os.ReadFile(filepath.Join(d.config.ConfigDir, "enc.salt"))
-	if err != nil {
-		t.Fatalf("reading local salt: %v", err)
-	}
-	if len(localSalt) != chunker.SaltSize {
-		t.Errorf("local salt size = %d, want %d", len(localSalt), chunker.SaltSize)
-	}
-}
-
-func TestResolveCloudSalt_SkipsInvalidSalt(t *testing.T) {
-	// Salt of wrong size should be skipped
-	srv := newRecoveryRCServer(t, recoveryRCServer{
-		remotes: map[string]string{"gdrive": "drive"},
-		files: map[string][]byte{
-			"gdrive:pdrive-meta/enc.salt": []byte("too-short"),
-		},
-	})
-	defer srv.Close()
-
-	d, _ := newRecoveryDaemon(t, srv)
-
-	if err := d.resolveCloudSalt(); err != nil {
-		t.Fatalf("resolveCloudSalt() error: %v", err)
-	}
-
-	// Should have generated a fresh salt (not used the bad one)
-	if len(d.config.EncKey) != 32 {
-		t.Errorf("EncKey length = %d, want 32", len(d.config.EncKey))
-	}
-}
-
-func TestResolveCloudSalt_TriesMultipleRemotes(t *testing.T) {
-	salt, _ := chunker.GenerateSalt()
-
-	srv := newRecoveryRCServer(t, recoveryRCServer{
-		remotes: map[string]string{"bad": "drive", "good": "drive"},
-		files: map[string][]byte{
-			// Only "good" has the salt
-			"good:pdrive-meta/enc.salt": salt,
-		},
-	})
-	defer srv.Close()
-
-	d, _ := newRecoveryDaemon(t, srv)
-
-	if err := d.resolveCloudSalt(); err != nil {
-		t.Fatalf("resolveCloudSalt() error: %v", err)
-	}
-	if len(d.config.EncKey) != 32 {
-		t.Errorf("EncKey length = %d, want 32", len(d.config.EncKey))
-	}
-}
-
-func TestResolveCloudSalt_NoRemotes(t *testing.T) {
-	srv := newRecoveryRCServer(t, recoveryRCServer{
-		remotes: map[string]string{},
-		files:   map[string][]byte{},
-	})
-	defer srv.Close()
-
-	d, _ := newRecoveryDaemon(t, srv)
-
-	if err := d.resolveCloudSalt(); err != nil {
-		t.Fatalf("resolveCloudSalt() error: %v", err)
-	}
-	// Should still generate a fresh salt
-	if len(d.config.EncKey) != 32 {
-		t.Errorf("EncKey length = %d, want 32", len(d.config.EncKey))
-	}
-}
-
-// ---------------------------------------------------------------------------
-// tryDownloadEncrypted tests
-// ---------------------------------------------------------------------------
-
-func TestTryDownloadEncrypted_Success(t *testing.T) {
-	salt, _ := chunker.GenerateSalt()
-	key := makeTestEncKey("test-password", salt)
+func TestTryDownloadBackup_Success(t *testing.T) {
 	dbData := []byte("CREATE TABLE test;")
-	encPayload := makeTestBackupPayload(t, key, dbData)
+	payload := makeTestBackupPayload(t, dbData)
 
 	srv := newRecoveryRCServer(t, recoveryRCServer{
 		remotes: map[string]string{"gdrive": "drive"},
 		files: map[string][]byte{
-			"gdrive:pdrive-meta/metadata.db.enc": encPayload,
+			"gdrive:pdrive-meta/metadata.db": payload,
 		},
 	})
 	defer srv.Close()
 
 	d, _ := newRecoveryDaemon(t, srv)
-	d.config.EncKey = key
 
-	data, ts, ok := d.tryDownloadEncrypted("gdrive")
+	data, ts, ok := d.tryDownloadBackup("gdrive")
 	if !ok {
-		t.Fatal("tryDownloadEncrypted returned !ok")
+		t.Fatal("tryDownloadBackup returned !ok")
 	}
 	if ts != 1700000000000000000 {
 		t.Errorf("timestamp = %d, want 1700000000000000000", ts)
@@ -312,7 +171,7 @@ func TestTryDownloadEncrypted_Success(t *testing.T) {
 	}
 }
 
-func TestTryDownloadEncrypted_NoFile(t *testing.T) {
+func TestTryDownloadBackup_NoFile(t *testing.T) {
 	srv := newRecoveryRCServer(t, recoveryRCServer{
 		remotes: map[string]string{"gdrive": "drive"},
 		files:   map[string][]byte{},
@@ -320,100 +179,30 @@ func TestTryDownloadEncrypted_NoFile(t *testing.T) {
 	defer srv.Close()
 
 	d, _ := newRecoveryDaemon(t, srv)
-	d.config.EncKey = make([]byte, 32)
 
-	_, _, ok := d.tryDownloadEncrypted("gdrive")
+	_, _, ok := d.tryDownloadBackup("gdrive")
 	if ok {
-		t.Error("tryDownloadEncrypted should return false for missing file")
+		t.Error("tryDownloadBackup should return false for missing file")
 	}
 }
 
-func TestTryDownloadEncrypted_BadKey(t *testing.T) {
-	salt, _ := chunker.GenerateSalt()
-	key := makeTestEncKey("correct-password", salt)
-	dbData := []byte("db content")
-	encPayload := makeTestBackupPayload(t, key, dbData)
+func TestTryDownloadBackup_CorruptPayload(t *testing.T) {
+	// Bad magic header
+	badPayload := []byte("not a valid backup payload that is at least 16 bytes")
 
 	srv := newRecoveryRCServer(t, recoveryRCServer{
 		remotes: map[string]string{"gdrive": "drive"},
 		files: map[string][]byte{
-			"gdrive:pdrive-meta/metadata.db.enc": encPayload,
+			"gdrive:pdrive-meta/metadata.db": badPayload,
 		},
 	})
 	defer srv.Close()
 
 	d, _ := newRecoveryDaemon(t, srv)
-	// Use a different key — decryption should fail
-	d.config.EncKey = makeTestEncKey("wrong-password", salt)
 
-	_, _, ok := d.tryDownloadEncrypted("gdrive")
+	_, _, ok := d.tryDownloadBackup("gdrive")
 	if ok {
-		t.Error("tryDownloadEncrypted should return false with wrong key")
-	}
-}
-
-func TestTryDownloadEncrypted_CorruptPayload(t *testing.T) {
-	salt, _ := chunker.GenerateSalt()
-	key := makeTestEncKey("password", salt)
-	// Valid decryption, but bad magic header
-	badPlain := []byte("not a valid backup payload that is at least 16 bytes")
-	enc, err := chunker.Encrypt(key, badPlain)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	srv := newRecoveryRCServer(t, recoveryRCServer{
-		remotes: map[string]string{"gdrive": "drive"},
-		files: map[string][]byte{
-			"gdrive:pdrive-meta/metadata.db.enc": enc,
-		},
-	})
-	defer srv.Close()
-
-	d, _ := newRecoveryDaemon(t, srv)
-	d.config.EncKey = key
-
-	_, _, ok := d.tryDownloadEncrypted("gdrive")
-	if ok {
-		t.Error("tryDownloadEncrypted should return false for corrupt payload")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// tryDownloadLegacy tests
-// ---------------------------------------------------------------------------
-
-func TestTryDownloadLegacy_Success(t *testing.T) {
-	dbData := []byte("legacy db content")
-	srv := newRecoveryRCServer(t, recoveryRCServer{
-		remotes: map[string]string{"gdrive": "drive"},
-		files: map[string][]byte{
-			"gdrive:pdrive-meta/metadata.db": dbData,
-		},
-	})
-	defer srv.Close()
-
-	d, _ := newRecoveryDaemon(t, srv)
-	data, ok := d.tryDownloadLegacy("gdrive")
-	if !ok {
-		t.Fatal("tryDownloadLegacy returned !ok")
-	}
-	if string(data) != string(dbData) {
-		t.Errorf("data = %q, want %q", string(data), string(dbData))
-	}
-}
-
-func TestTryDownloadLegacy_NoFile(t *testing.T) {
-	srv := newRecoveryRCServer(t, recoveryRCServer{
-		remotes: map[string]string{"gdrive": "drive"},
-		files:   map[string][]byte{},
-	})
-	defer srv.Close()
-
-	d, _ := newRecoveryDaemon(t, srv)
-	_, ok := d.tryDownloadLegacy("gdrive")
-	if ok {
-		t.Error("tryDownloadLegacy should return false for missing file")
+		t.Error("tryDownloadBackup should return false for corrupt payload")
 	}
 }
 
@@ -421,55 +210,23 @@ func TestTryDownloadLegacy_NoFile(t *testing.T) {
 // tryRestoreDB tests
 // ---------------------------------------------------------------------------
 
-func TestTryRestoreDB_EncryptedBackup(t *testing.T) {
-	salt, _ := chunker.GenerateSalt()
-	key := makeTestEncKey("test-password", salt)
+func TestTryRestoreDB_Backup(t *testing.T) {
 	dbData := []byte("restored database content")
-	encPayload := makeTestBackupPayload(t, key, dbData)
+	payload := makeTestBackupPayload(t, dbData)
 
 	srv := newRecoveryRCServer(t, recoveryRCServer{
 		remotes: map[string]string{"gdrive": "drive"},
 		files: map[string][]byte{
-			"gdrive:pdrive-meta/metadata.db.enc": encPayload,
+			"gdrive:pdrive-meta/metadata.db": payload,
 		},
 	})
 	defer srv.Close()
 
 	d, _ := newRecoveryDaemon(t, srv)
-	d.config.EncKey = key
 
 	dbPath := filepath.Join(t.TempDir(), "restored.db")
 	if !d.tryRestoreDB(dbPath) {
-		t.Fatal("tryRestoreDB returned false for encrypted backup")
-	}
-
-	got, err := os.ReadFile(dbPath)
-	if err != nil {
-		t.Fatalf("reading restored db: %v", err)
-	}
-	if string(got) != string(dbData) {
-		t.Errorf("restored data = %q, want %q", string(got), string(dbData))
-	}
-}
-
-func TestTryRestoreDB_LegacyFallback(t *testing.T) {
-	dbData := []byte("legacy database content")
-
-	srv := newRecoveryRCServer(t, recoveryRCServer{
-		remotes: map[string]string{"gdrive": "drive"},
-		files: map[string][]byte{
-			// No encrypted backup, only legacy
-			"gdrive:pdrive-meta/metadata.db": dbData,
-		},
-	})
-	defer srv.Close()
-
-	d, _ := newRecoveryDaemon(t, srv)
-	d.config.EncKey = make([]byte, 32) // dummy key, won't find encrypted
-
-	dbPath := filepath.Join(t.TempDir(), "restored.db")
-	if !d.tryRestoreDB(dbPath) {
-		t.Fatal("tryRestoreDB returned false for legacy backup")
+		t.Fatal("tryRestoreDB returned false")
 	}
 
 	got, err := os.ReadFile(dbPath)
@@ -489,7 +246,6 @@ func TestTryRestoreDB_NoBackup(t *testing.T) {
 	defer srv.Close()
 
 	d, _ := newRecoveryDaemon(t, srv)
-	d.config.EncKey = make([]byte, 32)
 
 	dbPath := filepath.Join(t.TempDir(), "restored.db")
 	if d.tryRestoreDB(dbPath) {
@@ -497,11 +253,7 @@ func TestTryRestoreDB_NoBackup(t *testing.T) {
 	}
 }
 
-func TestTryRestoreDB_PicksNewestEncrypted(t *testing.T) {
-	salt, _ := chunker.GenerateSalt()
-	key := makeTestEncKey("test-password", salt)
-
-	// Create two backups with different timestamps
+func TestTryRestoreDB_PicksNewest(t *testing.T) {
 	oldData := []byte("old database")
 	newData := []byte("new database")
 
@@ -509,25 +261,22 @@ func TestTryRestoreDB_PicksNewestEncrypted(t *testing.T) {
 	copy(oldPayload[:8], engine.BackupMagic[:])
 	binary.BigEndian.PutUint64(oldPayload[8:16], 1000) // older
 	copy(oldPayload[16:], oldData)
-	oldEnc, _ := chunker.Encrypt(key, oldPayload)
 
 	newPayload := make([]byte, 16+len(newData))
 	copy(newPayload[:8], engine.BackupMagic[:])
 	binary.BigEndian.PutUint64(newPayload[8:16], 2000) // newer
 	copy(newPayload[16:], newData)
-	newEnc, _ := chunker.Encrypt(key, newPayload)
 
 	srv := newRecoveryRCServer(t, recoveryRCServer{
 		remotes: map[string]string{"old-remote": "drive", "new-remote": "drive"},
 		files: map[string][]byte{
-			"old-remote:pdrive-meta/metadata.db.enc": oldEnc,
-			"new-remote:pdrive-meta/metadata.db.enc": newEnc,
+			"old-remote:pdrive-meta/metadata.db": oldPayload,
+			"new-remote:pdrive-meta/metadata.db": newPayload,
 		},
 	})
 	defer srv.Close()
 
 	d, _ := newRecoveryDaemon(t, srv)
-	d.config.EncKey = key
 
 	dbPath := filepath.Join(t.TempDir(), "restored.db")
 	if !d.tryRestoreDB(dbPath) {
@@ -548,7 +297,6 @@ func TestTryRestoreDB_NoRemotes(t *testing.T) {
 	defer srv.Close()
 
 	d, _ := newRecoveryDaemon(t, srv)
-	d.config.EncKey = make([]byte, 32)
 
 	dbPath := filepath.Join(t.TempDir(), "restored.db")
 	if d.tryRestoreDB(dbPath) {

@@ -180,7 +180,7 @@ func TestChunkAndLocationCRUD(t *testing.T) {
 	}
 
 	// Confirm upload.
-	if err := db.ConfirmUpload("c1", "p1"); err != nil {
+	if err := db.ConfirmUpload("c1", 0); err != nil {
 		t.Fatal(err)
 	}
 	locs, _ = db.GetChunkLocations("c1")
@@ -1240,7 +1240,7 @@ func TestConfirmUpload_Success(t *testing.T) {
 	db.InsertChunk(&ChunkRecord{ID: "c1", FileID: "f1", Sequence: 0, SizeBytes: 10, SHA256: "h1", EncryptedSize: 15})
 	db.InsertChunkLocation(&ChunkLocation{ChunkID: "c1", ProviderID: "p1", RemotePath: "c1.enc"})
 
-	err := db.ConfirmUpload("c1", "p1")
+	err := db.ConfirmUpload("c1", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1257,7 +1257,7 @@ func TestConfirmUpload_Success(t *testing.T) {
 
 func TestConfirmUpload_NotFound(t *testing.T) {
 	db := testDB(t)
-	err := db.ConfirmUpload("nonexistent", "nope")
+	err := db.ConfirmUpload("nonexistent", 0)
 	if err == nil {
 		t.Error("expected error for missing chunk location")
 	}
@@ -1636,7 +1636,7 @@ func TestGetPendingUploads_ClosedDB(t *testing.T) {
 
 func TestConfirmUpload_ClosedDB(t *testing.T) {
 	db := closedDB(t)
-	err := db.ConfirmUpload("c1", "p1")
+	err := db.ConfirmUpload("c1", 0)
 	if err == nil {
 		t.Error("expected error on closed DB")
 	}

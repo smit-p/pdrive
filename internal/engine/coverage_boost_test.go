@@ -5,13 +5,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"io"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/smit-p/pdrive/internal/chunker"
 	"github.com/smit-p/pdrive/internal/metadata"
 )
 
@@ -215,63 +213,6 @@ func TestResumeUploads_OpenError(t *testing.T) {
 
 	// Should not panic — just logs the error.
 	eng.ResumeUploads()
-}
-
-// ── ReadFileToTempFile with legacy encrypted chunk ──────────────────────────
-
-func TestReadFileToTempFile_LegacyFormat(t *testing.T) {
-	eng, fc := newTestEngine(t)
-	defer eng.Close()
-
-	plaintext := []byte("legacy data for temp file read")
-	encrypted, err := chunker.Encrypt(eng.encKey, plaintext)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Manually set up DB records as if a file with 1 legacy chunk exists.
-	fileID := "legacy-tmp-read"
-	now := time.Now().Unix()
-	chunkID := "chunk-legacy-001"
-	remotePath := "pdrive-chunks/" + chunkID
-
-	// Compute SHA256 of plaintext.
-	import_sha := sha256sum(plaintext)
-
-	eng.db.InsertFile(&metadata.File{
-		ID:          fileID,
-		VirtualPath: "/legacy.txt",
-		SizeBytes:   int64(len(plaintext)),
-		CreatedAt:   now,
-		ModifiedAt:  now,
-		SHA256Full:  import_sha,
-		UploadState: "complete",
-	})
-
-	tx, _ := eng.db.Conn().Begin()
-	tx.Exec(`INSERT INTO chunks (id, file_id, sequence, size_bytes, sha256, encrypted_size) VALUES (?, ?, ?, ?, ?, ?)`,
-		chunkID, fileID, 0, len(plaintext), import_sha, len(encrypted))
-	tx.Exec(`INSERT INTO chunk_locations (chunk_id, provider_id, remote_path, upload_confirmed_at) VALUES (?, ?, ?, ?)`,
-		chunkID, "p1", remotePath, now)
-	tx.Commit()
-
-	// Store the legacy-encrypted blob in fakeCloud.
-	fc.setObject("fake:", remotePath, encrypted)
-
-	// ReadFileToTempFile should detect legacy format and decrypt correctly.
-	tmp, err := eng.ReadFileToTempFile("/legacy.txt")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		tmp.Close()
-		os.Remove(tmp.Name())
-	}()
-
-	got, _ := io.ReadAll(tmp)
-	if !bytes.Equal(got, plaintext) {
-		t.Errorf("legacy read mismatch: got %d bytes, want %d", len(got), len(plaintext))
-	}
 }
 
 // ── WriteFileAsync dedup short-circuit ──────────────────────────────────────

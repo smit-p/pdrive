@@ -37,8 +37,7 @@ func newTestEngineWithDB(t *testing.T) (*engine.Engine, *fakeCloud, *metadata.DB
 	})
 	cloud := newFakeCloud()
 	b := broker.NewBroker(db, broker.PolicyPFRD, 0)
-	encKey := make([]byte, 32)
-	eng := engine.NewEngineWithCloud(db, dbPath, cloud, b, encKey)
+	eng := engine.NewEngineWithCloud(db, dbPath, cloud, b)
 	spoolDir := filepath.Join(dir, "spool")
 	os.MkdirAll(spoolDir, 0755)
 	return eng, cloud, db, spoolDir

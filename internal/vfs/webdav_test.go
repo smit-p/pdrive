@@ -91,6 +91,9 @@ func (f *fakeCloud) ListDir(remote, p string) ([]rclonerc.ListItem, error) {
 
 func (f *fakeCloud) Cleanup(remote string) error     { return nil }
 func (f *fakeCloud) Mkdir(remote, path string) error { return nil }
+func (f *fakeCloud) StreamGetFile(remote, p string) (io.ReadCloser, error) {
+	return f.GetFile(remote, p)
+}
 func (f *fakeCloud) TransferStats() rclonerc.TransferProgress {
 	return rclonerc.TransferProgress{}
 }
@@ -112,8 +115,7 @@ func newTestServer(t *testing.T) (*httptest.Server, *engine.Engine, *fakeCloud) 
 	})
 	cloud := newFakeCloud()
 	b := broker.NewBroker(db, broker.PolicyPFRD, 0)
-	encKey := make([]byte, 32)
-	eng := engine.NewEngineWithCloud(db, dbPath, cloud, b, encKey)
+	eng := engine.NewEngineWithCloud(db, dbPath, cloud, b)
 	t.Cleanup(eng.Close)
 	fs := vfs.NewWebDAVFS(eng, "") // empty spoolDir falls back to os.TempDir in tests
 	handler := &webdav.Handler{FileSystem: fs, LockSystem: webdav.NewMemLS()}
@@ -894,8 +896,7 @@ func newTestSyncDir(t *testing.T) (*vfs.SyncDir, *engine.Engine, *fakeCloud) {
 	})
 	cloud := newFakeCloud()
 	b := broker.NewBroker(db, broker.PolicyPFRD, 0)
-	encKey := make([]byte, 32)
-	eng := engine.NewEngineWithCloud(db, dbPath, cloud, b, encKey)
+	eng := engine.NewEngineWithCloud(db, dbPath, cloud, b)
 	t.Cleanup(eng.Close)
 	root := t.TempDir()
 	spool := t.TempDir()
@@ -1311,8 +1312,7 @@ func newTestFS(t *testing.T) (*vfs.WebDAVFS, *engine.Engine, *fakeCloud) {
 	})
 	cloud := newFakeCloud()
 	b := broker.NewBroker(db, broker.PolicyPFRD, 0)
-	encKey := make([]byte, 32)
-	eng := engine.NewEngineWithCloud(db, dbPath, cloud, b, encKey)
+	eng := engine.NewEngineWithCloud(db, dbPath, cloud, b)
 	t.Cleanup(eng.Close)
 	fs := vfs.NewWebDAVFS(eng, "")
 	return fs, eng, cloud
@@ -1509,8 +1509,7 @@ func TestWebDAVFS_Stat_EngineStatError(t *testing.T) {
 	})
 	cloud := newFakeCloud()
 	b := broker.NewBroker(db, broker.PolicyPFRD, 0)
-	encKey := make([]byte, 32)
-	eng := engine.NewEngineWithCloud(db, dbPath, cloud, b, encKey)
+	eng := engine.NewEngineWithCloud(db, dbPath, cloud, b)
 	fs := vfs.NewWebDAVFS(eng, "")
 	// Close the engine's DB so Stat will fail.
 	db.Close()
@@ -1536,8 +1535,7 @@ func TestWebDAVFS_OpenFile_StatError(t *testing.T) {
 	})
 	cloud := newFakeCloud()
 	b := broker.NewBroker(db, broker.PolicyPFRD, 0)
-	encKey := make([]byte, 32)
-	eng := engine.NewEngineWithCloud(db, dbPath, cloud, b, encKey)
+	eng := engine.NewEngineWithCloud(db, dbPath, cloud, b)
 	fs := vfs.NewWebDAVFS(eng, "")
 	db.Close()
 	eng.Close()
@@ -1563,8 +1561,7 @@ func TestWebDAVFile_Write_BadSpoolDir(t *testing.T) {
 	})
 	cloud := newFakeCloud()
 	b := broker.NewBroker(db, broker.PolicyPFRD, 0)
-	encKey := make([]byte, 32)
-	eng := engine.NewEngineWithCloud(db, dbPath, cloud, b, encKey)
+	eng := engine.NewEngineWithCloud(db, dbPath, cloud, b)
 	t.Cleanup(eng.Close)
 	// Use a non-existent spool dir to trigger CreateTemp error.
 	fs := vfs.NewWebDAVFS(eng, "/nonexistent/spool/dir")
@@ -1684,8 +1681,7 @@ func TestWebDAVFS_Stat_IsDirError(t *testing.T) {
 	})
 	cloud := newFakeCloud()
 	b := broker.NewBroker(db, broker.PolicyPFRD, 0)
-	encKey := make([]byte, 32)
-	eng := engine.NewEngineWithCloud(db, dbPath, cloud, b, encKey)
+	eng := engine.NewEngineWithCloud(db, dbPath, cloud, b)
 	fs := vfs.NewWebDAVFS(eng, "")
 	// Close DB so Stat will call engine.Stat → error, which hits the first branch.
 	// But we actually need Stat to succeed (return nil) then IsDir to fail.
@@ -2456,8 +2452,7 @@ func TestSyncDir_Upload_LargeSpoolError(t *testing.T) {
 	})
 	cloud := newFakeCloud()
 	b := broker.NewBroker(db, broker.PolicyPFRD, 0)
-	encKey := make([]byte, 32)
-	eng := engine.NewEngineWithCloud(db, dbPath, cloud, b, encKey)
+	eng := engine.NewEngineWithCloud(db, dbPath, cloud, b)
 	t.Cleanup(eng.Close)
 	root := t.TempDir()
 	badSpool := "/nonexistent/spool/dir"
@@ -2873,8 +2868,7 @@ func newTestEngineForVFS(t *testing.T) (*engine.Engine, *fakeCloud) {
 	})
 	cloud := newFakeCloud()
 	b := broker.NewBroker(db, broker.PolicyPFRD, 0)
-	encKey := make([]byte, 32)
-	eng := engine.NewEngineWithCloud(db, dbPath, cloud, b, encKey)
+	eng := engine.NewEngineWithCloud(db, dbPath, cloud, b)
 	t.Cleanup(eng.Close)
 	return eng, cloud
 }
@@ -3300,8 +3294,7 @@ func TestWebDAVFile_Readdir_Error(t *testing.T) {
 	})
 	cloud := newFakeCloud()
 	b := broker.NewBroker(db, broker.PolicyPFRD, 0)
-	encKey := make([]byte, 32)
-	eng := engine.NewEngineWithCloud(db, dbPath, cloud, b, encKey)
+	eng := engine.NewEngineWithCloud(db, dbPath, cloud, b)
 	defer eng.Close()
 
 	fs := vfs.NewWebDAVFS(eng, "")
@@ -3468,8 +3461,7 @@ func TestWebDAVFS_Stat_BrokenFilesTable(t *testing.T) {
 	})
 	cloud := newFakeCloud()
 	b := broker.NewBroker(db, broker.PolicyPFRD, 0)
-	encKey := make([]byte, 32)
-	eng := engine.NewEngineWithCloud(db, dbPath, cloud, b, encKey)
+	eng := engine.NewEngineWithCloud(db, dbPath, cloud, b)
 	defer eng.Close()
 
 	fs := vfs.NewWebDAVFS(eng, "")
@@ -3499,8 +3491,7 @@ func TestWebDAVFS_Stat_BrokenDirsTable(t *testing.T) {
 	})
 	cloud := newFakeCloud()
 	b := broker.NewBroker(db, broker.PolicyPFRD, 0)
-	encKey := make([]byte, 32)
-	eng := engine.NewEngineWithCloud(db, dbPath, cloud, b, encKey)
+	eng := engine.NewEngineWithCloud(db, dbPath, cloud, b)
 	defer eng.Close()
 
 	fs := vfs.NewWebDAVFS(eng, "")
@@ -3556,8 +3547,7 @@ func TestSyncDir_DownloadMissing_SkipsPendingUploadState(t *testing.T) {
 	})
 	cloud := newFakeCloud()
 	b := broker.NewBroker(db, broker.PolicyPFRD, 0)
-	encKey := make([]byte, 32)
-	eng := engine.NewEngineWithCloud(db, dbPath, cloud, b, encKey)
+	eng := engine.NewEngineWithCloud(db, dbPath, cloud, b)
 	t.Cleanup(eng.Close)
 
 	// Insert a file with upload_state="pending" directly in the DB.
@@ -3630,8 +3620,7 @@ func TestSyncDir_DownloadMissing_ListDirError(t *testing.T) {
 	})
 	cloud := newFakeCloud()
 	b := broker.NewBroker(db, broker.PolicyPFRD, 0)
-	encKey := make([]byte, 32)
-	eng := engine.NewEngineWithCloud(db, dbPath, cloud, b, encKey)
+	eng := engine.NewEngineWithCloud(db, dbPath, cloud, b)
 	t.Cleanup(eng.Close)
 
 	// Insert a complete file first, then break the DB.

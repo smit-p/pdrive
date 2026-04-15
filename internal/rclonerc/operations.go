@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -159,9 +160,11 @@ func (t *tempFileReadCloser) Close() error {
 }
 
 // GetFile downloads a file from remote:remotePath using rclone RC operations/copyfile
-// to a local temp directory and returns a streaming reader. The caller must Close
-// the returned ReadCloser to release the temp file.
+// to a local temp directory and returns a streaming reader. The copy runs as an
+// async rclone job (like PutFile) to avoid HTTP client timeouts on large files.
+// The caller must Close the returned ReadCloser to release the temp file.
 func (c *Client) GetFile(remote, remotePath string) (io.ReadCloser, error) {
+	slog.Debug("rclone GetFile start", "remote", remote, "path", remotePath)
 	tmpDir, err := os.MkdirTemp("", "pdrive-dl-")
 	if err != nil {
 		return nil, fmt.Errorf("creating temp dir: %w", err)
@@ -169,13 +172,30 @@ func (c *Client) GetFile(remote, remotePath string) (io.ReadCloser, error) {
 
 	dstRemote := filepath.Base(remotePath)
 
-	_, err = c.call("operations/copyfile", map[string]interface{}{
+	// Launch as an async rclone job so we are not subject to HTTP client
+	// timeouts for slow or large downloads.
+	result, err := c.call("operations/copyfile", map[string]interface{}{
 		"srcFs":     ensureColon(remote),
 		"srcRemote": remotePath,
 		"dstFs":     tmpDir + "/",
 		"dstRemote": dstRemote,
+		"_async":    true,
+		"_group":    "pdrive",
 	})
 	if err != nil {
+		_ = os.RemoveAll(tmpDir)
+		return nil, fmt.Errorf("starting async download: %w", err)
+	}
+
+	var job struct {
+		JobID int `json:"jobid"`
+	}
+	if err := json.Unmarshal(result, &job); err != nil {
+		_ = os.RemoveAll(tmpDir)
+		return nil, fmt.Errorf("parsing async download response: %w", err)
+	}
+
+	if err := c.waitForJob(job.JobID); err != nil {
 		_ = os.RemoveAll(tmpDir)
 		return nil, fmt.Errorf("downloading file: %w", err)
 	}

@@ -97,42 +97,6 @@ func TestDaemon_StartStop(t *testing.T) {
 	// But db closure won't panic on repeated stop.
 }
 
-func TestDaemon_StartStop_WithPassword(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
-
-	fakeRclone := buildFakeRclone(t)
-	rclonePort := freePort(t)
-	httpPort := freePort(t)
-	dir := t.TempDir()
-
-	cfg := Config{
-		ConfigDir:   dir,
-		RcloneBin:   fakeRclone,
-		RcloneAddr:  rclonePort,
-		WebDAVAddr:  httpPort,
-		Password:    "test-password",
-		SkipRestore: true,
-	}
-
-	d := New(cfg)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	if err := d.Start(ctx); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-
-	// Should have derived an encryption key from the password.
-	if len(d.config.EncKey) == 0 {
-		t.Error("EncKey should be set after Start with password")
-	}
-
-	d.Stop()
-	cancel()
-}
-
 func TestDaemon_Start_BadRclone(t *testing.T) {
 	dir := t.TempDir()
 	httpPort := freePort(t)

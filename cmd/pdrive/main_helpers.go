@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/hex"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -13,63 +12,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/smit-p/pdrive/internal/chunker"
 	"github.com/smit-p/pdrive/internal/config"
 	"github.com/smit-p/pdrive/internal/daemon"
+	"github.com/smit-p/pdrive/internal/logutil"
 	"github.com/smit-p/pdrive/internal/rclonebin"
 )
-
-// resolveEncKey determines the encryption key from CLI flags, config files, or
-// interactive prompt.  Returns the raw key bytes and/or a deferred password
-// that the daemon should use for cloud-salt-based derivation.
-func resolveEncKey(configDir, encKeyHex, password string, readPW func() (string, error)) (encKey []byte, deferredPW string, err error) {
-	saltPath := filepath.Join(configDir, "enc.salt")
-	keyPath := filepath.Join(configDir, "enc.key")
-
-	switch {
-	case encKeyHex != "":
-		encKey, err = hex.DecodeString(encKeyHex)
-		if err != nil || len(encKey) != 32 {
-			return nil, "", fmt.Errorf("--enc-key must be a 64-character hex string (32 bytes)")
-		}
-		return encKey, "", nil
-
-	case password != "":
-		if salt, err := os.ReadFile(saltPath); err == nil && len(salt) == chunker.SaltSize {
-			return chunker.DeriveKey(password, salt), "", nil
-		}
-		return nil, password, nil
-
-	default:
-		if salt, err := os.ReadFile(saltPath); err == nil && len(salt) == chunker.SaltSize {
-			fmt.Fprint(os.Stderr, "Enter pdrive password: ")
-			pw, err := readPW()
-			if err != nil || pw == "" {
-				return nil, "", fmt.Errorf("password required (salt file exists at %s)", saltPath)
-			}
-			return chunker.DeriveKey(pw, salt), "", nil
-		}
-		if data, err := os.ReadFile(keyPath); err == nil && len(data) == 32 {
-			return data, "", nil
-		}
-		// First run — prompt for a password.
-		fmt.Fprintln(os.Stderr, "No encryption key found. Set up a password for pdrive.")
-		fmt.Fprintln(os.Stderr, "This password encrypts all your data. Remember it — it cannot be recovered.")
-		fmt.Fprintln(os.Stderr)
-		fmt.Fprint(os.Stderr, "Enter new password: ")
-		pw1, err := readPW()
-		if err != nil || len(pw1) < 8 {
-			return nil, "", fmt.Errorf("password must be at least 8 characters")
-		}
-		fmt.Fprint(os.Stderr, "\nConfirm password: ")
-		pw2, _ := readPW()
-		if pw1 != pw2 {
-			return nil, "", fmt.Errorf("passwords do not match")
-		}
-		fmt.Fprintln(os.Stderr)
-		return nil, pw1, nil
-	}
-}
 
 // findRcloneBin locates the rclone binary from the given flag, PATH, a
 // bundled binary next to the executable, or auto-download.
@@ -136,6 +83,9 @@ func mergeConfigFile(fileCfg config.File, homeDir string, opts *cliOptions) {
 	if fileCfg.Remotes != "" && opts.Remotes == "" {
 		opts.Remotes = fileCfg.Remotes
 	}
+	if fileCfg.Erasure != "" && opts.Erasure == "" {
+		opts.Erasure = fileCfg.Erasure
+	}
 	if fileCfg.MountBackend != "" && opts.Backend == "" {
 		opts.Backend = fileCfg.MountBackend
 	}
@@ -157,6 +107,7 @@ type cliOptions struct {
 	RateLimit    int
 	Debug        bool
 	Remotes      string
+	Erasure      string
 	Backend      string
 	MountPoint   string
 }
@@ -301,24 +252,23 @@ func pollDaemonStart(addr string, cmd *exec.Cmd, maxAttempts int) bool {
 
 // buildDaemonConfig creates the daemon.Config from CLI options.
 func buildDaemonConfig(configDir, rcloneBin, rcloneAddr, webdavAddr, syncDir string,
-	encKey []byte, password, brokerPolicy string,
+	brokerPolicy string,
 	minFreeSpace int64, skipRestore bool,
 	chunkSize, ratePerSec int, remotes []string,
-	backend, mountPoint string) daemon.Config {
+	erasure, backend, mountPoint string) daemon.Config {
 	return daemon.Config{
 		ConfigDir:    configDir,
 		RcloneBin:    rcloneBin,
 		RcloneAddr:   rcloneAddr,
 		WebDAVAddr:   webdavAddr,
 		SyncDir:      syncDir,
-		EncKey:       encKey,
-		Password:     password,
 		BrokerPolicy: brokerPolicy,
 		MinFreeSpace: minFreeSpace,
 		SkipRestore:  skipRestore,
 		ChunkSize:    chunkSize,
 		RatePerSec:   ratePerSec,
 		Remotes:      remotes,
+		Erasure:      erasure,
 		MountBackend: backend,
 		MountPoint:   mountPoint,
 	}
@@ -332,18 +282,18 @@ type parsedConfig struct {
 	RcloneAddr   string
 	WebDAVAddr   string
 	RcloneBin    string
-	EncKeyHex    string
-	Password     string
 	BrokerPolicy string
 	MinFreeSpace int64
 	SkipRestore  bool
 	ChunkSize    int
 	RateLimit    int
 	Remotes      string
+	Erasure      string
 	Debug        bool
 	Foreground   bool
 	Backend      string
 	MountPoint   string
+	LogHandler   *logutil.RingHandler
 	Args         []string // remaining positional arguments
 }
 
@@ -364,8 +314,6 @@ func parseAndMergeConfig(args []string) (*parsedConfig, error) {
 	fs.StringVar(&cfg.RcloneAddr, "rclone-addr", "127.0.0.1:5572", "rclone RC address")
 	fs.StringVar(&cfg.WebDAVAddr, "webdav-addr", "127.0.0.1:8765", "HTTP API/WebDAV address")
 	fs.StringVar(&cfg.RcloneBin, "rclone-bin", "", "Absolute path to rclone binary")
-	fs.StringVar(&cfg.EncKeyHex, "enc-key", "", "Encryption key (64-char hex string for AES-256)")
-	fs.StringVar(&cfg.Password, "password", "", "Encryption password")
 	fs.StringVar(&cfg.BrokerPolicy, "broker-policy", "pfrd", "Chunk placement policy")
 	fs.Int64Var(&cfg.MinFreeSpace, "min-free-space", 256*1024*1024, "Minimum free space (bytes)")
 	fs.BoolVar(&cfg.SkipRestore, "skip-restore", false, "Skip restoring metadata DB")
@@ -374,6 +322,7 @@ func parseAndMergeConfig(args []string) (*parsedConfig, error) {
 	fs.StringVar(&cfg.Remotes, "remotes", "", "Comma-separated list of rclone remote names")
 	fs.BoolVar(&cfg.Debug, "debug", false, "Enable debug logging")
 	fs.BoolVar(&cfg.Foreground, "foreground", false, "Run daemon in foreground")
+	fs.StringVar(&cfg.Erasure, "erasure", "", "Reed-Solomon erasure coding (e.g. 3+1 = 3 data + 1 parity shard)")
 	fs.StringVar(&cfg.Backend, "backend", "", "Mount backend: webdav (default) or fuse")
 	fs.StringVar(&cfg.MountPoint, "mountpoint", "", "FUSE mount point")
 
@@ -390,7 +339,7 @@ func parseAndMergeConfig(args []string) (*parsedConfig, error) {
 		SyncDir: cfg.SyncDir, RcloneAddr: cfg.RcloneAddr, WebDAVAddr: cfg.WebDAVAddr,
 		RcloneBin: cfg.RcloneBin, BrokerPolicy: cfg.BrokerPolicy, MinFreeSpace: cfg.MinFreeSpace,
 		ChunkSize: cfg.ChunkSize, RateLimit: cfg.RateLimit, Debug: cfg.Debug,
-		Remotes: cfg.Remotes, Backend: cfg.Backend, MountPoint: cfg.MountPoint,
+		Remotes: cfg.Remotes, Erasure: cfg.Erasure, Backend: cfg.Backend, MountPoint: cfg.MountPoint,
 	}
 	mergeConfigFile(fileCfg, homeDir, &opts)
 	cfg.SyncDir = opts.SyncDir
@@ -403,6 +352,7 @@ func parseAndMergeConfig(args []string) (*parsedConfig, error) {
 	cfg.RateLimit = opts.RateLimit
 	cfg.Debug = opts.Debug
 	cfg.Remotes = opts.Remotes
+	cfg.Erasure = opts.Erasure
 	cfg.Backend = opts.Backend
 	cfg.MountPoint = opts.MountPoint
 
@@ -411,7 +361,10 @@ func parseAndMergeConfig(args []string) (*parsedConfig, error) {
 	if cfg.Debug {
 		logLevel = slog.LevelDebug
 	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel})))
+	textHandler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel})
+	ringHandler := logutil.NewRingHandler(textHandler, 1000)
+	slog.SetDefault(slog.New(ringHandler))
+	cfg.LogHandler = ringHandler
 
 	return cfg, nil
 }

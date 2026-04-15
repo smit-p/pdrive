@@ -100,6 +100,7 @@ var api={
   tree:function(p){return api._get('/api/tree?path='+encodeURIComponent(p||'/'))},
   find:function(pattern,root){return api._get('/api/find?pattern='+encodeURIComponent(pattern)+'&path='+encodeURIComponent(root||'/'))},
   du:function(p){return api._get('/api/du?path='+encodeURIComponent(p||'/'))},
+  resync:function(){return api._post('/api/resync')},
   pin:function(p){return api._post('/api/pin?path='+encodeURIComponent(p))},
   unpin:function(p){return api._post('/api/unpin?path='+encodeURIComponent(p))},
   del:function(p){return api._post('/api/delete?path='+encodeURIComponent(p))},
@@ -120,6 +121,7 @@ var api={
       return r.json();
     });
   },
+  cancelUpload:function(p){return api._post('/api/upload/cancel?path='+encodeURIComponent(p))},
   activity:function(){return api._get('/api/activity')}
 };
 
@@ -216,13 +218,13 @@ function renderInfoContent(data,panel){
     body+='<img class="preview-img" src="'+esc(api.downloadUrl(data.path))+'" alt="preview" loading="lazy" onerror="this.style.display=\'none\'">';
   }
 
-  body+='<div class="info-row"><span class="info-label">Path</span><span class="info-value">'+esc(data.path)+'</span></div>';
+  body+='<div class="info-row"><span class="info-label">Path</span><span class="info-value">'+esc(data.path)+' <button class="btn-icon copy-btn" data-action="copyText" data-text="'+esc(data.path)+'" title="Copy">📋</button></span></div>';
   body+='<div class="info-row"><span class="info-label">Size</span><span class="info-value">'+esc(fmtSize(data.size_bytes))+'</span></div>';
   body+='<div class="info-row"><span class="info-label">Created</span><span class="info-value">'+esc(fmtDateFull(data.created_at))+'</span></div>';
   body+='<div class="info-row"><span class="info-label">Modified</span><span class="info-value">'+esc(fmtDateFull(data.modified_at))+'</span></div>';
   body+='<div class="info-row"><span class="info-label">State</span><span class="info-value">'+esc(data.upload_state)+'</span></div>';
   if(data.sha256){
-    body+='<div class="info-row"><span class="info-label">SHA-256</span><span class="info-value" style="font-size:10px">'+esc(data.sha256)+'</span></div>';
+    body+='<div class="info-row"><span class="info-label">SHA-256</span><span class="info-value" style="font-size:10px">'+esc(data.sha256)+' <button class="btn-icon copy-btn" data-action="copyText" data-text="'+esc(data.sha256)+'" title="Copy">📋</button></span></div>';
   }
 
   // Chunks
@@ -240,10 +242,13 @@ function renderInfoContent(data,panel){
 
   // Actions
   var actions='<button class="btn btn-primary" data-action="download" data-path="'+esc(data.path)+'">⬇ Download</button>'
-    +'<button class="btn btn-secondary" data-action="verifyFile" data-path="'+esc(data.path)+'">✓ Verify</button>'
-    +'<button class="btn btn-secondary" data-action="pin" data-path="'+esc(data.path)+'">📌 Pin</button>'
-    +'<button class="btn btn-secondary" data-action="unpin" data-path="'+esc(data.path)+'">☁️ Unpin</button>'
-    +'<button class="btn btn-secondary" data-action="moveFile" data-path="'+esc(data.path)+'">📁 Move</button>'
+    +'<button class="btn btn-secondary" data-action="verifyFile" data-path="'+esc(data.path)+'">✓ Verify</button>';
+  if(data.upload_state==='local'||data.upload_state==='uploading'){
+    actions+='<button class="btn btn-secondary" data-action="unpin" data-path="'+esc(data.path)+'">☁️ Unpin</button>';
+  } else {
+    actions+='<button class="btn btn-secondary" data-action="pin" data-path="'+esc(data.path)+'">📌 Pin</button>';
+  }
+  actions+='<button class="btn btn-secondary" data-action="moveFile" data-path="'+esc(data.path)+'">📁 Move</button>'
     +'<button class="btn btn-danger" data-action="deleteFile" data-path="'+esc(data.path)+'">🗑 Delete</button>';
 
   var existing=panel.querySelector('.panel-actions');
@@ -334,6 +339,7 @@ function renderBrowse(){
   html+='<input type="file" id="upload-folder-input" style="display:none" webkitdirectory>';
   html+='<div style="flex:1"></div>';
   html+='<button class="btn-ghost" data-action="duHere" title="Disk usage" style="font-size:12px">💾 Usage</button>';
+  html+='<button class="btn-ghost" data-action="refreshBrowse" title="Refresh" style="font-size:12px">🔄 Refresh</button>';
   if(S.path!=='/'){
     html+='<button class="btn-ghost" data-action="navigate" data-path="'+esc(pathParent(S.path))+'" title="Go up">⬆ Up</button>';
   }
@@ -347,7 +353,9 @@ function renderBrowse(){
     var dirs=sorted.dirs,files=sorted.files;
 
     if(!dirs.length&&!files.length){
-      html+='<div class="empty-state"><div class="empty-icon">📭</div><p>This directory is empty</p></div>';
+      html+='<div class="empty-state"><div class="empty-icon">📭</div><p>This directory is empty</p>'
+        +'<p style="font-size:12px;color:var(--fg3);margin-top:4px">Drag &amp; drop files here, or use the buttons above to upload</p>'
+        +'<button class="btn btn-primary" data-action="uploadFile" style="margin-top:12px">⬆ Upload Files</button></div>';
     } else {
       html+='<div class="file-table-wrap"><table class="file-table"><thead><tr>';
       html+='<th class="cell-check"><input type="checkbox" data-action="selectAll" title="Select all"></th>';
@@ -360,8 +368,9 @@ function renderBrowse(){
 
       dirs.forEach(function(d){
         var fp=pathJoin(S.path,d);
-        html+='<tr class="file-row" data-filepath="'+esc(fp)+'" data-isdir="1">';
-        html+='<td class="cell-check"></td>';
+        var sel=S.selected.has(fp);
+        html+='<tr class="file-row'+(sel?' selected':'')+'" data-filepath="'+esc(fp)+'" data-isdir="1">';
+        html+='<td class="cell-check"><input type="checkbox" data-action="selectFile" data-path="'+esc(fp)+'"'+(sel?' checked':'')+'></td>';
         html+='<td class="cell-name"><a data-action="navigate" data-path="'+esc(fp)+'"><span class="file-icon">📁</span>'+esc(d)+'</a></td>';
         html+='<td class="cell-size r">—</td><td></td><td class="cell-date r">—</td>';
         html+='<td class="cell-actions"><button class="btn-icon" data-action="deleteFile" data-path="'+esc(fp)+'" title="Delete">🗑</button></td>';
@@ -420,13 +429,18 @@ function loadBrowse(p){
 // ─── Page: Dashboard ────────────────────────────────────────────────────────
 
 function renderDashboard(){
-  var html='<div class="page"><h2 class="page-title">Dashboard</h2>';
+  var html='<div class="page"><div style="display:flex;align-items:center;gap:12px;margin-bottom:16px"><h2 class="page-title" style="margin:0">Dashboard</h2>'
+    +'<button class="btn btn-secondary" data-action="resyncProviders" style="font-size:12px">🔄 Resync Providers</button></div>';
   html+='<div id="dash-health"><div class="loading-center"><span class="spinner"></span></div></div>';
+  html+='<div id="dash-storage"><div class="loading-center"><span class="spinner"></span></div></div>';
   html+='<div class="section-title">Storage Providers</div>';
   html+='<div id="dash-providers"><div class="loading-center"><span class="spinner"></span></div></div>';
   html+='</div>';
   return html;
 }
+
+// Provider color palette (distinct, accessible)
+var providerColors=['#3b82f6','#f59e0b','#10b981','#8b5cf6','#ec4899','#06b6d4','#f97316','#6366f1'];
 
 function loadDashboard(){
   renderPage();
@@ -441,41 +455,98 @@ function loadDashboard(){
         +'<div class="card"><div class="card-title">Health</div><div class="card-value"><span class="health-dot '+hClass+'"></span> '+esc(health.status)+'</div>'
         +'<div class="card-sub">Uptime: '+fmtUptime(health.uptime_seconds)+' · In-flight: '+health.in_flight_uploads+' · DB: '+(health.db_ok?'✓':'✗')+'</div></div>'
         +'<div class="card"><div class="card-title">Total Files</div><div class="card-value">'+status.total_files.toLocaleString()+'</div>'
-        +'<div class="card-sub">'+fmtSize(status.total_bytes)+' total</div></div>'
+        +'<div class="card-sub">'+fmtSize(status.total_bytes)+' across all providers</div></div>'
         +'</div>';
     }
 
-    // Providers
-    var pEl=document.getElementById('dash-providers');
-    if(pEl){
-      var remoteLookup={};
-      (remotes.remotes||[]).forEach(function(r){remoteLookup[r.name]=r});
-      if(!status.providers||!status.providers.length){
-        pEl.innerHTML='<div class="empty-state"><p>No providers configured</p></div>';
-      } else {
-        var cards='<div class="card-grid">';
-        status.providers.forEach(function(p){
-          var remote=remoteLookup[p.name]||{};
-          var total=p.quota_total_bytes||0;
-          var free=p.quota_free_bytes||0;
-          var used=total>0?total-free:0;
-          var usedByPd=p.quota_used_by_pdrive||0;
-          var pct=total>0?Math.min(100,used/total*100):0;
-          var barColor=pct>90?'var(--danger)':pct>70?'var(--warning)':'var(--accent)';
-          cards+='<div class="card"><div class="card-title">'+esc(p.name);
-          if(p.type)cards+=' <span style="opacity:.5;text-transform:none;font-weight:400">('+esc(p.type)+')</span>';
-          cards+='</div>';
-          if(p.account_identity)cards+='<div style="font-size:11px;color:var(--fg2);margin-bottom:6px">'+esc(p.account_identity)+'</div>';
-          cards+='<div class="card-value">'+fmtSize(free)+' free</div>';
-          cards+='<div class="card-bar"><div class="card-bar-fill" style="width:'+pct+'%;background:'+barColor+'"></div></div>';
-          cards+='<div class="card-sub">'+fmtSize(used)+' / '+fmtSize(total)+' used';
-          if(usedByPd)cards+=' · '+fmtSize(usedByPd)+' by pdrive';
-          cards+='</div></div>';
-        });
-        cards+='</div>';
-        pEl.innerHTML=cards;
-      }
+    // Storage overview
+    var sEl=document.getElementById('dash-storage');
+    if(!sEl)return;
+    var providers=status.providers||[];
+    if(!providers.length){sEl.innerHTML='';return}
+
+    var combTotal=0,combUsed=0,combPd=0;
+    providers.forEach(function(p){
+      if(p.quota_total_bytes)combTotal+=p.quota_total_bytes;
+      if(p.quota_total_bytes&&p.quota_free_bytes!=null)combUsed+=(p.quota_total_bytes-p.quota_free_bytes);
+      if(p.quota_used_by_pdrive)combPd+=p.quota_used_by_pdrive;
+    });
+    var combFree=combTotal-combUsed;
+    var combPct=combTotal>0?Math.round(combUsed/combTotal*100):0;
+
+    // Donut chart via SVG
+    var pdPct=combTotal>0?combPd/combTotal*100:0;
+    var otherUsed=combUsed-combPd;
+    var otherPct=combTotal>0?otherUsed/combTotal*100:0;
+    var r=52,cx=60,cy=60,circ=2*Math.PI*r;
+    var pdLen=circ*pdPct/100,otherLen=circ*otherPct/100;
+    var donutSvg='<svg class="storage-donut-ring" viewBox="0 0 120 120">'
+      +'<circle cx="'+cx+'" cy="'+cy+'" r="'+r+'" fill="none" stroke="var(--bg3)" stroke-width="12"/>';
+    if(pdPct>0)donutSvg+='<circle cx="'+cx+'" cy="'+cy+'" r="'+r+'" fill="none" stroke="'+providerColors[0]+'" stroke-width="12" stroke-dasharray="'+pdLen+' '+circ+'" stroke-dashoffset="0" stroke-linecap="round"/>';
+    if(otherPct>0)donutSvg+='<circle cx="'+cx+'" cy="'+cy+'" r="'+r+'" fill="none" stroke="var(--fg3)" stroke-width="12" stroke-dasharray="'+otherLen+' '+circ+'" stroke-dashoffset="-'+pdLen+'" stroke-linecap="round" opacity=".5"/>';
+    donutSvg+='</svg>';
+
+    // Combined stacked bar — one segment per provider (colored)
+    var barHtml='';
+    var legendHtml='';
+    providers.forEach(function(p,i){
+      var c=providerColors[i%providerColors.length];
+      var pUsedByPd=p.quota_used_by_pdrive||0;
+      var pPct=combTotal>0?Math.max(0,pUsedByPd/combTotal*100):0;
+      if(pPct>0)barHtml+='<div class="bar-seg" style="width:'+pPct+'%;background:'+c+'" title="'+esc(p.name)+': '+fmtSize(pUsedByPd)+'"></div>';
+      legendHtml+='<div class="storage-legend-item"><div class="storage-legend-dot" style="background:'+c+'"></div><span>'+esc(p.name)+'</span> <span style="color:var(--fg3)">'+fmtSize(pUsedByPd)+'</span></div>';
+    });
+    // "Other" segment (non-pdrive usage across all providers)
+    if(otherUsed>0){
+      var oSPct=combTotal>0?Math.max(0,otherUsed/combTotal*100):0;
+      barHtml+='<div class="bar-seg" style="width:'+oSPct+'%;background:var(--fg3);opacity:.35" title="Other usage: '+fmtSize(otherUsed)+'"></div>';
+      legendHtml+='<div class="storage-legend-item"><div class="storage-legend-dot" style="background:var(--fg3);opacity:.4"></div><span>Other</span> <span style="color:var(--fg3)">'+fmtSize(otherUsed)+'</span></div>';
     }
+    legendHtml+='<div class="storage-legend-item"><div class="storage-legend-dot" style="background:var(--bg3)"></div><span>Free</span> <span style="color:var(--fg3)">'+fmtSize(combFree)+'</span></div>';
+
+    sEl.innerHTML='<div class="storage-overview">'
+      +'<div class="storage-top">'
+      +'<div class="storage-donut">'+donutSvg
+      +'<div class="storage-donut-center"><div class="storage-donut-pct">'+combPct+'%</div><div class="storage-donut-label">used</div></div>'
+      +'</div>'
+      +'<div class="storage-info">'
+      +'<h3>Combined Storage</h3>'
+      +'<div class="storage-info-value">'+fmtSize(combFree)+' free</div>'
+      +'<div class="storage-info-sub">'+fmtSize(combPd)+' pdrive · '+fmtSize(combUsed)+' total used · '+fmtSize(combTotal)+' capacity</div>'
+      +'</div></div>'
+      +'<div class="storage-combined-bar">'+barHtml+'</div>'
+      +'<div class="storage-legend">'+legendHtml+'</div>'
+      +'</div>';
+
+    // Provider cards
+    var pEl=document.getElementById('dash-providers');
+    if(!pEl)return;
+    var cards='<div class="card-grid">';
+    providers.forEach(function(p,i){
+      var c=providerColors[i%providerColors.length];
+      var total=p.quota_total_bytes||0;
+      var free=p.quota_free_bytes||0;
+      var used=total>0?total-free:0;
+      var usedByPd=p.quota_used_by_pdrive||0;
+      var otherP=used-usedByPd;
+      var pdPctP=total>0?Math.min(100,usedByPd/total*100):0;
+      var otherPctP=total>0?Math.min(100,otherP/total*100):0;
+      var totalPctP=Math.round(pdPctP+otherPctP);
+      cards+='<div class="provider-card"><div class="provider-header"><div><div class="provider-name">'+esc(p.name);
+      if(p.type)cards+=' <span class="provider-type">('+esc(p.type)+')</span>';
+      cards+='</div>';
+      if(p.account_identity)cards+='<div class="provider-account">'+esc(p.account_identity)+'</div>';
+      cards+='</div><div class="provider-pct" style="color:'+c+'">'+totalPctP+'<span class="provider-pct-label">% used</span></div></div>';
+      cards+='<div class="provider-free">'+fmtSize(free)+' free</div>';
+      cards+='<div class="provider-bar">';
+      if(pdPctP>0)cards+='<div class="bar-seg" style="width:'+pdPctP+'%;background:'+c+'"></div>';
+      if(otherPctP>0)cards+='<div class="bar-seg" style="width:'+otherPctP+'%;background:var(--fg3);opacity:.35"></div>';
+      cards+='</div>';
+      cards+='<div class="provider-detail"><span style="color:'+c+'">'+fmtSize(usedByPd)+' pdrive</span><span>'+fmtSize(otherP)+' other</span><span>'+fmtSize(total)+' total</span></div></div>';
+    });
+    cards+='</div>';
+    pEl.innerHTML=cards;
+
   }).catch(function(e){
     toast('Failed to load dashboard: '+e.message,'error');
   });
@@ -509,14 +580,17 @@ function refreshUploads(){
       return;
     }
     var html='';
-    S.uploads.forEach(function(u){
+    S.uploads.forEach(function(u,i){
       var pct=u.BytesTotal>0?Math.min(100,Math.round(u.BytesDone/u.BytesTotal*100)):
                (u.TotalChunks>0?Math.min(100,Math.round(u.ChunksUploaded/u.TotalChunks*100)):0);
       var name=u.VirtualPath.split('/').pop();
       var dir=u.VirtualPath.substring(0,u.VirtualPath.lastIndexOf('/'));
       var statusLabel=u.Failed?'✗ failed':u.Preparing?'Preparing…':'';
       html+='<div class="upload-card">'
-        +'<div class="upload-name'+(u.Failed?' fail':'')+'">'+esc(name)+(statusLabel?' '+statusLabel:'')+'</div>';
+        +'<div class="upload-card-header">'
+        +'<div class="upload-name'+(u.Failed?' fail':'')+'">'+esc(name)+(statusLabel?' '+statusLabel:'')+'</div>'
+        +(!u.Failed?'<button class="btn btn-danger upload-cancel-btn" data-cancel-path="'+esc(u.VirtualPath)+'" title="Cancel upload">✕</button>':'')
+        +'</div>';
       if(dir)html+='<div class="upload-dir">'+esc(dir)+'</div>';
       if(u.Preparing){
         html+='<div class="upload-bar"><div class="upload-bar-fill preparing"></div></div>'
@@ -541,6 +615,21 @@ function refreshUploads(){
       }
     });
     el.innerHTML=html;
+    // Wire cancel buttons
+    el.querySelectorAll('.upload-cancel-btn').forEach(function(btn){
+      btn.addEventListener('click',function(e){
+        e.stopPropagation();
+        var vp=btn.getAttribute('data-cancel-path');
+        if(!vp)return;
+        btn.disabled=true;
+        btn.textContent='…';
+        api.cancelUpload(vp).then(function(){
+          toast('Cancelling upload: '+vp.split('/').pop(),'info');
+        }).catch(function(err){
+          toast('Cancel failed: '+err.message,'error');
+        });
+      });
+    });
   }).catch(function(){});
 }
 
@@ -557,14 +646,16 @@ function renderSearch(){
     if(!S.searchResults.length){
       html+='<div class="empty-state"><p>No files found</p></div>';
     } else {
-      html+='<table class="file-table"><thead><tr><th>Name</th><th>Path</th><th class="r">Size</th><th style="width:60px"></th></tr></thead><tbody>';
+      html+='<table class="file-table"><thead><tr><th>Name</th><th>Path</th><th class="r">Size</th><th style="width:100px"></th></tr></thead><tbody>';
       S.searchResults.forEach(function(f){
         var name=pathBasename(f.path);
         html+='<tr class="file-row"><td class="cell-name"><a data-action="showInfo" data-path="'+esc(f.path)+'">'
           +'<span class="file-icon">'+fileIcon(name,false)+'</span>'+esc(name)+'</a></td>'
           +'<td style="font-size:11px;color:var(--fg2)">'+esc(f.path)+'</td>'
           +'<td class="r cell-size">'+fmtSize(f.size)+'</td>'
-          +'<td class="cell-actions" style="opacity:1"><button class="btn-icon" data-action="navigate" data-path="'+esc(pathParent(f.path))+'" title="Open in folder">📂</button></td></tr>';
+          +'<td class="cell-actions" style="opacity:1">'
+          +'<button class="btn-icon" data-action="download" data-path="'+esc(f.path)+'" title="Download">⬇</button>'
+          +'<button class="btn-icon" data-action="navigate" data-path="'+esc(pathParent(f.path))+'" title="Open in folder">📂</button></td></tr>';
       });
       html+='</tbody></table>';
       html+='<div style="padding:8px 0;font-size:11px;color:var(--fg3)">'+S.searchResults.length+' result(s)</div>';
@@ -746,6 +837,138 @@ function loadActivity(){
   });
 }
 
+// ─── Page: Logs ─────────────────────────────────────────────────────────────
+
+var _logWS=null;
+var _logAutoScroll=true;
+var _logLevel='';
+
+function renderLogs(){
+  var html='<div class="page"><h2 class="page-title">Logs</h2>';
+  html+='<div class="logs-toolbar" style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap">';
+  html+='<select id="log-level-filter" style="padding:4px 8px;border-radius:4px;border:1px solid var(--border);background:var(--bg-card);color:var(--fg)">';
+  html+='<option value="">All Levels</option>';
+  html+='<option value="DEBUG">DEBUG</option>';
+  html+='<option value="INFO">INFO</option>';
+  html+='<option value="WARN">WARN</option>';
+  html+='<option value="ERROR">ERROR</option>';
+  html+='</select>';
+  html+='<label style="display:flex;align-items:center;gap:4px;font-size:0.85em;cursor:pointer"><input type="checkbox" id="log-autoscroll" checked> Auto-scroll</label>';
+  html+='<button class="btn btn-secondary" id="log-clear" style="margin-left:auto;font-size:0.8em">Clear</button>';
+  html+='<span id="log-status" style="font-size:0.75em;color:var(--fg-dim)"></span>';
+  html+='</div>';
+  html+='<div id="log-entries" style="font-family:\'SF Mono\',Menlo,Consolas,monospace;font-size:0.8em;line-height:1.6;overflow-y:auto;max-height:calc(100vh - 220px);background:var(--bg-card);border:1px solid var(--border);border-radius:6px;padding:8px 12px"></div>';
+  html+='</div>';
+  return html;
+}
+
+function _logLevelClass(level){
+  switch(level){
+    case'DEBUG':return'color:var(--fg-dim)';
+    case'INFO':return'color:var(--accent)';
+    case'WARN':return'color:#f0ad4e';
+    case'ERROR':return'color:#d9534f;font-weight:600';
+    default:return'';
+  }
+}
+
+function _formatLogEntry(e){
+  var t=e.time?new Date(e.time).toLocaleTimeString():'';
+  var lvl=e.level||'INFO';
+  if(_logLevel&&lvl!==_logLevel)return'';
+  var style=_logLevelClass(lvl);
+  var attrs='';
+  if(e.attrs){
+    var keys=Object.keys(e.attrs);
+    for(var i=0;i<keys.length;i++){
+      attrs+=' <span style="color:var(--fg-dim)">'+esc(keys[i])+'</span>='+esc(String(e.attrs[keys[i]]));
+    }
+  }
+  return'<div class="log-line" style="'+style+'"><span style="color:var(--fg-dim)">'+esc(t)+'</span> <span style="font-weight:600;min-width:48px;display:inline-block">'+esc(lvl)+'</span> '+esc(e.msg||'')+attrs+'</div>';
+}
+
+function _connectLogStream(){
+  if(_logWS)return;
+  var prot=location.protocol==='https:'?'wss:':'ws:';
+  var url=prot+'//'+location.host+'/api/logs/stream';
+  var statusEl=document.getElementById('log-status');
+  if(statusEl)statusEl.textContent='Connecting…';
+  _logWS=new WebSocket(url);
+  _logWS.onopen=function(){
+    if(statusEl)statusEl.textContent='🟢 Live';
+  };
+  _logWS.onmessage=function(evt){
+    try{
+      var e=JSON.parse(evt.data);
+      var html=_formatLogEntry(e);
+      if(!html)return;
+      var el=document.getElementById('log-entries');
+      if(!el)return;
+      el.insertAdjacentHTML('beforeend',html);
+      // Keep buffer reasonable
+      while(el.children.length>2000)el.removeChild(el.firstChild);
+      if(_logAutoScroll)el.scrollTop=el.scrollHeight;
+    }catch(ex){/* ignore parse errors */}
+  };
+  _logWS.onclose=function(){
+    _logWS=null;
+    if(statusEl)statusEl.textContent='🔴 Disconnected';
+    // Reconnect if still on logs page
+    if(S.page==='logs')setTimeout(_connectLogStream,2000);
+  };
+  _logWS.onerror=function(){
+    if(_logWS)_logWS.close();
+  };
+}
+
+function _disconnectLogStream(){
+  if(_logWS){_logWS.onclose=null;_logWS.close();_logWS=null;}
+}
+
+function loadLogs(){
+  renderPage();
+  var el=document.getElementById('log-entries');
+  if(!el)return;
+  el.innerHTML='<div class="loading-center"><span class="spinner"></span></div>';
+
+  // Wire up controls
+  var levelSel=document.getElementById('log-level-filter');
+  if(levelSel){
+    levelSel.value=_logLevel;
+    levelSel.onchange=function(){_logLevel=this.value;_refilterLogs()};
+  }
+  var autoChk=document.getElementById('log-autoscroll');
+  if(autoChk){autoChk.checked=_logAutoScroll;autoChk.onchange=function(){_logAutoScroll=this.checked}}
+  var clearBtn=document.getElementById('log-clear');
+  if(clearBtn)clearBtn.onclick=function(){if(el)el.innerHTML=''};
+
+  // Fetch recent logs
+  fetch('/api/logs').then(function(r){return r.json()}).then(function(entries){
+    if(!el)return;
+    var html='';
+    (entries||[]).forEach(function(e){html+=_formatLogEntry(e)});
+    el.innerHTML=html||'<div style="color:var(--fg-dim);padding:20px;text-align:center">No recent logs</div>';
+    if(_logAutoScroll)el.scrollTop=el.scrollHeight;
+    // Start live stream
+    _connectLogStream();
+  }).catch(function(e){
+    if(el)el.innerHTML='<div style="color:#d9534f;padding:20px">Failed to load logs: '+esc(e.message)+'</div>';
+  });
+}
+
+function _refilterLogs(){
+  // Easiest: reload all recent logs with filter applied client-side
+  var el=document.getElementById('log-entries');
+  if(!el)return;
+  el.innerHTML='<div class="loading-center"><span class="spinner"></span></div>';
+  fetch('/api/logs').then(function(r){return r.json()}).then(function(entries){
+    var html='';
+    (entries||[]).forEach(function(e){html+=_formatLogEntry(e)});
+    el.innerHTML=html||'<div style="color:var(--fg-dim);padding:20px;text-align:center">No logs at this level</div>';
+    if(_logAutoScroll)el.scrollTop=el.scrollHeight;
+  }).catch(function(){});
+}
+
 // ─── Page Router ────────────────────────────────────────────────────────────
 
 function renderPage(){
@@ -759,9 +982,10 @@ function renderPage(){
     case'tree':html=renderTree();break;
     case'metrics':html=renderMetrics();break;
     case'activity':html=renderActivity();break;
+    case'logs':html=renderLogs();break;
     default:html=renderBrowse();
   }
-  main.innerHTML=html;
+  main.innerHTML=html+'<div class="drop-overlay"><div class="drop-overlay-icon">📂</div><div class="drop-overlay-text">Drop files or folders here to upload</div></div>';
 
   // Update active nav
   document.querySelectorAll('.nav-item').forEach(function(el){
@@ -770,19 +994,23 @@ function renderPage(){
 }
 
 function goPage(page,opts){
+  // Disconnect log stream when leaving logs page
+  if(S.page==='logs'&&page!=='logs')_disconnectLogStream();
   S.page=page;
+  try{sessionStorage.setItem('pdrive_page',page)}catch(e){}
   S.selected.clear();
   updateSelectionBar();
   closeInfoPanel();
   updateTitle();
   switch(page){
-    case'browse':loadBrowse(opts&&opts.path);break;
+    case'browse':var bp=opts&&opts.path;if(bp)try{sessionStorage.setItem('pdrive_path',bp)}catch(e){}loadBrowse(bp);break;
     case'dashboard':loadDashboard();break;
     case'uploads':loadUploads();break;
     case'search':renderPage();setTimeout(function(){var el=document.getElementById('search-pattern');if(el)el.focus()},50);break;
     case'tree':if(!S.treeData)loadTree();else renderPage();break;
     case'metrics':loadMetrics();break;
     case'activity':loadActivity();break;
+    case'logs':loadLogs();break;
     default:renderPage();
   }
 }
@@ -867,7 +1095,7 @@ var _uploadCancelled=false;
 // ── Upload Progress Drawer ─────────────────────────────────────────────────
 
 var uploadTracker={
-  items:[],       // {name,size,status:'queued'|'uploading'|'done'|'fail',error:null}
+  items:[],       // {name,size,status:'queued'|'uploading'|'submitted'|'done'|'fail',error:null,virtualPath:null}
   minimized:false,
   visible:false,
   _closeTimer:null,
@@ -875,13 +1103,17 @@ var uploadTracker={
   start:function(fileList){
     // fileList: [{name,size}]
     if(this._closeTimer){clearTimeout(this._closeTimer);this._closeTimer=null;}
-    this.items=fileList.map(function(f){return{name:f.name,size:f.size,status:'queued',error:null}});
+    this.items=fileList.map(function(f){return{name:f.name,size:f.size,status:'queued',error:null,virtualPath:null}});
     this.minimized=false;
     this.visible=true;
     this.render();
   },
   markUploading:function(idx){
     if(this.items[idx])this.items[idx].status='uploading';
+    this.render();
+  },
+  markSubmitted:function(idx,virtualPath){
+    if(this.items[idx]){this.items[idx].status='submitted';this.items[idx].virtualPath=virtualPath||null;}
     this.render();
   },
   markDone:function(idx){
@@ -892,15 +1124,33 @@ var uploadTracker={
     if(this.items[idx]){this.items[idx].status='fail';this.items[idx].error=err;}
     this.render();
   },
+  updateFromBackend:function(ups){
+    if(!this.visible||!this.items.length)return;
+    var activeSet={};
+    (ups||[]).forEach(function(u){activeSet[u.VirtualPath]=true});
+    var changed=false;
+    this.items.forEach(function(it){
+      if(it.status==='submitted'&&it.virtualPath&&!activeSet[it.virtualPath]){
+        it.status='done';
+        changed=true;
+      }
+    });
+    if(changed){
+      this.render();
+      var c=this.counts();
+      if(c.done+c.fail>=c.total)this.scheduleAutoMinimize();
+    }
+  },
   counts:function(){
-    var d=0,f=0,q=0,u=0;
+    var d=0,f=0,q=0,u=0,s=0;
     this.items.forEach(function(it){
       if(it.status==='done')d++;
       else if(it.status==='fail')f++;
       else if(it.status==='uploading')u++;
+      else if(it.status==='submitted')s++;
       else q++;
     });
-    return{done:d,fail:f,queued:q,uploading:u,total:this.items.length};
+    return{done:d,fail:f,queued:q,uploading:u,submitted:s,total:this.items.length};
   },
   toggle:function(){
     this.minimized=!this.minimized;
@@ -932,24 +1182,30 @@ var uploadTracker={
     // Header
     var html='<div class="upload-drawer-header" id="upload-drawer-toggle">';
     html+='<div class="upload-drawer-title">';
-    if(c.done+c.fail<c.total){
+    if(c.uploading>0||c.queued>0){
       html+='<span class="upload-drawer-spinner"></span> Uploading…';
+    } else if(c.submitted>0){
+      html+='<span class="upload-drawer-spinner"></span> Processing…';
     } else if(c.fail>0){
       html+='⚠️ Upload complete with errors';
     } else {
       html+='✅ Upload complete';
     }
     html+='</div>';
-    html+='<span class="upload-drawer-count">'+(c.done+c.fail)+'/'+c.total+'</span>';
+    var finished=c.done+c.fail;
+    html+='<span class="upload-drawer-count">'+finished+'/'+c.total+'</span>';
     html+='<div class="upload-drawer-actions">';
-    if(c.done+c.fail<c.total)html+='<button id="upload-drawer-cancel" title="Cancel remaining">◼</button>';
+    if(c.uploading>0||c.queued>0)html+='<button id="upload-drawer-cancel" title="Cancel remaining">◼</button>';
     html+='<button id="upload-drawer-min" title="'+(this.minimized?'Expand':'Minimize')+'">'+(this.minimized?'▲':'▼')+'</button>';
-    if(c.done+c.fail>=c.total)html+='<button id="upload-drawer-close" title="Close">✕</button>';
+    if(finished>=c.total&&c.submitted===0)html+='<button id="upload-drawer-close" title="Close">✕</button>';
     html+='</div></div>';
 
     // Progress summary bar
     html+='<div class="upload-drawer-summary">';
-    html+='<span>'+(c.done+c.fail)+' of '+c.total+' complete'+(c.fail?' · '+c.fail+' failed':'')+'</span>';
+    var summaryText=(c.done+c.fail)+' of '+c.total+' complete';
+    if(c.submitted>0)summaryText+=' · '+c.submitted+' processing';
+    if(c.fail>0)summaryText+=' · '+c.fail+' failed';
+    html+='<span>'+summaryText+'</span>';
     html+='<div class="upload-drawer-progress"><div class="upload-drawer-progress-fill'+(c.fail?' has-errors':'')+'" style="width:'+pct+'%"></div></div>';
     html+='</div>';
 
@@ -959,6 +1215,7 @@ var uploadTracker={
       var icon='';
       if(it.status==='done')icon='<span style="color:var(--success)">✓</span>';
       else if(it.status==='fail')icon='<span style="color:var(--danger)">✗</span>';
+      else if(it.status==='submitted')icon='<span class="upload-drawer-spinner" style="border-top-color:var(--success)"></span>';
       else if(it.status==='uploading')icon='<span class="upload-drawer-spinner"></span>';
       else icon='<span style="color:var(--fg3)">○</span>';
 
@@ -1005,16 +1262,15 @@ function doUploadFiles(files){
     }
     if(idx>=total){
       _uploadInProgress=false;
-      uploadTracker.scheduleAutoMinimize();
       if(S.page==='browse')loadBrowse(S.path);
       return;
     }
     var cur=idx;
     idx++;
     uploadTracker.markUploading(cur);
-    api.upload(todo[cur].file,todo[cur].dir).then(function(){
+    api.upload(todo[cur].file,todo[cur].dir).then(function(res){
       done++;
-      uploadTracker.markDone(cur);
+      uploadTracker.markSubmitted(cur,res&&res.path);
       next();
     }).catch(function(e){
       failed++;
@@ -1046,16 +1302,15 @@ function doUploadWithPaths(entries){
     }
     if(idx>=total){
       _uploadInProgress=false;
-      uploadTracker.scheduleAutoMinimize();
       if(S.page==='browse')loadBrowse(S.path);
       return;
     }
     var cur=idx;
     idx++;
     uploadTracker.markUploading(cur);
-    api.upload(todo[cur].file,todo[cur].dir).then(function(){
+    api.upload(todo[cur].file,todo[cur].dir).then(function(res){
       done++;
-      uploadTracker.markDone(cur);
+      uploadTracker.markSubmitted(cur,res&&res.path);
       next();
     }).catch(function(e){
       failed++;
@@ -1202,6 +1457,10 @@ document.addEventListener('click',function(e){
       e.preventDefault();
       doDuHere();
       break;
+    case'refreshBrowse':
+      e.preventDefault();
+      loadBrowse(S.path);
+      break;
     case'uploadFile':
       e.preventDefault();
       var inp=document.getElementById('upload-input');
@@ -1271,6 +1530,22 @@ document.addEventListener('click',function(e){
       updateSelectionBar();
       renderPage();
       break;
+    case'showKbdHelp':
+      e.preventDefault();
+      toggleKbdHelp();
+      break;
+    case'resyncProviders':
+      e.preventDefault();
+      api.resync().then(function(){
+        toast('Provider resync started','success');
+        setTimeout(function(){if(S.page==='dashboard')loadDashboard()},2000);
+      }).catch(function(err){toast('Resync failed: '+err.message,'error')});
+      break;
+    case'copyText':
+      e.preventDefault();
+      var text=el.getAttribute('data-text');
+      if(navigator.clipboard&&text){navigator.clipboard.writeText(text).then(function(){toast('Copied to clipboard','success')}).catch(function(){toast('Copy failed','error')})}
+      break;
   }
 });
 
@@ -1288,6 +1563,7 @@ document.addEventListener('change',function(e){
   if(el.matches('[data-action="selectAll"]')){
     if(!S.listing)return;
     if(el.checked){
+      (S.listing.dirs||[]).forEach(function(d){S.selected.add(pathJoin(S.path,d))});
       S.listing.files.forEach(function(f){S.selected.add(f.path)});
     } else {
       S.selected.clear();
@@ -1492,8 +1768,11 @@ function pollStorage(){
   }).catch(function(){});
 }
 
+var _lastUploadPaths='';
+
 function pollUploads(){
   api.uploads().then(function(ups){
+    var prev=S.uploads;
     S.uploads=ups||[];
     var badge=document.getElementById('upload-badge');
     if(badge){
@@ -1505,8 +1784,14 @@ function pollUploads(){
       var el=document.getElementById('uploads-list');
       if(el)refreshUploads();
     }
-    // If uploads changed and on browse page, refresh listing
-    if(S.page==='browse'&&S.uploads.length)loadBrowse(S.path);
+    // Only refresh browse when uploads finish (transition from >0 to 0 or set changes)
+    var curPaths=S.uploads.map(function(u){return u.VirtualPath}).sort().join('\n');
+    if(S.page==='browse'&&_lastUploadPaths!==curPaths&&prev.length>0&&S.uploads.length<prev.length){
+      loadBrowse(S.path);
+    }
+    _lastUploadPaths=curPaths;
+    // Update the upload drawer: transition submitted→done when backend finishes
+    uploadTracker.updateFromBackend(S.uploads);
   }).catch(function(){});
 }
 
@@ -1569,7 +1854,10 @@ document.addEventListener('change',function(e){
 
 // ─── Init ───────────────────────────────────────────────────────────────────
 
-goPage('browse',{path:'/'});
+var _initPage,_initPath;
+try{_initPage=sessionStorage.getItem('pdrive_page');_initPath=sessionStorage.getItem('pdrive_path')}catch(e){}
+if(_initPage&&_initPage!=='browse')goPage(_initPage);
+else goPage('browse',{path:_initPath||'/'});
 pollStorage();
 setInterval(pollStorage,15000);
 setInterval(pollUploads,1000);

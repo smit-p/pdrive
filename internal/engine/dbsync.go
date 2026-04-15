@@ -9,11 +9,9 @@ import (
 	"path"
 	"strings"
 	"time"
-
-	"github.com/smit-p/pdrive/internal/chunker"
 )
 
-const dbSyncRemotePath = "pdrive-meta/metadata.db.enc"
+const dbSyncRemotePath = "pdrive-meta/metadata.db"
 
 // backupHeader is a 16-byte header prepended to the plaintext before encryption.
 // Layout: [8-byte magic "pdriveDB"] [8-byte Unix timestamp (big-endian nanoseconds)]
@@ -72,13 +70,12 @@ func (e *Engine) FlushBackup() {
 	}
 }
 
-// BackupDB uploads an encrypted copy of the metadata database to ALL
-// configured cloud providers. The payload is AES-256-GCM encrypted with the
-// same key used for chunk encryption, and includes a nanosecond timestamp so
+// BackupDB uploads a copy of the metadata database to ALL
+// configured cloud providers. The payload includes a nanosecond timestamp so
 // that restore can pick the newest copy. Having a copy on every provider
 // ensures it can be restored after a total loss of one account.
 func (e *Engine) BackupDB() error {
-	if e.dbPath == "" || len(e.encKey) == 0 || e.rc == nil {
+	if e.dbPath == "" || e.rc == nil {
 		return nil
 	}
 
@@ -107,32 +104,15 @@ func (e *Engine) BackupDB() error {
 	}
 
 	payload := makeBackupPayload(data)
-	encrypted, err := chunker.Encrypt(e.encKey, payload)
-	if err != nil {
-		return fmt.Errorf("encrypting metadata backup: %w", err)
-	}
 
 	var lastErr error
 	for _, provider := range providers {
-		if err := e.rc.PutFile(provider.RcloneRemote, dbSyncRemotePath, bytes.NewReader(encrypted)); err != nil {
+		if err := e.rc.PutFile(provider.RcloneRemote, dbSyncRemotePath, bytes.NewReader(payload)); err != nil {
 			slog.Warn("metadata DB backup failed", "provider", provider.DisplayName, "error", err)
 			lastErr = err
 			continue
 		}
-		slog.Info("metadata DB backed up to cloud (encrypted)", "provider", provider.DisplayName, "size", len(encrypted))
-	}
-
-	// Upload Argon2id salt (if password-based encryption) so a new machine
-	// can derive the same key.  The salt is public by design; security
-	// depends on the password strength, not salt secrecy.
-	if e.saltPath != "" {
-		if salt, err := os.ReadFile(e.saltPath); err == nil && len(salt) > 0 {
-			for _, provider := range providers {
-				if err := e.rc.PutFile(provider.RcloneRemote, "pdrive-meta/enc.salt", bytes.NewReader(salt)); err != nil {
-					slog.Debug("salt upload failed", "provider", provider.DisplayName, "error", err)
-				}
-			}
-		}
+		slog.Info("metadata DB backed up to cloud", "provider", provider.DisplayName, "size", len(payload))
 	}
 
 	return lastErr

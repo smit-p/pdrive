@@ -311,7 +311,7 @@ func mockDaemon(t *testing.T) (addr string) {
 		json.NewEncoder(w).Encode(cliFileInfo{
 			Path: p, SizeBytes: 1024, CreatedAt: 1700000000, ModifiedAt: 1700001000,
 			SHA256: "abcdef1234567890", UploadState: "complete",
-			Chunks: []cliChunkInfo{{Sequence: 0, SizeBytes: 1024, EncryptedSize: 1040, Providers: []string{"gdrive"}}},
+			Chunks: []cliChunkInfo{{Sequence: 0, SizeBytes: 1024, EncryptedSize: 1024, Providers: []string{"gdrive"}}},
 		})
 	})
 
@@ -1509,8 +1509,8 @@ func TestRunInfo_MultiChunk(t *testing.T) {
 			Path: "/big.bin", SizeBytes: 200e6, CreatedAt: 1700000000, ModifiedAt: 1700001000,
 			SHA256: "deadbeef", UploadState: "complete",
 			Chunks: []cliChunkInfo{
-				{Sequence: 0, SizeBytes: 100e6, EncryptedSize: 100e6 + 28, Providers: []string{"gdrive", "dropbox"}},
-				{Sequence: 1, SizeBytes: 100e6, EncryptedSize: 100e6 + 28, Providers: []string{"gdrive"}},
+				{Sequence: 0, SizeBytes: 100e6, EncryptedSize: 100e6, Providers: []string{"gdrive", "dropbox"}},
+				{Sequence: 1, SizeBytes: 100e6, EncryptedSize: 100e6, Providers: []string{"gdrive"}},
 			},
 		})
 	}))
@@ -1755,50 +1755,6 @@ func TestRunLs_NavigateDeepToRoot(t *testing.T) {
 	}
 	if c.Dir != "/" {
 		t.Errorf("cache.Dir = %q, want /", c.Dir)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// readPassword (non-terminal pipe path)
-// ---------------------------------------------------------------------------
-
-func TestReadPassword_Pipe(t *testing.T) {
-	// Replace stdin with a pipe to test the non-terminal path.
-	oldStdin := os.Stdin
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Stdin = r
-	t.Cleanup(func() { os.Stdin = oldStdin })
-
-	w.WriteString("mypassword\n")
-	w.Close()
-
-	pw, err := readPassword()
-	if err != nil {
-		t.Fatalf("readPassword error: %v", err)
-	}
-	if pw != "mypassword" {
-		t.Errorf("readPassword = %q, want mypassword", pw)
-	}
-}
-
-func TestReadPassword_PipeEOF(t *testing.T) {
-	oldStdin := os.Stdin
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Stdin = r
-	t.Cleanup(func() { os.Stdin = oldStdin })
-
-	// Close without writing anything → EOF
-	w.Close()
-
-	_, err = readPassword()
-	if err == nil {
-		t.Error("expected error on empty pipe (EOF)")
 	}
 }
 
@@ -2532,7 +2488,7 @@ func TestRunLs_FileSelection_TriggersInfo(t *testing.T) {
 		json.NewEncoder(w).Encode(cliFileInfo{
 			Path: p, SizeBytes: 2048, CreatedAt: 1700000000, ModifiedAt: 1700001000,
 			SHA256: "abc123", UploadState: "complete",
-			Chunks: []cliChunkInfo{{Sequence: 0, SizeBytes: 2048, EncryptedSize: 2064, Providers: []string{"gdrive"}}},
+			Chunks: []cliChunkInfo{{Sequence: 0, SizeBytes: 2048, EncryptedSize: 2048, Providers: []string{"gdrive"}}},
 		})
 	})
 	srv := httptest.NewServer(mux)

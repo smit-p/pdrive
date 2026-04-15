@@ -2,6 +2,7 @@ package engine
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -41,6 +42,10 @@ type fakeCloud struct {
 	cleanupErr error
 	// getReadErr, if non-nil, makes GetFile return a reader that errors.
 	getReadErr error
+	// streamGetErr, if non-nil, makes StreamGetFile return an error.
+	streamGetErr error
+	// streamGetReaderFunc, if non-nil, overrides StreamGetFile to return this reader.
+	streamGetReaderFunc func() (io.ReadCloser, error)
 }
 
 func newFakeCloud() *fakeCloud {
@@ -134,6 +139,21 @@ func (f *fakeCloud) Mkdir(remote, path string) error {
 	return nil
 }
 
+func (f *fakeCloud) StreamGetFile(remote, path string) (io.ReadCloser, error) {
+	f.mu.Lock()
+	err := f.streamGetErr
+	fn := f.streamGetReaderFunc
+	f.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	if fn != nil {
+		return fn()
+	}
+	// In tests, streaming behaves identically to bulk GetFile.
+	return f.GetFile(remote, path)
+}
+
 func (f *fakeCloud) TransferStats() rclonerc.TransferProgress {
 	return rclonerc.TransferProgress{}
 }
@@ -194,7 +214,7 @@ func (f *fakeCloud) objectKeys() []string {
 // ── test helpers ─────────────────────────────────────────────────────────────
 
 // newTestEngine creates a fully wired Engine backed by a temp-dir SQLite DB
-// and fakeCloud. encKey is 32 zero bytes (fine for tests).
+// and fakeCloud.
 func newTestEngine(t *testing.T) (*Engine, *fakeCloud) {
 	t.Helper()
 	dir := t.TempDir()
@@ -217,14 +237,12 @@ func newTestEngine(t *testing.T) (*Engine, *fakeCloud) {
 
 	cloud := newFakeCloud()
 	b := broker.NewBroker(db, broker.PolicyPFRD, 0)
-	encKey := make([]byte, 32) // all-zero key — fine for tests
 
 	eng := &Engine{
 		db:              db,
 		dbPath:          dbPath,
 		rc:              cloud,
 		broker:          b,
-		encKey:          encKey,
 		maxChunkRetries: 1, // no retries in tests — avoids long backoff delays
 		uploadTokens:    make(chan struct{}, uploadRateBurst+100),
 		fileGate:        make(chan struct{}, 1),
@@ -1269,7 +1287,7 @@ func TestGCOrphanedChunks_NoOp(t *testing.T) {
 	eng.GCOrphanedChunks() // should not panic
 }
 
-// TestBackupDB_UploadsToCloud verifies that BackupDB uploads an encrypted
+// TestBackupDB_UploadsToCloud verifies that BackupDB uploads the
 // metadata database to the configured provider.
 func TestBackupDB_UploadsToCloud(t *testing.T) {
 	eng, cloud := newTestEngine(t)
@@ -1281,22 +1299,18 @@ func TestBackupDB_UploadsToCloud(t *testing.T) {
 		t.Fatalf("BackupDB: %v", err)
 	}
 
-	data, ok := cloud.getObject("fake:", "pdrive-meta/metadata.db.enc")
+	data, ok := cloud.getObject("fake:", "pdrive-meta/metadata.db")
 
 	if !ok {
-		t.Fatal("BackupDB must upload encrypted metadata.db.enc to cloud")
+		t.Fatal("BackupDB must upload metadata.db to cloud")
 	}
 	if len(data) == 0 {
 		t.Error("uploaded DB backup is empty")
 	}
-	// Verify it's not raw SQLite (should be encrypted).
-	if len(data) > 6 && string(data[:6]) == "SQLite" {
-		t.Error("backup should be encrypted, not raw SQLite")
-	}
 }
 
-// TestBackupDB_RoundTrip verifies the encrypted backup can be decrypted back
-// to a valid SQLite database with an embedded timestamp.
+// TestBackupDB_RoundTrip verifies the backup can be read back
+// as a valid SQLite database with an embedded timestamp.
 func TestBackupDB_RoundTrip(t *testing.T) {
 	eng, cloud := newTestEngine(t)
 	eng.WriteFileStream("/rt.txt", bytes.NewReader([]byte("roundtrip")), 9)
@@ -1306,12 +1320,9 @@ func TestBackupDB_RoundTrip(t *testing.T) {
 		t.Fatalf("BackupDB: %v", err)
 	}
 
-	blob, _ := cloud.getObject("fake:", "pdrive-meta/metadata.db.enc")
+	blob, _ := cloud.getObject("fake:", "pdrive-meta/metadata.db")
 
-	plain, err := chunker.Decrypt(eng.encKey, blob)
-	if err != nil {
-		t.Fatalf("Decrypt: %v", err)
-	}
+	plain := blob
 
 	ts, dbData, ok := ParseBackupPayload(plain)
 	if !ok {
@@ -1322,7 +1333,7 @@ func TestBackupDB_RoundTrip(t *testing.T) {
 	}
 	// Verify the DB data starts with the SQLite header.
 	if len(dbData) < 16 || string(dbData[:6]) != "SQLite" {
-		t.Error("decrypted payload is not a valid SQLite database")
+		t.Error("payload is not a valid SQLite database")
 	}
 }
 
@@ -1856,7 +1867,7 @@ func TestFlushBackup(t *testing.T) {
 
 	count := 0
 	for _, k := range cloud.objectKeys() {
-		if strings.Contains(k, "pdrive-meta/metadata.db.enc") {
+		if strings.Contains(k, "pdrive-meta/metadata.db") {
 			count++
 		}
 	}
@@ -2031,9 +2042,8 @@ func TestNewEngine(t *testing.T) {
 	t.Cleanup(func() { db.Close() })
 
 	b := broker.NewBroker(db, broker.PolicyPFRD, 0)
-	encKey := make([]byte, 32)
 
-	eng := NewEngine(db, dbPath, nil, b, encKey)
+	eng := NewEngine(db, dbPath, nil, b)
 	if eng == nil {
 		t.Fatal("NewEngine returned nil")
 	}
@@ -2051,17 +2061,16 @@ func TestNewEngineWithRate(t *testing.T) {
 	t.Cleanup(func() { db.Close() })
 
 	b := broker.NewBroker(db, broker.PolicyPFRD, 0)
-	encKey := make([]byte, 32)
 
 	// Custom rate.
-	eng := NewEngineWithRate(db, dbPath, nil, b, encKey, 10)
+	eng := NewEngineWithRate(db, dbPath, nil, b, 10)
 	if eng == nil {
 		t.Fatal("NewEngineWithRate returned nil")
 	}
 	eng.Close()
 
 	// Zero rate falls back to default.
-	eng2 := NewEngineWithRate(db, dbPath, nil, b, encKey, 0)
+	eng2 := NewEngineWithRate(db, dbPath, nil, b, 0)
 	if eng2 == nil {
 		t.Fatal("NewEngineWithRate(0) returned nil")
 	}
@@ -2079,48 +2088,13 @@ func TestNewEngineWithCloud(t *testing.T) {
 	t.Cleanup(func() { db.Close() })
 
 	b := broker.NewBroker(db, broker.PolicyPFRD, 0)
-	encKey := make([]byte, 32)
 	cloud := newFakeCloud()
 
-	eng := NewEngineWithCloud(db, dbPath, cloud, b, encKey)
+	eng := NewEngineWithCloud(db, dbPath, cloud, b)
 	if eng == nil {
 		t.Fatal("NewEngineWithCloud returned nil")
 	}
 	eng.Close()
-}
-
-// TestSetSaltPath exercises the setter.
-func TestSetSaltPath(t *testing.T) {
-	eng, _ := newTestEngine(t)
-	eng.SetSaltPath("/tmp/test.salt")
-	if eng.saltPath != "/tmp/test.salt" {
-		t.Errorf("expected saltPath to be set, got %q", eng.saltPath)
-	}
-}
-
-// TestBackupDB_WithSalt verifies BackupDB uploads the salt file when saltPath is set.
-func TestBackupDB_WithSalt(t *testing.T) {
-	eng, cloud := newTestEngine(t)
-
-	saltFile := filepath.Join(t.TempDir(), "enc.salt")
-	os.WriteFile(saltFile, []byte("salt-data"), 0600)
-	eng.SetSaltPath(saltFile)
-
-	if err := eng.BackupDB(); err != nil {
-		t.Fatal(err)
-	}
-
-	// Check salt was uploaded.
-	found := false
-	for _, k := range cloud.objectKeys() {
-		if strings.Contains(k, "enc.salt") {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Error("expected salt file to be uploaded")
-	}
 }
 
 // TestParseBackupPayload_BadMagic verifies bad magic is rejected.
@@ -2332,7 +2306,7 @@ func TestGCOrphanedChunks_NoProviders(t *testing.T) {
 
 	cloud := newFakeCloud()
 	b := broker.NewBroker(db, broker.PolicyPFRD, 0)
-	eng := NewEngineWithCloud(db, dbPath, cloud, b, make([]byte, 32))
+	eng := NewEngineWithCloud(db, dbPath, cloud, b)
 	defer eng.Close()
 
 	eng.GCOrphanedChunks() // should not panic
@@ -2352,31 +2326,11 @@ func TestBackupDB_EmptyDBPath(t *testing.T) {
 
 	cloud := newFakeCloud()
 	b := broker.NewBroker(db, broker.PolicyPFRD, 0)
-	eng := NewEngineWithCloud(db, "", cloud, b, make([]byte, 32)) // empty dbPath
+	eng := NewEngineWithCloud(db, "", cloud, b) // empty dbPath
 	defer eng.Close()
 
 	if err := eng.BackupDB(); err != nil {
 		t.Fatalf("expected nil error for empty dbPath, got %v", err)
-	}
-}
-
-// TestBackupDB_EmptyEncKey returns nil immediately.
-func TestBackupDB_EmptyEncKey(t *testing.T) {
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "test.db")
-	db, err := metadata.Open(dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
-
-	cloud := newFakeCloud()
-	b := broker.NewBroker(db, broker.PolicyPFRD, 0)
-	eng := NewEngineWithCloud(db, dbPath, cloud, b, nil) // nil encKey
-	defer eng.Close()
-
-	if err := eng.BackupDB(); err != nil {
-		t.Fatalf("expected nil error for empty encKey, got %v", err)
 	}
 }
 
@@ -2403,7 +2357,7 @@ func TestScheduleBackup_EmptyDBPath(t *testing.T) {
 
 	cloud := newFakeCloud()
 	b := broker.NewBroker(db, broker.PolicyPFRD, 0)
-	eng := NewEngineWithCloud(db, "", cloud, b, make([]byte, 32))
+	eng := NewEngineWithCloud(db, "", cloud, b)
 	defer eng.Close()
 
 	eng.scheduleBackup() // should be a no-op
@@ -2651,14 +2605,14 @@ func TestReadFileToTempFile_DownloadFailure(t *testing.T) {
 	}
 }
 
-// TestReadFileToTempFile_DecryptFailure covers the "decrypting chunk" error
-// when the cloud data is not valid ciphertext.
+// TestReadFileToTempFile_DecryptFailure covers the "hash mismatch" error
+// when the cloud data is replaced with garbage.
 func TestReadFileToTempFile_DecryptFailure(t *testing.T) {
 	eng, cloud := newTestEngine(t)
 	content := []byte("decrypt-fail")
 	eng.WriteFileStream("/dcf.txt", bytes.NewReader(content), int64(len(content)))
 
-	// Replace all cloud objects with garbage (not valid AES-GCM).
+	// Replace all cloud objects with garbage.
 	for _, k := range cloud.objectKeys() {
 		if strings.Contains(k, "pdrive-chunks/") {
 			cloud.setObject("fake:", strings.TrimPrefix(k, "fake::"), []byte("not-encrypted-data"))
@@ -2666,8 +2620,8 @@ func TestReadFileToTempFile_DecryptFailure(t *testing.T) {
 	}
 
 	_, err := eng.ReadFileToTempFile("/dcf.txt")
-	if err == nil || !strings.Contains(err.Error(), "decrypting chunk") {
-		t.Fatalf("expected 'decrypting chunk' error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "hash mismatch") {
+		t.Fatalf("expected 'hash mismatch' error, got %v", err)
 	}
 }
 
@@ -2680,8 +2634,7 @@ func TestReadFileToTempFile_ChunkHashMismatch(t *testing.T) {
 	// Replace cloud data with validly encrypted but different content.
 	for _, k := range cloud.objectKeys() {
 		if strings.Contains(k, "pdrive-chunks/") {
-			enc, _ := chunker.Encrypt(eng.encKey, []byte("different-content"))
-			cloud.setObject("fake:", strings.TrimPrefix(k, "fake::"), enc)
+			cloud.setObject("fake:", strings.TrimPrefix(k, "fake::"), []byte("different-content"))
 		}
 	}
 
@@ -2850,14 +2803,12 @@ func TestWriteFileStream_NoProviders(t *testing.T) {
 
 	cloud := newFakeCloud()
 	b := broker.NewBroker(db, broker.PolicyPFRD, 0)
-	encKey := make([]byte, 32)
 
 	eng := &Engine{
 		db:              db,
 		dbPath:          dbPath,
 		rc:              cloud,
 		broker:          b,
-		encKey:          encKey,
 		maxChunkRetries: 1,
 		uploadTokens:    make(chan struct{}, uploadRateBurst+100),
 		fileGate:        make(chan struct{}, 1),
@@ -2875,7 +2826,7 @@ func TestWriteFileStream_NoProviders(t *testing.T) {
 	}
 }
 
-// TestWriteFileStream_CloudUploadFailure covers the "uploading chunk" error path.
+// TestWriteFileStream_CloudUploadFailure covers the "uploading shard" error path.
 func TestWriteFileStream_CloudUploadFailure(t *testing.T) {
 	eng, cloud := newTestEngine(t)
 	eng.SetMaxChunkRetries(1)
@@ -2886,8 +2837,8 @@ func TestWriteFileStream_CloudUploadFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when cloud upload fails")
 	}
-	if !strings.Contains(err.Error(), "uploading chunk") {
-		t.Errorf("expected 'uploading chunk' error, got: %v", err)
+	if !strings.Contains(err.Error(), "uploading shard") {
+		t.Errorf("expected 'uploading shard' error, got: %v", err)
 	}
 }
 
@@ -3492,29 +3443,6 @@ func TestBackupDB_ReadFileError(t *testing.T) {
 	}
 }
 
-// TestBackupDB_SaltUploadError covers the salt PutFile error logging.
-func TestBackupDB_SaltUploadError(t *testing.T) {
-	eng, cloud := newTestEngine(t)
-	saltFile := filepath.Join(t.TempDir(), "enc.salt")
-	os.WriteFile(saltFile, []byte("salt"), 0600)
-	eng.SetSaltPath(saltFile)
-	// Make PutFile fail only on salt upload attempts by watching call count.
-	// Instead, use a targeted approach: first backup succeeds (DB upload OK),
-	// then salt upload uses same PutFile, which also fails.
-	// Actually: set putFailN to fail the salt calls. But DB upload also uses PutFile.
-	// Simpler: just verify salt upload error doesn't break the overall backup.
-	// The putErr will make the main backup fail too. Let's use a different approach:
-	// use a cloud that fails only for salt path.
-	// For simplicity, just verify the salt path is attempted. The error branch
-	// is a log-only path. Setting putErr makes everything fail; verify BackupDB
-	// returns the main backup error but doesn't crash on salt.
-	cloud.putErr = fmt.Errorf("put blocked")
-	err := eng.BackupDB()
-	if err == nil {
-		t.Error("expected error from PutFile")
-	}
-}
-
 // TestWriteFileStream_ReadError covers the io.Copy(hasher, r) error path.
 func TestWriteFileStream_ReadError(t *testing.T) {
 	eng, _ := newTestEngine(t)
@@ -3810,8 +3738,8 @@ func TestWriteFileStream_ChunkReadError(t *testing.T) {
 	if err == nil {
 		t.Error("expected error from broken reader on second pass")
 	}
-	if err != nil && !strings.Contains(err.Error(), "encrypting chunk") {
-		t.Errorf("expected 'encrypting chunk' error, got %v", err)
+	if err != nil && !strings.Contains(err.Error(), "writing chunk") {
+		t.Errorf("expected 'writing chunk' error, got %v", err)
 	}
 }
 
@@ -4132,7 +4060,7 @@ func TestDeleteDir_DeleteDirectoriesUnderError2(t *testing.T) {
 	}
 }
 
-// TestReadFileToTempFile_ReadAllError covers the io.ReadAll(rc) error path
+// TestReadFileToTempFile_ReadAllError covers the error path
 // where GetFile succeeds but reading the response body fails.
 func TestReadFileToTempFile_ReadAllError(t *testing.T) {
 	eng, cloud := newTestEngine(t)
@@ -4144,10 +4072,10 @@ func TestReadFileToTempFile_ReadAllError(t *testing.T) {
 
 	_, err := eng.ReadFileToTempFile("/ra-err.txt")
 	if err == nil {
-		t.Error("expected error from io.ReadAll failure")
+		t.Error("expected error from read failure")
 	}
-	if err != nil && !strings.Contains(err.Error(), "reading chunk") {
-		t.Errorf("expected 'reading chunk' error, got %v", err)
+	if err != nil && !strings.Contains(err.Error(), "downloading chunk") {
+		t.Errorf("expected 'downloading chunk' error, got %v", err)
 	}
 }
 
@@ -4253,21 +4181,6 @@ func TestBackupDB_PutFileFailure(t *testing.T) {
 	}
 }
 
-// TestBackupDB_WithSaltPath covers the saltPath upload branch.
-func TestBackupDB_WithSaltPath(t *testing.T) {
-	eng, _ := newTestEngine(t)
-
-	// Create a temporary salt file.
-	saltFile := filepath.Join(t.TempDir(), "enc.salt")
-	os.WriteFile(saltFile, []byte("test-salt-data"), 0o600)
-	eng.SetSaltPath(saltFile)
-
-	err := eng.BackupDB()
-	if err != nil {
-		t.Fatalf("BackupDB with salt should succeed: %v", err)
-	}
-}
-
 // TestScheduleBackup_CallsTwice covers the timer.Stop() branch when
 // scheduleBackup is called twice before the timer fires.
 func TestScheduleBackup_CallsTwice(t *testing.T) {
@@ -4299,7 +4212,7 @@ func TestUploadChunks_ReadError(t *testing.T) {
 	// errSeeker fails on the second read.
 	r := &errSeeker{failAfter: 0}
 
-	_, err := eng.uploadChunks(r, "test-file-id", 1024, nil, nil)
+	_, err := eng.uploadChunks(r, "test-file-id", 1024, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected error from bad reader")
 	}
@@ -4350,7 +4263,7 @@ func TestCloneFileFromDonor_BeginTxError(t *testing.T) {
 	}
 }
 
-// TestReadFileToTempFile_ReadChunkIOError covers the "reading chunk" error (line 831)
+// TestReadFileToTempFile_ReadChunkIOError covers the decrypt error
 // when the cloud returns data but the reader errors mid-read.
 func TestReadFileToTempFile_ReadChunkIOError(t *testing.T) {
 	eng, cloud := newTestEngine(t)
@@ -4366,19 +4279,8 @@ func TestReadFileToTempFile_ReadChunkIOError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error from IO read failure")
 	}
-	if !strings.Contains(err.Error(), "reading chunk") {
-		t.Fatalf("expected 'reading chunk' error, got: %v", err)
-	}
-}
-
-// TestBackupDB_EncKeyEmpty covers the early return when encKey is empty.
-func TestBackupDB_EncKeyEmpty(t *testing.T) {
-	eng, _ := newTestEngine(t)
-	eng.encKey = nil
-
-	err := eng.BackupDB()
-	if err != nil {
-		t.Fatalf("BackupDB with empty encKey should return nil, got: %v", err)
+	if !strings.Contains(err.Error(), "downloading chunk") {
+		t.Fatalf("expected 'downloading chunk' error, got: %v", err)
 	}
 }
 
@@ -4418,5 +4320,402 @@ func TestStorageStatus_ExcludesPendingFiles(t *testing.T) {
 	}
 	if st.TotalBytes != 4 {
 		t.Errorf("expected TotalBytes=4 (pending excluded), got %d", st.TotalBytes)
+	}
+}
+
+// ── StreamFile tests ────────────────────────────────────────────────────────
+
+// errWriter is an io.Writer that always returns an error.
+type errWriter struct{ err error }
+
+func (e *errWriter) Write([]byte) (int, error) { return 0, e.err }
+
+// flushRecorder records whether Flush was called and how many bytes
+// were written.
+type flushRecorder struct {
+	buf    bytes.Buffer
+	flushN int
+}
+
+func (f *flushRecorder) Write(p []byte) (int, error) { return f.buf.Write(p) }
+func (f *flushRecorder) Flush()                      { f.flushN++ }
+
+func TestStreamFile_SmallFile(t *testing.T) {
+	eng, _ := newTestEngine(t)
+	content := []byte("stream-small-file-test")
+	eng.WriteFileStream("/stream.txt", bytes.NewReader(content), int64(len(content)))
+
+	var buf bytes.Buffer
+	if err := eng.StreamFile(context.Background(), "/stream.txt", &buf); err != nil {
+		t.Fatalf("StreamFile: %v", err)
+	}
+	if !bytes.Equal(buf.Bytes(), content) {
+		t.Errorf("content mismatch: got %q, want %q", buf.String(), string(content))
+	}
+}
+
+func TestStreamFile_MultiChunk(t *testing.T) {
+	eng, _ := newTestEngine(t)
+	eng.SetChunkSize(10) // Force tiny chunks.
+
+	content := []byte("0123456789abcdef0123456789") // 26 bytes → 3 chunks
+	eng.WriteFileStream("/multi-stream.bin", bytes.NewReader(content), int64(len(content)))
+
+	var buf bytes.Buffer
+	if err := eng.StreamFile(context.Background(), "/multi-stream.bin", &buf); err != nil {
+		t.Fatalf("StreamFile: %v", err)
+	}
+	if !bytes.Equal(buf.Bytes(), content) {
+		t.Errorf("content mismatch: got %d bytes, want %d", buf.Len(), len(content))
+	}
+}
+
+func TestStreamFile_LargeFile(t *testing.T) {
+	eng, _ := newTestEngine(t)
+	eng.SetChunkSize(50)
+
+	// 200 bytes → 4 chunks of 50 each.
+	content := bytes.Repeat([]byte("ABCDE"), 40)
+	eng.WriteFileStream("/large-stream.bin", bytes.NewReader(content), int64(len(content)))
+
+	var buf bytes.Buffer
+	if err := eng.StreamFile(context.Background(), "/large-stream.bin", &buf); err != nil {
+		t.Fatalf("StreamFile: %v", err)
+	}
+	if !bytes.Equal(buf.Bytes(), content) {
+		t.Errorf("got %d bytes, want %d", buf.Len(), len(content))
+	}
+}
+
+func TestStreamFile_NotFound(t *testing.T) {
+	eng, _ := newTestEngine(t)
+	err := eng.StreamFile(context.Background(), "/no-exist.txt", &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("expected 'not found' error, got %v", err)
+	}
+}
+
+func TestStreamFile_PendingFile(t *testing.T) {
+	eng, _ := newTestEngine(t)
+	now := time.Now().Unix()
+	eng.db.InsertFile(&metadata.File{
+		ID: "pending-stream", VirtualPath: "/pending-stream.mkv",
+		SizeBytes: 1000, UploadState: "pending", CreatedAt: now, ModifiedAt: now,
+	})
+
+	err := eng.StreamFile(context.Background(), "/pending-stream.mkv", &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "upload in progress") {
+		t.Fatalf("expected 'upload in progress' error, got %v", err)
+	}
+}
+
+func TestStreamFile_ChunkSequenceGap(t *testing.T) {
+	eng, _ := newTestEngine(t)
+	content := []byte("gap-test-data")
+	eng.WriteFileStream("/gap.txt", bytes.NewReader(content), int64(len(content)))
+
+	// Corrupt the chunk sequence in the DB.
+	eng.db.Conn().Exec(
+		`UPDATE chunks SET sequence = 5 WHERE file_id = (SELECT id FROM files WHERE virtual_path = '/gap.txt')`,
+	)
+
+	err := eng.StreamFile(context.Background(), "/gap.txt", &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "chunk sequence gap") {
+		t.Fatalf("expected 'chunk sequence gap' error, got %v", err)
+	}
+}
+
+func TestStreamFile_NoChunkLocations(t *testing.T) {
+	eng, _ := newTestEngine(t)
+	content := []byte("no-locations")
+	eng.WriteFileStream("/noloc.txt", bytes.NewReader(content), int64(len(content)))
+
+	// Delete all chunk locations.
+	eng.db.Conn().Exec(`DELETE FROM chunk_locations`)
+
+	err := eng.StreamFile(context.Background(), "/noloc.txt", &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "no locations") {
+		t.Fatalf("expected 'no locations' error, got %v", err)
+	}
+}
+
+func TestStreamFile_ProviderMissing(t *testing.T) {
+	eng, _ := newTestEngine(t)
+	content := []byte("provider-gone")
+	eng.WriteFileStream("/provgone.txt", bytes.NewReader(content), int64(len(content)))
+
+	// Delete all providers.
+	eng.db.Conn().Exec("PRAGMA foreign_keys = OFF")
+	eng.db.Conn().Exec("DELETE FROM providers")
+	eng.db.Conn().Exec("PRAGMA foreign_keys = ON")
+
+	err := eng.StreamFile(context.Background(), "/provgone.txt", &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "provider") {
+		t.Fatalf("expected provider error, got %v", err)
+	}
+}
+
+func TestStreamFile_DownloadFailure(t *testing.T) {
+	eng, cloud := newTestEngine(t)
+	content := []byte("download-fail")
+	eng.WriteFileStream("/dlfail.txt", bytes.NewReader(content), int64(len(content)))
+
+	cloud.mu.Lock()
+	cloud.streamGetErr = fmt.Errorf("network timeout")
+	cloud.mu.Unlock()
+
+	err := eng.StreamFile(context.Background(), "/dlfail.txt", &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "downloading chunk") {
+		t.Fatalf("expected download error, got %v", err)
+	}
+}
+
+func TestStreamFile_CorruptData(t *testing.T) {
+	eng, cloud := newTestEngine(t)
+	content := []byte("corrupt-data-stream")
+	eng.WriteFileStream("/decfail.txt", bytes.NewReader(content), int64(len(content)))
+
+	// Replace cloud data with garbage.
+	for _, k := range cloud.objectKeys() {
+		if strings.Contains(k, "pdrive-chunks/") {
+			bad := bytes.Repeat([]byte{0xFF}, 30)
+			cloud.setObject("fake:", strings.TrimPrefix(k, "fake::"), bad)
+		}
+	}
+
+	err := eng.StreamFile(context.Background(), "/decfail.txt", &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "hash mismatch") {
+		t.Fatalf("expected hash mismatch error, got %v", err)
+	}
+}
+
+func TestStreamFile_ChunkHashMismatch(t *testing.T) {
+	eng, cloud := newTestEngine(t)
+	content := []byte("hash-mismatch-stream")
+	eng.WriteFileStream("/hms.txt", bytes.NewReader(content), int64(len(content)))
+
+	// Replace cloud data with validly encrypted but different content.
+	different := []byte("completely-different!")
+	for _, k := range cloud.objectKeys() {
+		if strings.Contains(k, "pdrive-chunks/") {
+			cloud.setObject("fake:", strings.TrimPrefix(k, "fake::"), different)
+		}
+	}
+
+	err := eng.StreamFile(context.Background(), "/hms.txt", &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "hash mismatch") {
+		t.Fatalf("expected 'hash mismatch' error, got %v", err)
+	}
+}
+
+func TestStreamFile_FileHashMismatch(t *testing.T) {
+	eng, _ := newTestEngine(t)
+	content := []byte("file-hash-stream")
+	eng.WriteFileStream("/fhs.txt", bytes.NewReader(content), int64(len(content)))
+
+	// Corrupt the full-file hash in DB.
+	eng.db.Conn().Exec(
+		`UPDATE files SET sha256_full = 'badhashbadhash' WHERE virtual_path = ?`,
+		"/fhs.txt",
+	)
+
+	err := eng.StreamFile(context.Background(), "/fhs.txt", &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "file hash mismatch") {
+		t.Fatalf("expected 'file hash mismatch' error, got %v", err)
+	}
+}
+
+func TestStreamFile_ContextCancelled(t *testing.T) {
+	eng, _ := newTestEngine(t)
+	eng.SetChunkSize(10) // Force multi-chunk.
+
+	content := []byte("0123456789abcdef0123456789") // 26 bytes → 3 chunks
+	eng.WriteFileStream("/cancel.bin", bytes.NewReader(content), int64(len(content)))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Cancel immediately.
+
+	err := eng.StreamFile(ctx, "/cancel.bin", &bytes.Buffer{})
+	if err == nil {
+		t.Fatal("expected context cancelled error")
+	}
+}
+
+func TestStreamFile_WriteError(t *testing.T) {
+	eng, _ := newTestEngine(t)
+	content := []byte("write-error-test-data")
+	eng.WriteFileStream("/werr.txt", bytes.NewReader(content), int64(len(content)))
+
+	ew := &errWriter{err: fmt.Errorf("disk full")}
+	err := eng.StreamFile(context.Background(), "/werr.txt", ew)
+	if err == nil {
+		t.Fatal("expected write error")
+	}
+}
+
+func TestStreamFile_AutoFlush(t *testing.T) {
+	eng, _ := newTestEngine(t)
+	content := []byte("auto-flush-content")
+	eng.WriteFileStream("/flush.txt", bytes.NewReader(content), int64(len(content)))
+
+	fr := &flushRecorder{}
+	if err := eng.StreamFile(context.Background(), "/flush.txt", fr); err != nil {
+		t.Fatalf("StreamFile: %v", err)
+	}
+
+	if !bytes.Equal(fr.buf.Bytes(), content) {
+		t.Errorf("content mismatch: got %q, want %q", fr.buf.String(), string(content))
+	}
+	if fr.flushN == 0 {
+		t.Error("expected at least one Flush call, got zero")
+	}
+}
+
+func TestStreamFile_MultiChunk_AutoFlush(t *testing.T) {
+	eng, _ := newTestEngine(t)
+	eng.SetChunkSize(10) // 3 chunks.
+
+	content := []byte("0123456789abcdef0123456789")
+	eng.WriteFileStream("/multiflush.bin", bytes.NewReader(content), int64(len(content)))
+
+	fr := &flushRecorder{}
+	if err := eng.StreamFile(context.Background(), "/multiflush.bin", fr); err != nil {
+		t.Fatalf("StreamFile: %v", err)
+	}
+
+	if !bytes.Equal(fr.buf.Bytes(), content) {
+		t.Errorf("content mismatch: got %d bytes, want %d", fr.buf.Len(), len(content))
+	}
+	// Expect at least one flush per chunk (3 chunks, each has at least one write).
+	if fr.flushN < 3 {
+		t.Errorf("expected at least 3 Flush calls for 3 chunks, got %d", fr.flushN)
+	}
+}
+
+func TestStreamFile_GetChunksError(t *testing.T) {
+	eng, _ := newTestEngine(t)
+	content := []byte("get-chunks-err")
+	eng.WriteFileStream("/gce.txt", bytes.NewReader(content), int64(len(content)))
+
+	// Drop chunks table to force GetChunksForFile error.
+	eng.db.Conn().Exec("DROP TABLE chunks")
+
+	err := eng.StreamFile(context.Background(), "/gce.txt", &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "getting chunks") {
+		t.Fatalf("expected 'getting chunks' error, got %v", err)
+	}
+}
+
+func TestStreamFile_GetChunkLocationsError(t *testing.T) {
+	eng, _ := newTestEngine(t)
+	content := []byte("get-locs-err")
+	eng.WriteFileStream("/gle.txt", bytes.NewReader(content), int64(len(content)))
+
+	// Drop chunk_locations table.
+	eng.db.Conn().Exec("DROP TABLE chunk_locations")
+
+	err := eng.StreamFile(context.Background(), "/gle.txt", &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "getting chunk locations") {
+		t.Fatalf("expected 'getting chunk locations' error, got %v", err)
+	}
+}
+
+func TestStreamFile_HeaderReadError(t *testing.T) {
+	eng, cloud := newTestEngine(t)
+	content := []byte("header-read-err")
+	eng.WriteFileStream("/hre.txt", bytes.NewReader(content), int64(len(content)))
+
+	// Replace cloud data with empty content — reading 4-byte header will fail.
+	for _, k := range cloud.objectKeys() {
+		if strings.Contains(k, "pdrive-chunks/") {
+			cloud.setObject("fake:", strings.TrimPrefix(k, "fake::"), []byte{})
+		}
+	}
+
+	err := eng.StreamFile(context.Background(), "/hre.txt", &bytes.Buffer{})
+	if err == nil {
+		t.Fatal("expected header read error")
+	}
+}
+
+// TestAutoFlushWriter_Write verifies autoFlushWriter wraps and flushes.
+func TestAutoFlushWriter_Write(t *testing.T) {
+	fr := &flushRecorder{}
+	afw := &autoFlushWriter{w: fr, fl: fr}
+
+	data := []byte("hello")
+	n, err := afw.Write(data)
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if n != len(data) {
+		t.Errorf("Write returned %d, want %d", n, len(data))
+	}
+	if fr.flushN != 1 {
+		t.Errorf("expected 1 Flush, got %d", fr.flushN)
+	}
+	if !bytes.Equal(fr.buf.Bytes(), data) {
+		t.Errorf("got %q, want %q", fr.buf.String(), string(data))
+	}
+}
+
+func TestAutoFlushWriter_EmptyWrite(t *testing.T) {
+	fr := &flushRecorder{}
+	afw := &autoFlushWriter{w: fr, fl: fr}
+
+	n, err := afw.Write([]byte{})
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("Write returned %d, want 0", n)
+	}
+	// Empty write returns n=0, so Flush should NOT be called.
+	if fr.flushN != 0 {
+		t.Errorf("expected 0 Flush for empty write, got %d", fr.flushN)
+	}
+}
+
+func TestAutoFlushWriter_WriteError(t *testing.T) {
+	ew := &errWriter{err: fmt.Errorf("broken")}
+	fr := &flushRecorder{}
+	afw := &autoFlushWriter{w: ew, fl: fr}
+
+	_, err := afw.Write([]byte("data"))
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	// On error n=0, so Flush should NOT be called.
+	if fr.flushN != 0 {
+		t.Errorf("expected 0 Flush on write error, got %d", fr.flushN)
+	}
+}
+
+func TestAutoFlushWriter_MultipleWrites(t *testing.T) {
+	fr := &flushRecorder{}
+	afw := &autoFlushWriter{w: fr, fl: fr}
+
+	for i := 0; i < 5; i++ {
+		afw.Write([]byte("x"))
+	}
+	if fr.flushN != 5 {
+		t.Errorf("expected 5 Flush calls, got %d", fr.flushN)
+	}
+	if fr.buf.Len() != 5 {
+		t.Errorf("expected 5 bytes written, got %d", fr.buf.Len())
+	}
+}
+
+func TestStreamFile_DBLookupError(t *testing.T) {
+	eng, _ := newTestEngine(t)
+	content := []byte("db-lookup-err")
+	eng.WriteFileStream("/dble.txt", bytes.NewReader(content), int64(len(content)))
+
+	// Drop files table to cause GetCompleteFileByPath to error.
+	eng.db.Conn().Exec("DROP TABLE files")
+
+	err := eng.StreamFile(context.Background(), "/dble.txt", &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "looking up file") {
+		t.Fatalf("expected 'looking up file' error, got %v", err)
 	}
 }

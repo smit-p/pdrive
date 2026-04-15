@@ -14,7 +14,6 @@ import (
 	"testing"
 
 	"github.com/smit-p/pdrive/internal/broker"
-	"github.com/smit-p/pdrive/internal/chunker"
 	"github.com/smit-p/pdrive/internal/metadata"
 )
 
@@ -66,8 +65,7 @@ func TestIntegration_BackupRestoreReadFile(t *testing.T) {
 	})
 	cloud := newFakeCloud()
 	b := broker.NewBroker(db, broker.PolicyPFRD, 0)
-	encKey := make([]byte, 32)
-	eng := NewEngineWithCloud(db, dbPath, cloud, b, encKey)
+	eng := NewEngineWithCloud(db, dbPath, cloud, b)
 
 	content := []byte("backup round-trip content 123")
 	if err := eng.WriteFileStream("/backup-test.txt", bytes.NewReader(content), int64(len(content))); err != nil {
@@ -97,20 +95,16 @@ func TestIntegration_BackupRestoreReadFile(t *testing.T) {
 	// Create a fresh DB path and restore the backup into it.
 	dbPath2 := filepath.Join(dir, "restored.db")
 
-	// Restore from backup: read the encrypted bytes, decrypt, write to DB file.
-	rc, err := cloud.GetFile("fake:", "pdrive-meta/metadata.db.enc")
+	// Restore from backup: read the bytes, parse, write to DB file.
+	rc, err := cloud.GetFile("fake:", "pdrive-meta/metadata.db")
 	if err != nil {
 		t.Fatal(err)
 	}
 	backupBytes, _ := io.ReadAll(rc)
 	rc.Close()
 
-	// Decrypt and parse.
-	plain, err := chunker.Decrypt(encKey, backupBytes)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, dbData, ok := ParseBackupPayload(plain)
+	// Parse backup payload.
+	_, dbData, ok := ParseBackupPayload(backupBytes)
 	if !ok {
 		t.Fatal("bad backup payload")
 	}
@@ -127,7 +121,7 @@ func TestIntegration_BackupRestoreReadFile(t *testing.T) {
 	t.Cleanup(func() { db2.Close() })
 
 	b2 := broker.NewBroker(db2, broker.PolicyPFRD, 0)
-	eng2 := NewEngineWithCloud(db2, dbPath2, cloud, b2, encKey)
+	eng2 := NewEngineWithCloud(db2, dbPath2, cloud, b2)
 	t.Cleanup(eng2.Close)
 
 	// Read the file from the restored engine.

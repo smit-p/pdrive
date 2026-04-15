@@ -4,8 +4,8 @@
 //
 // The database runs in WAL mode with a single connection (standard SQLite/Go
 // pattern) and uses foreign keys with ON DELETE CASCADE for referential
-// integrity.  Schema is embedded via go:embed and incremental ALTER TABLE
-// migrations are applied on every Open call.
+// integrity.  Schema is embedded via go:embed and applied on every Open call
+// (all statements use IF NOT EXISTS / IF NOT EXISTS for idempotency).
 package metadata
 
 import (
@@ -54,34 +54,10 @@ func Open(dbPath string) (*DB, error) {
 		return nil, fmt.Errorf("enabling foreign keys: %w", err)
 	}
 
-	// Run schema migrations.
+	// Run schema.
 	if _, err := conn.Exec(schemaSQL); err != nil {
 		_ = conn.Close()
 		return nil, fmt.Errorf("running schema: %w", err)
-	}
-
-	// Incremental migrations for existing databases.
-	migrations := []string{
-		`ALTER TABLE files ADD COLUMN upload_state TEXT NOT NULL DEFAULT 'complete'`,
-		`ALTER TABLE files ADD COLUMN tmp_path TEXT`,
-		`CREATE INDEX IF NOT EXISTS idx_files_upload_state ON files(upload_state)`,
-		`CREATE INDEX IF NOT EXISTS idx_chunks_file_id_seq ON chunks(file_id, sequence)`,
-		`CREATE INDEX IF NOT EXISTS idx_files_sha256_full ON files(sha256_full)`,
-		`CREATE TABLE IF NOT EXISTS failed_deletions (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			provider_id TEXT NOT NULL,
-			remote_path TEXT NOT NULL,
-			failed_at INTEGER NOT NULL,
-			retry_count INTEGER NOT NULL DEFAULT 0,
-			last_error TEXT
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_chunk_locations_remote_path ON chunk_locations(remote_path)`,
-		`ALTER TABLE providers ADD COLUMN account_identity TEXT NOT NULL DEFAULT ''`,
-		`CREATE TABLE IF NOT EXISTS counters (key TEXT PRIMARY KEY, value INTEGER NOT NULL DEFAULT 0)`,
-	}
-	for _, m := range migrations {
-		// SQLite returns an error if the column already exists; ignore it.
-		conn.Exec(m) //nolint:errcheck
 	}
 
 	return &DB{conn: conn}, nil

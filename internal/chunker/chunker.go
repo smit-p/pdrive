@@ -23,13 +23,7 @@ import (
 const (
 	DefaultChunkSize = 32 * 1024 * 1024       // 32 MB — default / minimum
 	MaxChunkSize     = 4 * 1024 * 1024 * 1024 // 4 GiB — upper bound per chunk
-	targetChunkCount = 25                     // aim for ~25 chunks per file (legacy)
-
-	// EncOverheadPerChunk is the legacy fixed byte overhead for single-block
-	// AES-256-GCM: 12-byte nonce + 16-byte authentication tag.
-	// New uploads use EncStreamOverhead() instead; this constant is kept for
-	// backward compatibility.
-	EncOverheadPerChunk = 28
+	targetChunkCount = 25                     // aim for ~25 chunks per file
 )
 
 // ChunkSizeForFile returns an appropriate fixed chunk size for the given file
@@ -141,19 +135,12 @@ func ScheduleForFile(fileSize int64) *ChunkSchedule {
 //  3. Otherwise, greedily fill remotes largest-first: each chunk is sized to
 //     use as much of the best available remote as possible, capped at
 //     MaxChunkSize to keep peak temp-file size bounded.
-//
-// Streaming encryption overhead (EncStreamOverhead) is accounted for so that
-// the encrypted chunk fits within the remote's free space.
 func PlanChunks(fileSize int64, remoteFreeBytes []int64) *ChunkSchedule {
 	if fileSize <= 0 {
 		return &ChunkSchedule{Tiers: []ChunkTier{{Count: 0, Size: DefaultChunkSize}}}
 	}
 
-	// Minimum overhead for even a tiny chunk.
-	minOverhead := EncStreamOverhead(1)
-
-	// Sort free spaces descending; discard remotes too small to hold even
-	// the encryption overhead.
+	// Sort free spaces descending; discard remotes with no usable space.
 	spaces := slices.Clone(remoteFreeBytes)
 	slices.SortFunc(spaces, func(a, b int64) int {
 		if b > a {
@@ -166,7 +153,7 @@ func PlanChunks(fileSize int64, remoteFreeBytes []int64) *ChunkSchedule {
 	})
 	var usable []int64
 	for _, s := range spaces {
-		if s > minOverhead {
+		if s > 0 {
 			usable = append(usable, s)
 		}
 	}
@@ -174,26 +161,7 @@ func PlanChunks(fileSize int64, remoteFreeBytes []int64) *ChunkSchedule {
 		return &ChunkSchedule{Tiers: []ChunkTier{{Count: 0, Size: DefaultChunkSize}}}
 	}
 
-	// maxPlain returns the largest plaintext that fits in `space` bytes
-	// after accounting for streaming encryption overhead.
-	maxPlain := func(space int64) int64 {
-		// Binary search: find largest p where p + EncStreamOverhead(p) <= space.
-		lo, hi := int64(1), space
-		for lo < hi {
-			mid := lo + (hi-lo+1)/2
-			if mid+EncStreamOverhead(mid) <= space {
-				lo = mid
-			} else {
-				hi = mid - 1
-			}
-		}
-		if lo+EncStreamOverhead(lo) > space {
-			return 0
-		}
-		return lo
-	}
-
-	largest := maxPlain(usable[0])
+	largest := usable[0]
 
 	// Case 1 & 2: file fits on a single remote.
 	if largest >= fileSize {
@@ -219,13 +187,13 @@ func PlanChunks(fileSize int64, remoteFreeBytes []int64) *ChunkSchedule {
 				bestIdx = i
 			}
 		}
-		if bestIdx < 0 || bestSpace <= minOverhead {
+		if bestIdx < 0 || bestSpace <= 0 {
 			// Safety fallback — shouldn't happen if CheckSpace passed.
 			tiers = append(tiers, ChunkTier{Count: 0, Size: DefaultChunkSize})
 			break
 		}
 
-		plain := maxPlain(bestSpace)
+		plain := bestSpace
 		if plain > int64(MaxChunkSize) {
 			plain = int64(MaxChunkSize)
 		}
@@ -234,7 +202,7 @@ func PlanChunks(fileSize int64, remoteFreeBytes []int64) *ChunkSchedule {
 		}
 
 		tiers = append(tiers, ChunkTier{Count: 1, Size: int(plain)})
-		avail[bestIdx] -= plain + EncStreamOverhead(plain)
+		avail[bestIdx] -= plain
 		remaining -= plain
 	}
 

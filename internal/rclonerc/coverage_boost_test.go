@@ -115,7 +115,10 @@ func TestGetFile_OpenDownloadedFileError(t *testing.T) {
 		switch r.URL.Path {
 		case "/operations/copyfile":
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(`{}`))
+			json.NewEncoder(w).Encode(map[string]interface{}{"jobid": 1})
+		case "/job/status":
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{"finished": true, "success": true})
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}

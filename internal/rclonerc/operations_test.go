@@ -1,6 +1,7 @@
 package rclonerc
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestIsRateLimited(t *testing.T) {
@@ -177,11 +179,18 @@ func TestPutFile_CopyfileStartError(t *testing.T) {
 
 func TestGetFile(t *testing.T) {
 	c := fakeRclone(t, func(w http.ResponseWriter, r *http.Request) {
-		// copyfile writes the file locally — simulate success.
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{}`))
+		switch r.URL.Path {
+		case "/operations/copyfile":
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{"jobid": 1})
+		case "/job/status":
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{"finished": true, "success": true})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
 	})
-	// GetFile calls operations/copyfile then opens the local file — the mock
+	// GetFile launches async copyfile then opens the local file — the mock
 	// returns success but since no local file is written, we expect an error
 	// when trying to open the temp file.
 	rc, err := c.GetFile("drive", "pdrive-chunks/chunk001")
@@ -193,17 +202,25 @@ func TestGetFile(t *testing.T) {
 
 func TestGetFile_Success(t *testing.T) {
 	c := fakeRclone(t, func(w http.ResponseWriter, r *http.Request) {
-		// Parse the request body to find dstFs and dstRemote.
-		var body map[string]interface{}
-		json.NewDecoder(r.Body).Decode(&body)
-		dstFs, _ := body["dstFs"].(string)
-		dstRemote, _ := body["dstRemote"].(string)
-		// Simulate rclone writing the file to dstFs/dstRemote.
-		if dstFs != "" && dstRemote != "" {
-			os.WriteFile(dstFs+dstRemote, []byte("hello"), 0644)
+		switch r.URL.Path {
+		case "/operations/copyfile":
+			// Parse the request body to find dstFs and dstRemote.
+			var body map[string]interface{}
+			json.NewDecoder(r.Body).Decode(&body)
+			dstFs, _ := body["dstFs"].(string)
+			dstRemote, _ := body["dstRemote"].(string)
+			// Simulate rclone writing the file to dstFs/dstRemote.
+			if dstFs != "" && dstRemote != "" {
+				os.WriteFile(dstFs+dstRemote, []byte("hello"), 0644)
+			}
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{"jobid": 42})
+		case "/job/status":
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{"finished": true, "success": true})
+		default:
+			w.WriteHeader(http.StatusNotFound)
 		}
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{}`))
 	})
 	rc, err := c.GetFile("drive", "pdrive-chunks/chunk001")
 	if err != nil {
@@ -221,15 +238,23 @@ func TestGetFile_Success(t *testing.T) {
 
 func TestGetFile_CloseCleansUp(t *testing.T) {
 	c := fakeRclone(t, func(w http.ResponseWriter, r *http.Request) {
-		var body map[string]interface{}
-		json.NewDecoder(r.Body).Decode(&body)
-		dstFs, _ := body["dstFs"].(string)
-		dstRemote, _ := body["dstRemote"].(string)
-		if dstFs != "" && dstRemote != "" {
-			os.WriteFile(dstFs+dstRemote, []byte("data"), 0644)
+		switch r.URL.Path {
+		case "/operations/copyfile":
+			var body map[string]interface{}
+			json.NewDecoder(r.Body).Decode(&body)
+			dstFs, _ := body["dstFs"].(string)
+			dstRemote, _ := body["dstRemote"].(string)
+			if dstFs != "" && dstRemote != "" {
+				os.WriteFile(dstFs+dstRemote, []byte("data"), 0644)
+			}
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{"jobid": 7})
+		case "/job/status":
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{"finished": true, "success": true})
+		default:
+			w.WriteHeader(http.StatusNotFound)
 		}
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{}`))
 	})
 	rc, err := c.GetFile("drive", "test/file.bin")
 	if err != nil {
@@ -445,8 +470,8 @@ func TestGetFile_CallError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if !strings.Contains(err.Error(), "downloading") {
-		t.Errorf("expected 'downloading' in error, got: %v", err)
+	if !strings.Contains(err.Error(), "starting async download") {
+		t.Errorf("expected 'starting async download' in error, got: %v", err)
 	}
 }
 
@@ -571,5 +596,165 @@ func TestGetRemoteType_Error(t *testing.T) {
 	_, err := c.GetRemoteType("gdrive")
 	if err == nil {
 		t.Fatal("expected error")
+	}
+}
+
+// ── StreamGetFile tests ─────────────────────────────────────────────────────
+
+func TestStreamGetFile_Success(t *testing.T) {
+	c := fakeRclone(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" {
+			t.Errorf("expected GET, got %s", r.Method)
+		}
+		// Verify the URL path uses the bracket format.
+		want := "/[gdrive:]pdrive-chunks/test.enc"
+		if r.URL.Path != want {
+			t.Errorf("expected path %q, got %q", want, r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("encrypted-data-bytes"))
+	})
+
+	rc, err := c.StreamGetFile("gdrive", "pdrive-chunks/test.enc")
+	if err != nil {
+		t.Fatalf("StreamGetFile: %v", err)
+	}
+	defer rc.Close()
+
+	body, _ := io.ReadAll(rc)
+	if string(body) != "encrypted-data-bytes" {
+		t.Errorf("body = %q, want %q", body, "encrypted-data-bytes")
+	}
+}
+
+func TestStreamGetFile_RemoteWithColon(t *testing.T) {
+	c := fakeRclone(t, func(w http.ResponseWriter, r *http.Request) {
+		// Remote already has colon — should not double it.
+		want := "/[gdrive:]path/file.bin"
+		if r.URL.Path != want {
+			t.Errorf("expected path %q, got %q", want, r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok"))
+	})
+
+	rc, err := c.StreamGetFile("gdrive:", "path/file.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc.Close()
+}
+
+func TestStreamGetFile_HTTPError(t *testing.T) {
+	c := fakeRclone(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte("file not found on remote"))
+	})
+
+	_, err := c.StreamGetFile("gdrive", "missing/file.enc")
+	if err == nil {
+		t.Fatal("expected error for 404")
+	}
+	if !strings.Contains(err.Error(), "404") {
+		t.Errorf("error should mention status code: %v", err)
+	}
+	if !strings.Contains(err.Error(), "file not found on remote") {
+		t.Errorf("error should contain body: %v", err)
+	}
+}
+
+func TestStreamGetFile_ServerError(t *testing.T) {
+	c := fakeRclone(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("internal error"))
+	})
+
+	_, err := c.StreamGetFile("gdrive", "chunk.enc")
+	if err == nil {
+		t.Fatal("expected error for 500")
+	}
+	if !strings.Contains(err.Error(), "500") {
+		t.Errorf("error should mention 500: %v", err)
+	}
+}
+
+func TestStreamGetFile_ConnectionError(t *testing.T) {
+	// Client pointing to a closed server.
+	c := NewClient("127.0.0.1:1") // Port 1 — should fail to connect.
+	c.httpClient.Timeout = 1 * time.Second
+
+	_, err := c.StreamGetFile("gdrive", "chunk.enc")
+	if err == nil {
+		t.Fatal("expected connection error")
+	}
+	if !strings.Contains(err.Error(), "streaming GET") {
+		t.Errorf("error should mention streaming GET: %v", err)
+	}
+}
+
+func TestStreamGetFile_LargeBody(t *testing.T) {
+	data := bytes.Repeat([]byte("A"), 1024*1024) // 1 MB
+	c := fakeRclone(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write(data)
+	})
+
+	rc, err := c.StreamGetFile("gdrive", "big-chunk.enc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+
+	got, _ := io.ReadAll(rc)
+	if len(got) != len(data) {
+		t.Errorf("expected %d bytes, got %d", len(data), len(got))
+	}
+}
+
+func TestStreamGetFile_EmptyBody(t *testing.T) {
+	c := fakeRclone(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		// Empty body
+	})
+
+	rc, err := c.StreamGetFile("gdrive", "empty.enc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+
+	got, _ := io.ReadAll(rc)
+	if len(got) != 0 {
+		t.Errorf("expected empty body, got %d bytes", len(got))
+	}
+}
+
+func TestStreamGetFile_URLFormat(t *testing.T) {
+	// Verify the URL construction with various remote names.
+	tests := []struct {
+		remote string
+		path   string
+		want   string
+	}{
+		{"gdrive", "chunks/a.enc", "/[gdrive:]chunks/a.enc"},
+		{"gdrive:", "chunks/b.enc", "/[gdrive:]chunks/b.enc"},
+		{"dropbox", "pdrive-chunks/c.enc", "/[dropbox:]pdrive-chunks/c.enc"},
+		{"s3:", "bucket/key.enc", "/[s3:]bucket/key.enc"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.remote+"_"+tt.path, func(t *testing.T) {
+			c := fakeRclone(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != tt.want {
+					t.Errorf("path = %q, want %q", r.URL.Path, tt.want)
+				}
+				w.WriteHeader(http.StatusOK)
+			})
+			rc, err := c.StreamGetFile(tt.remote, tt.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rc.Close()
+		})
 	}
 }

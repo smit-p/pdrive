@@ -15,11 +15,13 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/smit-p/pdrive/internal/broker"
 	"github.com/smit-p/pdrive/internal/engine"
 	"github.com/smit-p/pdrive/internal/fusefs"
+	"github.com/smit-p/pdrive/internal/logutil"
 	"github.com/smit-p/pdrive/internal/metadata"
 	"github.com/smit-p/pdrive/internal/vfs"
 	"golang.org/x/net/webdav"
@@ -27,21 +29,21 @@ import (
 
 // Config holds daemon configuration.
 type Config struct {
-	ConfigDir    string   // ~/.pdrive/
-	RcloneBin    string   // path to rclone binary
-	RcloneAddr   string   // e.g., "127.0.0.1:5572"
-	WebDAVAddr   string   // e.g., "127.0.0.1:8765"
-	SyncDir      string   // local folder to sync (e.g. ~/pdrive); empty disables sync
-	EncKey       []byte   // 32-byte AES-256 key (set when salt is available locally)
-	Password     string   // raw password — when set and EncKey is nil, daemon derives key after cloud salt lookup
-	BrokerPolicy string   // "pfrd" or "mfs"
-	MinFreeSpace int64    // bytes to keep free on each provider
-	SkipRestore  bool     // skip cloud DB restore on startup (useful after a manual wipe)
-	ChunkSize    int      // override chunk size (bytes); 0 uses dynamic sizing
-	RatePerSec   int      // API rate limit (tokens per second); 0 uses default (8/s)
-	Remotes      []string // rclone remote names to use; empty means all
-	MountBackend string   // "webdav" (default) or "fuse"
-	MountPoint   string   // FUSE mount point path (e.g. /Volumes/pdrive)
+	ConfigDir    string               // ~/.pdrive/
+	RcloneBin    string               // path to rclone binary
+	RcloneAddr   string               // e.g., "127.0.0.1:5572"
+	WebDAVAddr   string               // e.g., "127.0.0.1:8765"
+	SyncDir      string               // local folder to sync (e.g. ~/pdrive); empty disables sync
+	BrokerPolicy string               // "pfrd" or "mfs"
+	MinFreeSpace int64                // bytes to keep free on each provider
+	SkipRestore  bool                 // skip cloud DB restore on startup (useful after a manual wipe)
+	ChunkSize    int                  // override chunk size (bytes); 0 uses dynamic sizing
+	RatePerSec   int                  // API rate limit (tokens per second); 0 uses default (8/s)
+	Remotes      []string             // rclone remote names to use; empty means all
+	Erasure      string               // Reed-Solomon config "D+P" e.g. "3+1"; empty disables
+	MountBackend string               // "webdav" (default) or "fuse"
+	MountPoint   string               // FUSE mount point path (e.g. /Volumes/pdrive)
+	LogHandler   *logutil.RingHandler // structured log handler with ring buffer
 }
 
 // Daemon is the main pdrive daemon that ties everything together.
@@ -91,16 +93,6 @@ func (d *Daemon) Start(ctx context.Context) error {
 	if err := d.rclone.Start(ctx); err != nil {
 		d.db.Close()
 		return fmt.Errorf("starting rclone: %w", err)
-	}
-
-	// If a password was given without a local salt, try to fetch the salt from
-	// cloud so the same key is derived as on the original machine.
-	if len(d.config.EncKey) == 0 && d.config.Password != "" {
-		if err := d.resolveCloudSalt(); err != nil {
-			d.rclone.Stop()
-			d.db.Close()
-			return fmt.Errorf("resolving encryption salt: %w", err)
-		}
 	}
 
 	// If local DB is empty and restore is not disabled, try to restore from a cloud backup.
@@ -156,23 +148,32 @@ func (d *Daemon) Start(ctx context.Context) error {
 		spoolDir = ""
 	}
 
+	// Clean up stale temp files left behind by previous daemon runs.
+	// These accumulate in os.TempDir() from encrypt/decrypt operations that
+	// were interrupted (e.g. crash, SIGKILL). Only removes pdrive-prefixed
+	// files older than 10 minutes to avoid disturbing active operations.
+	cleanupStaleTempFiles()
+
 	// Create engine.
 	b := broker.NewBroker(d.db, broker.Policy(d.config.BrokerPolicy), d.config.MinFreeSpace)
 	if d.config.RatePerSec > 0 {
-		d.engine = engine.NewEngineWithRate(d.db, dbPath, d.rclone.Client(), b, d.config.EncKey, d.config.RatePerSec)
+		d.engine = engine.NewEngineWithRate(d.db, dbPath, d.rclone.Client(), b, d.config.RatePerSec)
 	} else {
-		d.engine = engine.NewEngine(d.db, dbPath, d.rclone.Client(), b, d.config.EncKey)
+		d.engine = engine.NewEngine(d.db, dbPath, d.rclone.Client(), b)
 	}
 	if d.config.ChunkSize > 0 {
 		d.engine.SetChunkSize(d.config.ChunkSize)
 	}
-	// If password-derived encryption is in use, tell the engine where the salt
-	// lives so it can upload it alongside the encrypted DB backup.
-	saltPath := filepath.Join(d.config.ConfigDir, "enc.salt")
-	if _, err := os.Stat(saltPath); err == nil {
-		d.engine.SetSaltPath(saltPath)
+	if d.config.Erasure != "" {
+		var data, parity int
+		if _, err := fmt.Sscanf(d.config.Erasure, "%d+%d", &data, &parity); err != nil {
+			return fmt.Errorf("invalid erasure config %q (expected D+P, e.g. 3+1): %w", d.config.Erasure, err)
+		}
+		if err := d.engine.SetErasure(data, parity); err != nil {
+			return fmt.Errorf("configuring erasure coding: %w", err)
+		}
+		slog.Info("erasure coding enabled", "data", data, "parity", parity)
 	}
-
 	// Purge OS-generated junk files (e.g. .DS_Store, ._* resource forks)
 	// that may have been synced before the skip filter was in place.
 	d.purgeJunkFiles()
@@ -240,6 +241,7 @@ func (d *Daemon) Start(ctx context.Context) error {
 			rcloneClient:    d.rclone.Client(),
 			activeRemotes:   d.config.Remotes,
 			resyncProviders: func() { d.syncProviders() },
+			logHandler:      d.config.LogHandler,
 		},
 	}
 
@@ -352,4 +354,39 @@ func (d *Daemon) Stop() {
 // Engine returns the daemon's engine (useful for testing).
 func (d *Daemon) Engine() *engine.Engine {
 	return d.engine
+}
+
+// cleanupStaleTempFiles removes pdrive-prefixed temporary files older than
+// 10 minutes from os.TempDir(). These are leftover encrypted chunk fragments
+// from interrupted uploads/downloads. Called once at daemon startup.
+func cleanupStaleTempFiles() {
+	tmpDir := os.TempDir()
+	cutoff := time.Now().Add(-10 * time.Minute)
+	entries, err := os.ReadDir(tmpDir)
+	if err != nil {
+		slog.Debug("temp cleanup: could not read temp dir", "error", err)
+		return
+	}
+	var removed int
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if !strings.HasPrefix(name, "pdrive-") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if info.ModTime().Before(cutoff) {
+			if err := os.Remove(filepath.Join(tmpDir, name)); err == nil {
+				removed++
+			}
+		}
+	}
+	if removed > 0 {
+		slog.Info("cleaned up stale temp files", "count", removed)
+	}
 }

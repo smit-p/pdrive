@@ -436,27 +436,6 @@ func TestRunPut_DirectoryWalk(t *testing.T) {
 	}
 }
 
-// ── readPassword — via pipe ─────────────────────────────────────────────────
-
-func TestReadPassword_PipeWithNewline(t *testing.T) {
-	// Create a pipe with password + newline
-	r, w, _ := os.Pipe()
-	w.WriteString("my-secret-pw\n")
-	w.Close()
-
-	old := os.Stdin
-	os.Stdin = r
-	defer func() { os.Stdin = old }()
-
-	pw, err := readPassword()
-	if err != nil {
-		t.Fatalf("readPassword() error: %v", err)
-	}
-	if pw != "my-secret-pw" {
-		t.Errorf("readPassword() = %q, want %q", pw, "my-secret-pw")
-	}
-}
-
 // ── runCat — additional error path ──────────────────────────────────────────
 
 func TestRunCat_ServerError_Exits_StatusCode(t *testing.T) {

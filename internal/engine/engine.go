@@ -20,25 +20,28 @@
 //   - Orphan GC (cloud objects with no DB record, and vice versa)
 //   - Failed-deletion retry queue
 //   - Telemetry counters (files/chunks/bytes uploaded, downloads, dedup hits)
+//
+// File layout:
+//   - engine.go — types, constructors, lifecycle, config, metrics, queries
+//   - upload.go — upload pipeline (write, chunk, encrypt, dedup, progress)
+//   - download.go — download pipeline (read, decrypt, stream, verify)
+//   - delete.go — delete pipeline (file/dir delete, cloud cleanup, retry)
+//   - dbsync.go — DB backup, restore, orphan GC
 package engine
 
 import (
-	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
-	"math/rand/v2"
 	"os"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/smit-p/pdrive/internal/broker"
 	"github.com/smit-p/pdrive/internal/chunker"
+	"github.com/smit-p/pdrive/internal/erasure"
 	"github.com/smit-p/pdrive/internal/metadata"
 	"github.com/smit-p/pdrive/internal/rclonerc"
 )
@@ -52,6 +55,7 @@ var ErrInsufficientSpace = errors.New("file size exceeds available storage space
 type CloudStorage interface {
 	PutFile(remote, remotePath string, data io.Reader) error
 	GetFile(remote, remotePath string) (io.ReadCloser, error)
+	StreamGetFile(remote, remotePath string) (io.ReadCloser, error)
 	DeleteFile(remote, remotePath string) error
 	ListDir(remote, remotePath string) ([]rclonerc.ListItem, error)
 	Cleanup(remote string) error
@@ -61,43 +65,12 @@ type CloudStorage interface {
 
 const chunkRemoteDir = "pdrive-chunks"
 
-// uploadProgress tracks in-flight async upload state.
-type uploadProgress struct {
-	VirtualPath    string
-	TotalChunks    int
-	ChunksUploaded int
-	SizeBytes      int64
-	BytesDone      int64 // encrypted bytes of completed chunks
-	BytesTotal     int64 // total encrypted size (all chunks)
-	StartedAt      time.Time
-	Failed         bool
-	Preparing      bool // true while hashing / spooling, before chunks start
-	// inFlightChunks tracks chunk remote paths currently being uploaded
-	// so we can match them against rclone transfer stats.
-	inFlightChunks map[string]struct{}
-}
-
-// UploadProgressInfo is the exported snapshot of an in-flight upload.
-type UploadProgressInfo struct {
-	VirtualPath    string    `json:"VirtualPath"`
-	TotalChunks    int       `json:"TotalChunks"`
-	ChunksUploaded int       `json:"ChunksUploaded"`
-	SizeBytes      int64     `json:"SizeBytes"`
-	BytesDone      int64     `json:"BytesDone"`
-	BytesTotal     int64     `json:"BytesTotal"`
-	SpeedBPS       float64   `json:"SpeedBPS"`
-	StartedAt      time.Time `json:"StartedAt"`
-	Failed         bool      `json:"Failed"`
-	Preparing      bool      `json:"Preparing"`
-}
-
 // Engine orchestrates file write and read operations.
 type Engine struct {
 	db           *metadata.DB
 	dbPath       string
 	rc           CloudStorage
 	broker       *broker.Broker
-	encKey       []byte        // AES-256 key (32 bytes)
 	uploadTokens chan struct{} // token bucket: limits upload API calls per second
 	fileGate     chan struct{} // serializes file-level uploads (only 1 file at a time)
 	// maxChunkRetries overrides maxUploadRetries when > 0 (used by tests to
@@ -106,6 +79,11 @@ type Engine struct {
 
 	// overrideChunkSize, when > 0, replaces the dynamic chunk-size calculation.
 	overrideChunkSize int
+
+	// erasureEnc, when non-nil, enables Reed-Solomon erasure coding.
+	// Each encrypted chunk is split into data+parity shards spread
+	// across distinct providers.
+	erasureEnc *erasure.Encoder
 
 	uploadsMu sync.RWMutex
 	uploads   map[string]*uploadProgress // fileID → progress
@@ -123,10 +101,6 @@ type Engine struct {
 	// uploading is nonzero while a file upload is in progress.
 	// BackupDB defers work while uploading to avoid competing for provider quota.
 	uploading atomic.Int32
-
-	// saltPath is the local path to the Argon2id salt file (enc.salt).
-	// When set, BackupDB uploads the salt alongside the encrypted DB.
-	saltPath string
 
 	// Telemetry counters (atomic).
 	filesUploaded   atomic.Int64
@@ -149,38 +123,37 @@ const (
 )
 
 // NewEngine creates a new engine backed by an rclone RC client.
-func NewEngine(db *metadata.DB, dbPath string, rc *rclonerc.Client, b *broker.Broker, encKey []byte) *Engine {
+func NewEngine(db *metadata.DB, dbPath string, rc *rclonerc.Client, b *broker.Broker) *Engine {
 	const burst = 20
-	e := newEngine(db, dbPath, rc, b, encKey, burst, uploadRatePerSec)
+	e := newEngine(db, dbPath, rc, b, burst, uploadRatePerSec)
 	return e
 }
 
 // NewEngineWithRate creates an Engine with a custom API rate limit (tokens per second).
 // A ratePerSec of 0 or less uses the default (6/s).
-func NewEngineWithRate(db *metadata.DB, dbPath string, rc *rclonerc.Client, b *broker.Broker, encKey []byte, ratePerSec int) *Engine {
+func NewEngineWithRate(db *metadata.DB, dbPath string, rc *rclonerc.Client, b *broker.Broker, ratePerSec int) *Engine {
 	const burst = 20
 	if ratePerSec <= 0 {
 		ratePerSec = uploadRatePerSec
 	}
-	return newEngine(db, dbPath, rc, b, encKey, burst, ratePerSec)
+	return newEngine(db, dbPath, rc, b, burst, ratePerSec)
 }
 
 // NewEngineWithCloud creates an Engine with any CloudStorage implementation.
 // Intended for testing and tooling that needs an alternative storage backend.
 // Uses a larger initial token burst (256) so that test-speed uploads are never
 // token-starved.
-func NewEngineWithCloud(db *metadata.DB, dbPath string, rc CloudStorage, b *broker.Broker, encKey []byte) *Engine {
+func NewEngineWithCloud(db *metadata.DB, dbPath string, rc CloudStorage, b *broker.Broker) *Engine {
 	const burst = 256
-	return newEngine(db, dbPath, rc, b, encKey, burst, uploadRatePerSec)
+	return newEngine(db, dbPath, rc, b, burst, uploadRatePerSec)
 }
 
-func newEngine(db *metadata.DB, dbPath string, rc CloudStorage, b *broker.Broker, encKey []byte, burst, ratePerSec int) *Engine {
+func newEngine(db *metadata.DB, dbPath string, rc CloudStorage, b *broker.Broker, burst, ratePerSec int) *Engine {
 	e := &Engine{
 		db:           db,
 		dbPath:       dbPath,
 		rc:           rc,
 		broker:       b,
-		encKey:       encKey,
 		uploadTokens: make(chan struct{}, burst),
 		fileGate:     make(chan struct{}, 1),
 		uploads:      make(map[string]*uploadProgress),
@@ -253,9 +226,18 @@ func (e *Engine) WaitUploads() { e.asyncWG.Wait() }
 // Pass 0 to revert to the default dynamic behaviour.
 func (e *Engine) SetChunkSize(bytes int) { e.overrideChunkSize = bytes }
 
-// SetSaltPath sets the local path to the Argon2id salt file.
-// When set, BackupDB also uploads the salt to every provider.
-func (e *Engine) SetSaltPath(p string) { e.saltPath = p }
+// SetErasure configures Reed-Solomon erasure coding for new uploads.
+// dataShards is the number of data shards, parityShards is the number
+// of parity shards.  Existing files are unaffected — their shard counts
+// are stored per-chunk and used automatically on download.
+func (e *Engine) SetErasure(dataShards, parityShards int) error {
+	enc, err := erasure.NewEncoder(dataShards, parityShards)
+	if err != nil {
+		return err
+	}
+	e.erasureEnc = enc
+	return nil
+}
 
 // SetMaxChunkRetries overrides the default retry count for chunk uploads.
 
@@ -279,22 +261,16 @@ func (e *Engine) EnsureRemoteDirs() {
 }
 func (e *Engine) SetMaxChunkRetries(n int) { e.maxChunkRetries = n }
 
-// CheckSpace returns a non-nil error if fileSize (in plain bytes) exceeds the
-// aggregate free space across all eligible providers. The comparison uses an
-// overhead factor of ~1.08 to account for AES-GCM encryption expansion (nonce +
-// tag per chunk).
+// CheckSpace returns a non-nil error if fileSize exceeds the aggregate free
+// space across all eligible providers.
 func (e *Engine) CheckSpace(fileSize int64) error {
 	free, err := e.broker.TotalFreeSpace()
 	if err != nil {
 		return fmt.Errorf("checking free space: %w", err)
 	}
-	// Encryption adds a 28-byte overhead (12-byte nonce + 16-byte GCM tag) per
-	// chunk.  Conservatively assume 8% overhead so the check is never overly
-	// optimistic.
-	needed := fileSize + fileSize/12
-	if needed > free {
+	if fileSize > free {
 		return fmt.Errorf("%w: need ~%s but only %s available",
-			ErrInsufficientSpace, fmtBytes(needed), fmtBytes(free))
+			ErrInsufficientSpace, fmtBytes(fileSize), fmtBytes(free))
 	}
 	return nil
 }
@@ -377,989 +353,8 @@ func uploadWorkersForSchedule(s *chunker.ChunkSchedule) int {
 	}
 	return w
 }
-
-// WriteFile writes a file to the virtual filesystem, chunking and encrypting it.
-// For small files or when data is already in memory.
-func (e *Engine) WriteFile(virtualPath string, data []byte) error {
-	return e.WriteFileStream(virtualPath, bytes.NewReader(data), int64(len(data)))
-}
-
-const (
-	// maxUploadWorkers is the concurrency limit for chunk upload goroutines.
-	// Matches rclone --transfers=12 so every worker can have a transfer in
-	// flight simultaneously.
-	maxUploadWorkers = 12
-	// maxUploadRetries is the number of retry attempts for a failed chunk upload.
-	maxUploadRetries = 5
-	// AsyncWriteThreshold: files larger than this are uploaded in the background
-	// so the WebDAV PUT returns quickly and Finder doesn't time out.
-	AsyncWriteThreshold = 4 * 1024 * 1024 // 4 MB
-)
-
-// chunkMeta holds metadata for a single uploaded chunk.
-type chunkMeta struct {
-	chunkID       string
-	sequence      int
-	size          int
-	sha256        string
-	encryptedSize int
-	providerID    string
-	remotePath    string
-}
-
-// WriteFileStream writes a file from a stream synchronously (hash + upload + metadata).
-func (e *Engine) WriteFileStream(virtualPath string, r io.ReadSeeker, size int64) error {
-	// Pre-upload space check: reject early if the file won't fit.
-	if err := e.CheckSpace(size); err != nil {
-		return err
-	}
-
-	// Capture existing file info BEFORE the upload, but do NOT delete yet.
-	// Deleting first would cause data loss if the upload fails.
-	existing, _ := e.db.GetFileByPath(virtualPath)
-	var oldID string
-	var oldLocs []metadata.ChunkLocation
-	if existing != nil {
-		oldID = existing.ID
-		oldLocs, _ = e.db.GetChunkLocationsForFile(existing.ID)
-	}
-
-	fileID := uuid.New().String()
-	hasher := sha256.New()
-	if _, err := io.Copy(hasher, r); err != nil {
-		return err
-	}
-	fullHashStr := hex.EncodeToString(hasher.Sum(nil))
-	if _, err := r.Seek(0, io.SeekStart); err != nil {
-		return err
-	}
-
-	// Content-hash dedup: if a completed file with the same SHA256 already
-	// exists, clone its chunk metadata instead of re-uploading.
-	if donor, _ := e.db.GetCompleteFileByHash(fullHashStr); donor != nil {
-		err := e.cloneFileFromDonor(donor, fileID, virtualPath, size, fullHashStr, oldID)
-		if err == nil && len(oldLocs) > 0 {
-			go e.deleteCloudChunks(oldLocs)
-		}
-		return err
-	}
-
-	// Upload all chunks FIRST — if this fails the old file is preserved.
-	metas, err := e.uploadChunks(r, fileID, size, nil, nil)
-	if err != nil {
-		return err
-	}
-
-	// Upload succeeded — now atomically swap: delete old record, insert new.
-	if oldID != "" {
-		e.db.DeleteFile(oldID) //nolint:errcheck
-	}
-
-	// Insert the file record FIRST — chunk records have a FK to files.id so the
-	// parent row must exist before we insert children.
-	now := time.Now().Unix()
-	if err := e.db.InsertFile(&metadata.File{
-		ID:          fileID,
-		VirtualPath: virtualPath,
-		SizeBytes:   size,
-		CreatedAt:   now,
-		ModifiedAt:  now,
-		SHA256Full:  fullHashStr,
-		UploadState: "complete",
-		TmpPath:     nil,
-	}); err != nil {
-		return err
-	}
-	if err := e.insertChunkMetadata(fileID, metas); err != nil {
-		e.db.DeleteFile(fileID) //nolint:errcheck
-		return err
-	}
-
-	// Clean up old cloud chunks AFTER the new file is safely recorded.
-	if len(oldLocs) > 0 {
-		go e.deleteCloudChunks(oldLocs)
-	}
-
-	slog.Info("file written", "path", virtualPath, "size", size, "chunks", len(metas))
-	e.incCounter(&e.filesUploaded, "files_uploaded", 1)
-	e.incCounter(&e.bytesUploaded, "bytes_uploaded", size)
-	e.scheduleBackup()
-	return nil
-}
-
-// WriteFileAsync hashes the file synchronously, writes a pending DB record
-// (so uploads survive a daemon restart via ResumeUploads), then uploads chunks
-// in a background goroutine. The file stays invisible in the WebDAV listing
-// until the upload completes (ListFiles/GetFileByPath filter pending records).
-// The caller must NOT close or remove tmpFile; the engine takes ownership.
-func (e *Engine) WriteFileAsync(virtualPath string, tmpFile *os.File, tmpPath string, size int64) error {
-	// Generate the file ID early so we can register progress immediately.
-	fileID := uuid.New().String()
-
-	// Adopt the queued placeholder (set by SyncDir) or create a fresh entry.
-	e.adoptQueuedUpload(virtualPath, fileID, size)
-
-	// Pre-upload space check: reject early if the file won't fit.
-	if err := e.CheckSpace(size); err != nil {
-		e.removeUploadProgress(fileID)
-		tmpFile.Close()
-		os.Remove(tmpPath)
-		return err
-	}
-
-	// Hash synchronously so we can write the pending DB record now.
-	hasher := sha256.New()
-	if _, err := io.Copy(hasher, tmpFile); err != nil {
-		e.removeUploadProgress(fileID)
-		tmpFile.Close()
-		os.Remove(tmpPath)
-		return fmt.Errorf("hashing file: %w", err)
-	}
-	fullHashStr := hex.EncodeToString(hasher.Sum(nil))
-	if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
-		e.removeUploadProgress(fileID)
-		tmpFile.Close()
-		os.Remove(tmpPath)
-		return fmt.Errorf("rewinding after hash: %w", err)
-	}
-
-	// Capture existing file info BEFORE the upload, but do NOT delete yet.
-	// Deleting first would cause data loss if the async upload fails later.
-	existing, _ := e.db.GetFileByPath(virtualPath)
-	var oldID string
-	var oldLocs []metadata.ChunkLocation
-	if existing != nil {
-		oldID = existing.ID
-		oldLocs, _ = e.db.GetChunkLocationsForFile(existing.ID)
-	}
-
-	// Content-hash dedup: if a completed file with the same SHA256 already
-	// exists, clone its chunk metadata instead of re-uploading.
-	if donor, _ := e.db.GetCompleteFileByHash(fullHashStr); donor != nil {
-		e.removeUploadProgress(fileID)
-		tmpFile.Close()
-		os.Remove(tmpPath)
-		err := e.cloneFileFromDonor(donor, fileID, virtualPath, size, fullHashStr, oldID)
-		if err == nil {
-			if len(oldLocs) > 0 {
-				go e.deleteCloudChunks(oldLocs)
-			}
-			e.db.InsertActivity("upload", virtualPath, fmt.Sprintf("%d bytes", size)) //nolint:errcheck
-		}
-		return err
-	}
-
-	// Delete existing file record now so the pending INSERT doesn't conflict.
-	// The old cloud chunks are NOT cleaned up yet — that happens after the
-	// background upload succeeds, preserving the old data if this upload fails.
-	if oldID != "" {
-		e.db.DeleteFile(oldID) //nolint:errcheck
-	}
-
-	now := time.Now().Unix()
-	dbTmpPath := tmpPath
-	if err := e.db.InsertFile(&metadata.File{
-		ID:          fileID,
-		VirtualPath: virtualPath,
-		SizeBytes:   size,
-		CreatedAt:   now,
-		ModifiedAt:  now,
-		SHA256Full:  fullHashStr,
-		UploadState: "pending",
-		TmpPath:     &dbTmpPath,
-	}); err != nil {
-		e.removeUploadProgress(fileID)
-		tmpFile.Close()
-		os.Remove(tmpPath)
-		return fmt.Errorf("inserting pending file record: %w", err)
-	}
-
-	e.asyncWG.Add(1)
-	go func() {
-		defer e.asyncWG.Done()
-		defer tmpFile.Close()
-		defer os.Remove(tmpPath)
-		defer func() {
-			e.uploadsMu.Lock()
-			delete(e.uploads, fileID)
-			e.uploadsMu.Unlock()
-		}()
-
-		metas, err := e.uploadChunksTracked(tmpFile, fileID, virtualPath, size)
-		if err != nil {
-			slog.Error("background upload failed", "path", virtualPath, "error", err)
-			// Remove the pending record so the path is free for retry and
-			// the file doesn't appear stuck/unreadable.
-			if delErr := e.db.DeleteFile(fileID); delErr != nil {
-				slog.Error("failed to remove pending record after upload failure",
-					"path", virtualPath, "error", delErr)
-			}
-			return
-		}
-		if err := e.insertChunkMetadata(fileID, metas); err != nil {
-			slog.Error("failed to insert chunk metadata", "path", virtualPath, "error", err)
-			if delErr := e.db.DeleteFile(fileID); delErr != nil {
-				slog.Error("failed to remove pending record after metadata failure",
-					"path", virtualPath, "error", delErr)
-			}
-			return
-		}
-		if err := e.db.SetUploadComplete(fileID); err != nil {
-			slog.Error("failed to mark upload complete", "path", virtualPath, "error", err)
-			return
-		}
-		slog.Info("file written", "path", virtualPath, "size", size, "chunks", len(metas))
-		e.incCounter(&e.filesUploaded, "files_uploaded", 1)
-		e.incCounter(&e.bytesUploaded, "bytes_uploaded", size)
-
-		// Clean up old cloud chunks AFTER the new file is safely recorded.
-		if len(oldLocs) > 0 {
-			e.deleteCloudChunks(oldLocs)
-		}
-
-		e.db.InsertActivity("upload", virtualPath, fmt.Sprintf("%d bytes", size)) //nolint:errcheck
-		e.scheduleBackup()
-	}()
-	return nil
-}
-
-// uploadChunks splits the file into chunks, encrypts each to a temp file on
-// disk using streaming encryption (16 MB blocks), and uploads them concurrently.
-// Peak memory is bounded to ~encBlockSize (16 MB) regardless of chunk size.
-// onChunkUploaded, if non-nil, is called with (remotePath, encryptedSize, done):
-//   - done=false at beginning of upload attempt (track as in-flight)
-//   - done=true after successful upload (track bytes completed)
-//
-// Returns the ordered slice of chunk metadata on success.
-func (e *Engine) uploadChunks(r io.ReadSeeker, fileID string, fileSize int64, schedule *chunker.ChunkSchedule, onChunkUploaded func(remotePath string, encSize int64, done bool)) ([]chunkMeta, error) {
-	if schedule == nil {
-		schedule = e.chunkSchedule(fileSize)
-	}
-	workers := uploadWorkersForSchedule(schedule)
-	slog.Debug("upload plan", "fileSize", fileSize, "workers", workers,
-		"tiers", len(schedule.Tiers), "maxChunk", schedule.MaxSize())
-
-	var (
-		metas    []chunkMeta
-		mu       sync.Mutex
-		firstErr error
-		wg       sync.WaitGroup
-		sem      = make(chan struct{}, workers)
-		// uploaded tracks metas whose cloud upload succeeded, so we can
-		// clean them up if a later chunk fails.
-		uploaded []chunkMeta
-	)
-
-	remaining := fileSize
-	for seq := 0; remaining > 0; seq++ {
-		mu.Lock()
-		uploadErr := firstErr
-		mu.Unlock()
-		if uploadErr != nil {
-			break
-		}
-
-		chunkPlain := int64(schedule.SizeForSeq(seq))
-		if chunkPlain > remaining {
-			chunkPlain = remaining
-		}
-
-		// Read chunk data through a hasher, encrypting to a temp file.
-		chunkID := uuid.New().String()
-		hasher := sha256.New()
-		tee := io.TeeReader(io.LimitReader(r, chunkPlain), hasher)
-
-		encTmp, err := os.CreateTemp("", "pdrive-enc-*")
-		if err != nil {
-			wg.Wait()
-			return nil, fmt.Errorf("creating encrypted temp file for chunk %d: %w", seq, err)
-		}
-
-		encSize, err := chunker.EncryptStream(e.encKey, tee, encTmp)
-		if err != nil {
-			encTmp.Close()
-			os.Remove(encTmp.Name())
-			wg.Wait()
-			return nil, fmt.Errorf("encrypting chunk %d: %w", seq, err)
-		}
-		chunkHash := hex.EncodeToString(hasher.Sum(nil))
-		remaining -= chunkPlain
-
-		providerID, err := e.broker.AssignChunk(encSize)
-		if err != nil {
-			encTmp.Close()
-			os.Remove(encTmp.Name())
-			wg.Wait()
-			return nil, fmt.Errorf("assigning chunk %d: %w", seq, err)
-		}
-
-		provider, err := e.db.GetProvider(providerID)
-		if err != nil || provider == nil {
-			encTmp.Close()
-			os.Remove(encTmp.Name())
-			wg.Wait()
-			return nil, fmt.Errorf("getting provider %s: %w", providerID, err)
-		}
-
-		remotePath := chunkRemoteDir + "/" + chunkID
-		metas = append(metas, chunkMeta{
-			chunkID:       chunkID,
-			sequence:      seq,
-			size:          int(chunkPlain),
-			sha256:        chunkHash,
-			encryptedSize: int(encSize),
-			providerID:    providerID,
-			remotePath:    remotePath,
-		})
-
-		// Optimistically reserve space so subsequent AssignChunk calls see
-		// reduced free space for this provider.
-		_ = e.db.DeductProviderFreeBytes(providerID, encSize)
-
-		sem <- struct{}{}
-		wg.Add(1)
-		go func(encFile *os.File, encBytes int64, remote string, prov *metadata.Provider, s int, cm chunkMeta) {
-			defer func() {
-				encFile.Close()
-				os.Remove(encFile.Name())
-				<-sem
-				wg.Done()
-			}()
-			retries := maxUploadRetries
-			if e.maxChunkRetries > 0 {
-				retries = e.maxChunkRetries
-			}
-			var lastErr error
-			for attempt := 0; attempt < retries; attempt++ {
-				if attempt > 0 {
-					if rclonerc.IsQuotaExceeded(lastErr) {
-						break
-					}
-					backoff := time.Duration(1<<uint(attempt)) * time.Second
-					if rclonerc.IsRateLimited(lastErr) {
-						backoff *= 3
-					}
-					if backoff > 30*time.Second {
-						backoff = 30 * time.Second
-					}
-					jitter := time.Duration(rand.Int64N(int64(backoff) / 2))
-					backoff += jitter
-					slog.Warn("retrying chunk upload",
-						"seq", s, "attempt", attempt+1, "backoff", backoff)
-					time.Sleep(backoff)
-				}
-				if _, err := encFile.Seek(0, io.SeekStart); err != nil {
-					lastErr = err
-					continue
-				}
-				if attempt == 0 && onChunkUploaded != nil {
-					onChunkUploaded(remote, encBytes, false) // mark in-flight
-				}
-				<-e.uploadTokens
-				if err := e.rc.PutFile(prov.RcloneRemote, remote, encFile); err != nil {
-					lastErr = err
-					continue
-				}
-				slog.Debug("chunk uploaded", "seq", s, "provider", prov.DisplayName)
-				e.incCounter(&e.chunksUploaded, "chunks_uploaded", 1)
-				mu.Lock()
-				uploaded = append(uploaded, cm)
-				mu.Unlock()
-				if onChunkUploaded != nil {
-					onChunkUploaded(remote, encBytes, true) // mark completed
-				}
-				return // success
-			}
-			_ = e.db.CreditProviderFreeBytes(prov.ID, encBytes)
-			mu.Lock()
-			if firstErr == nil {
-				firstErr = fmt.Errorf("uploading chunk %d to %s after %d retries: %w",
-					s, prov.DisplayName, retries, lastErr)
-			}
-			mu.Unlock()
-		}(encTmp, encSize, remotePath, provider, seq, metas[len(metas)-1])
-	}
-
-	wg.Wait()
-
-	if firstErr != nil {
-		// Credit back space for chunks that were successfully uploaded —
-		// they're about to be deleted from the cloud.
-		for _, m := range uploaded {
-			_ = e.db.CreditProviderFreeBytes(m.providerID, int64(m.encryptedSize))
-		}
-		// Clean up chunks that were successfully uploaded before the failure.
-		if len(uploaded) > 0 {
-			locs := make([]metadata.ChunkLocation, len(uploaded))
-			for i, m := range uploaded {
-				locs[i] = metadata.ChunkLocation{
-					ChunkID:    m.chunkID,
-					ProviderID: m.providerID,
-					RemotePath: m.remotePath,
-				}
-			}
-			slog.Info("cleaning up partial upload", "uploaded_chunks", len(uploaded))
-			go e.deleteCloudChunks(locs)
-		}
-		return nil, firstErr
-	}
-
-	return metas, nil
-}
-
-// insertChunkMetadata writes chunk and chunk_location records inside a single
-// transaction so that either all records are committed or none are.
-func (e *Engine) insertChunkMetadata(fileID string, metas []chunkMeta) error {
-	tx, err := e.db.Conn().Begin()
-	if err != nil {
-		return fmt.Errorf("begin transaction: %w", err)
-	}
-	defer tx.Rollback() //nolint:errcheck
-
-	confirmTime := time.Now().Unix()
-	for _, m := range metas {
-		if _, err := tx.Exec(
-			`INSERT INTO chunks (id, file_id, sequence, size_bytes, sha256, encrypted_size) VALUES (?, ?, ?, ?, ?, ?)`,
-			m.chunkID, fileID, m.sequence, m.size, m.sha256, m.encryptedSize,
-		); err != nil {
-			return fmt.Errorf("inserting chunk record: %w", err)
-		}
-		if _, err := tx.Exec(
-			`INSERT INTO chunk_locations (chunk_id, provider_id, remote_path, upload_confirmed_at) VALUES (?, ?, ?, ?)`,
-			m.chunkID, m.providerID, m.remotePath, confirmTime,
-		); err != nil {
-			return fmt.Errorf("inserting chunk location: %w", err)
-		}
-	}
-	return tx.Commit()
-}
-
-// cloneFileFromDonor creates a new file record that shares the same cloud
-// chunks as the donor file (content-hash dedup). No data is uploaded.
-// All inserts are wrapped in a single transaction for atomicity.
-// If replaceFileID is non-empty, that file record is deleted inside the same
-// transaction to avoid a window where neither old nor new record exists.
-func (e *Engine) cloneFileFromDonor(donor *metadata.File, fileID, virtualPath string, size int64, sha256Full, replaceFileID string) error {
-	donorChunks, err := e.db.GetChunksForFile(donor.ID)
-	if err != nil {
-		return fmt.Errorf("getting donor chunks: %w", err)
-	}
-	if len(donorChunks) == 0 {
-		return fmt.Errorf("donor file %s has no chunks", donor.VirtualPath)
-	}
-
-	// Pre-fetch all donor chunk locations before starting the transaction.
-	// The tx holds the single SQLite connection, so db queries inside it would deadlock.
-	donorLocs := make(map[string][]metadata.ChunkLocation, len(donorChunks))
-	for _, dc := range donorChunks {
-		locs, err := e.db.GetChunkLocations(dc.ID)
-		if err != nil {
-			return fmt.Errorf("getting donor chunk locations: %w", err)
-		}
-		donorLocs[dc.ID] = locs
-	}
-
-	tx, err := e.db.Conn().Begin()
-	if err != nil {
-		return fmt.Errorf("begin transaction: %w", err)
-	}
-	defer tx.Rollback() //nolint:errcheck
-
-	// Verify the donor still exists inside the transaction. If it was deleted
-	// concurrently, its cloud chunks may be getting cleaned up — using those
-	// locations would create a file with orphaned references.
-	var donorExists int
-	if err := tx.QueryRow(`SELECT COUNT(*) FROM files WHERE id = ?`, donor.ID).Scan(&donorExists); err != nil {
-		return fmt.Errorf("verifying donor: %w", err)
-	}
-	if donorExists == 0 {
-		return fmt.Errorf("donor file %s was deleted concurrently", donor.VirtualPath)
-	}
-
-	// Delete the old file record atomically within this transaction so
-	// there's no window where the virtual_path is missing.
-	if replaceFileID != "" {
-		if _, err := tx.Exec(`DELETE FROM files WHERE id = ?`, replaceFileID); err != nil {
-			return fmt.Errorf("removing old file record: %w", err)
-		}
-	}
-
-	now := time.Now().Unix()
-	if _, err := tx.Exec(
-		`INSERT INTO files (id, virtual_path, size_bytes, created_at, modified_at, sha256_full, upload_state) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		fileID, virtualPath, size, now, now, sha256Full, "complete",
-	); err != nil {
-		return err
-	}
-
-	for _, dc := range donorChunks {
-		newChunkID := uuid.New().String()
-		if _, err := tx.Exec(
-			`INSERT INTO chunks (id, file_id, sequence, size_bytes, sha256, encrypted_size) VALUES (?, ?, ?, ?, ?, ?)`,
-			newChunkID, fileID, dc.Sequence, dc.SizeBytes, dc.SHA256, dc.EncryptedSize,
-		); err != nil {
-			return fmt.Errorf("cloning chunk record: %w", err)
-		}
-		for _, loc := range donorLocs[dc.ID] {
-			if _, err := tx.Exec(
-				`INSERT INTO chunk_locations (chunk_id, provider_id, remote_path, upload_confirmed_at) VALUES (?, ?, ?, ?)`,
-				newChunkID, loc.ProviderID, loc.RemotePath, loc.UploadConfirmedAt,
-			); err != nil {
-				return fmt.Errorf("cloning chunk location: %w", err)
-			}
-		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("committing clone transaction: %w", err)
-	}
-
-	slog.Info("file deduped (cloned from existing)", "path", virtualPath, "donor", donor.VirtualPath, "size", size)
-	e.incCounter(&e.dedupHits, "dedup_hits", 1)
-	e.incCounter(&e.filesUploaded, "files_uploaded", 1)
-	e.incCounter(&e.bytesUploaded, "bytes_uploaded", size)
-	e.scheduleBackup()
-	return nil
-}
-
-// uploadChunksTracked registers upload progress for fileID, then delegates to
-// uploadChunks with a callback that increments the chunk counter.
-// Acquires the file-level gate so only one file uploads at a time.
-func (e *Engine) uploadChunksTracked(r io.ReadSeeker, fileID, virtualPath string, fileSize int64) ([]chunkMeta, error) {
-	// Serialize file-level uploads: wait for the previous file to finish.
-	e.fileGate <- struct{}{}
-	defer func() { <-e.fileGate }()
-
-	// Signal that an upload is active so BackupDB defers to avoid
-	// competing for the same provider API quota.
-	e.uploading.Add(1)
-	defer e.uploading.Add(-1)
-
-	schedule := e.chunkSchedule(fileSize)
-	estimated := schedule.EstimateChunks(fileSize)
-	if estimated == 0 {
-		estimated = 1
-	}
-
-	// Pre-compute total encrypted size for byte-level progress.
-	var bytesTotal int64
-	{
-		rem := fileSize
-		for seq := 0; rem > 0; seq++ {
-			plain := int64(schedule.SizeForSeq(seq))
-			if plain > rem {
-				plain = rem
-			}
-			bytesTotal += plain + chunker.EncStreamOverhead(plain)
-			rem -= plain
-		}
-	}
-
-	e.uploadsMu.Lock()
-	if p, ok := e.uploads[fileID]; ok {
-		// Entry was pre-registered by WriteFileAsync with Preparing=true;
-		// transition to active upload.
-		p.TotalChunks = estimated
-		p.BytesTotal = bytesTotal
-		p.Preparing = false
-		p.inFlightChunks = make(map[string]struct{})
-	} else {
-		// Fallback: WriteFileStream path (no pre-registration).
-		e.uploads[fileID] = &uploadProgress{
-			VirtualPath:    virtualPath,
-			TotalChunks:    estimated,
-			SizeBytes:      fileSize,
-			BytesTotal:     bytesTotal,
-			StartedAt:      time.Now(),
-			inFlightChunks: make(map[string]struct{}),
-		}
-	}
-	e.uploadsMu.Unlock()
-
-	callback := func(remotePath string, encSize int64, done bool) {
-		e.uploadsMu.Lock()
-		if p, ok := e.uploads[fileID]; ok {
-			if done {
-				p.ChunksUploaded++
-				p.BytesDone += encSize
-				delete(p.inFlightChunks, remotePath)
-				if p.ChunksUploaded > p.TotalChunks {
-					p.TotalChunks = p.ChunksUploaded
-				}
-			} else {
-				p.inFlightChunks[remotePath] = struct{}{}
-			}
-		}
-		e.uploadsMu.Unlock()
-	}
-
-	metas, err := e.uploadChunks(r, fileID, fileSize, schedule, callback)
-	if err != nil {
-		return nil, err
-	}
-
-	// Correct total once we know the actual chunk count.
-	e.uploadsMu.Lock()
-	if p, ok := e.uploads[fileID]; ok {
-		p.TotalChunks = len(metas)
-	}
-	e.uploadsMu.Unlock()
-
-	return metas, nil
-}
-
-// UploadProgress returns a snapshot of all currently in-flight async uploads,
-// enriched with real-time transfer speed and in-flight byte counts from rclone.
-func (e *Engine) UploadProgress() []UploadProgressInfo {
-	var stats rclonerc.TransferProgress
-	if e.rc != nil {
-		stats = e.rc.TransferStats()
-	}
-
-	e.uploadsMu.RLock()
-	defer e.uploadsMu.RUnlock()
-
-	out := make([]UploadProgressInfo, 0, len(e.uploads))
-	for _, p := range e.uploads {
-		// Sum bytes of in-flight chunks from rclone transfer stats.
-		var inFlightBytes int64
-		for rp := range p.inFlightChunks {
-			// rclone transfer names use the destination remote path.
-			if b, ok := stats.Transferring[rp]; ok {
-				inFlightBytes += b
-			}
-		}
-		out = append(out, UploadProgressInfo{
-			VirtualPath:    p.VirtualPath,
-			TotalChunks:    p.TotalChunks,
-			ChunksUploaded: p.ChunksUploaded,
-			SizeBytes:      p.SizeBytes,
-			BytesDone:      p.BytesDone + inFlightBytes,
-			BytesTotal:     p.BytesTotal,
-			SpeedBPS:       stats.SpeedBytes,
-			StartedAt:      p.StartedAt,
-			Failed:         p.Failed,
-			Preparing:      p.Preparing,
-		})
-	}
-	return out
-}
-
-// removeUploadProgress removes the given file from the in-flight uploads map.
-func (e *Engine) removeUploadProgress(fileID string) {
-	e.uploadsMu.Lock()
-	delete(e.uploads, fileID)
-	e.uploadsMu.Unlock()
-}
-
-// RegisterQueuedUpload inserts a "Preparing" entry keyed by a path-based
-// placeholder so the UI shows immediate feedback.  SyncDir calls this at the
-// very start of upload() — before hashing or spooling.  WriteFileAsync later
-// adopts the entry by calling adoptQueuedUpload.
-// Returns the placeholder key (caller must pass it to UnregisterQueuedUpload
-// if the upload is abandoned before WriteFileAsync is reached).
-func (e *Engine) RegisterQueuedUpload(virtualPath string, size int64) string {
-	key := "queued:" + virtualPath
-	e.uploadsMu.Lock()
-	e.uploads[key] = &uploadProgress{
-		VirtualPath: virtualPath,
-		SizeBytes:   size,
-		StartedAt:   time.Now(),
-		Preparing:   true,
-	}
-	e.uploadsMu.Unlock()
-	return key
-}
-
-// UnregisterQueuedUpload removes a queued placeholder (e.g. when the upload is
-// skipped due to dedup or error before WriteFileAsync is called).
-func (e *Engine) UnregisterQueuedUpload(key string) {
-	e.uploadsMu.Lock()
-	delete(e.uploads, key)
-	e.uploadsMu.Unlock()
-}
-
-// adoptQueuedUpload moves the queued entry (if any) to the real fileID key,
-// keeping the original StartedAt timestamp so elapsed time is accurate.
-func (e *Engine) adoptQueuedUpload(virtualPath, fileID string, size int64) {
-	queueKey := "queued:" + virtualPath
-	e.uploadsMu.Lock()
-	if p, ok := e.uploads[queueKey]; ok {
-		// Re-key from placeholder to real fileID.
-		delete(e.uploads, queueKey)
-		p.SizeBytes = size // update in case stat changed
-		e.uploads[fileID] = p
-	} else {
-		// No queued entry (direct WriteFileAsync call, e.g. browser upload).
-		e.uploads[fileID] = &uploadProgress{
-			VirtualPath: virtualPath,
-			SizeBytes:   size,
-			StartedAt:   time.Now(),
-			Preparing:   true,
-		}
-	}
-	e.uploadsMu.Unlock()
-}
-
-// ResumeUploads re-queues any uploads that were interrupted by a prior daemon
-// restart. It reads pending file records from the DB, checks that the tmp file
-// still exists on disk, and hands each one back to WriteFileAsync.
-func (e *Engine) ResumeUploads() {
-	pending, err := e.db.GetPendingUploads()
-	if err != nil {
-		slog.Error("failed to query pending uploads", "error", err)
-		return
-	}
-	for _, f := range pending {
-		if f.TmpPath == nil {
-			slog.Warn("pending file has no tmp_path, removing", "path", f.VirtualPath)
-			e.db.DeleteFile(f.ID) //nolint:errcheck
-			continue
-		}
-		tmpPath := *f.TmpPath
-		if _, err := os.Stat(tmpPath); err != nil {
-			slog.Warn("tmp file missing for pending upload, removing record",
-				"path", f.VirtualPath, "tmpPath", tmpPath)
-			e.db.DeleteFile(f.ID) //nolint:errcheck
-			continue
-		}
-		tmpFile, err := os.Open(tmpPath)
-		if err != nil {
-			slog.Error("cannot open tmp file for pending upload",
-				"path", f.VirtualPath, "tmpPath", tmpPath, "error", err)
-			continue
-		}
-		slog.Info("resuming interrupted upload", "path", f.VirtualPath, "size", f.SizeBytes)
-		// WriteFileAsync takes ownership of tmpFile and tmpPath.
-		if err := e.WriteFileAsync(f.VirtualPath, tmpFile, tmpPath, f.SizeBytes); err != nil {
-			slog.Error("failed to resume upload", "path", f.VirtualPath, "error", err)
-			tmpFile.Close()
-		}
-	}
-}
-
-// ReadFile reads a file from the virtual filesystem, downloading and decrypting chunks.
-// Returns an error if the file is still uploading (upload_state='pending').
-// For large files, prefer ReadFileToTempFile to avoid holding the entire file in memory.
-func (e *Engine) ReadFile(virtualPath string) ([]byte, error) {
-	tmp, err := e.ReadFileToTempFile(virtualPath)
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		tmp.Close()
-		os.Remove(tmp.Name())
-	}()
-	return io.ReadAll(tmp)
-}
-
-// ReadFileToTempFile downloads a file to a temporary file, returning the open handle.
-// The caller must close the file and remove it when done:
-//
-//	defer func() { f.Close(); os.Remove(f.Name()) }()
-//
-// Each chunk is downloaded, decrypted, verified, and written to disk sequentially
-// so peak memory stays bounded to one chunk (~32–128 MB) regardless of file size.
-func (e *Engine) ReadFileToTempFile(virtualPath string) (*os.File, error) {
-	file, err := e.db.GetCompleteFileByPath(virtualPath)
-	if err != nil {
-		return nil, fmt.Errorf("looking up file: %w", err)
-	}
-	if file == nil {
-		if any, _ := e.db.GetFileByPath(virtualPath); any != nil {
-			return nil, fmt.Errorf("file upload in progress: %s", virtualPath)
-		}
-		return nil, fmt.Errorf("file not found: %s", virtualPath)
-	}
-
-	chunks, err := e.db.GetChunksForFile(file.ID)
-	if err != nil {
-		return nil, fmt.Errorf("getting chunks: %w", err)
-	}
-
-	// Validate chunk sequences are contiguous (0, 1, 2, ..., n-1).
-	for i, c := range chunks {
-		if c.Sequence != i {
-			return nil, fmt.Errorf("chunk sequence gap at index %d: expected seq %d, got %d for %s",
-				i, i, c.Sequence, virtualPath)
-		}
-	}
-
-	tmp, err := os.CreateTemp("", "pdrive-read-*")
-	if err != nil {
-		return nil, fmt.Errorf("creating temp file: %w", err)
-	}
-	abandon := func() {
-		tmp.Close()
-		os.Remove(tmp.Name())
-	}
-
-	fullHasher := sha256.New()
-
-	for _, chunk := range chunks {
-		locs, err := e.db.GetChunkLocations(chunk.ID)
-		if err != nil {
-			abandon()
-			return nil, fmt.Errorf("getting chunk locations: %w", err)
-		}
-		if len(locs) == 0 {
-			abandon()
-			return nil, fmt.Errorf("no locations for chunk %s", chunk.ID)
-		}
-
-		loc := locs[0]
-		provider, err := e.db.GetProvider(loc.ProviderID)
-		if err != nil || provider == nil {
-			abandon()
-			return nil, fmt.Errorf("getting provider for chunk %s: %w", chunk.ID, err)
-		}
-
-		rc, err := e.rc.GetFile(provider.RcloneRemote, loc.RemotePath)
-		if err != nil {
-			abandon()
-			return nil, fmt.Errorf("downloading chunk %d from %s: %w", chunk.Sequence, provider.DisplayName, err)
-		}
-
-		chunkHasher := sha256.New()
-		mw := io.MultiWriter(tmp, fullHasher, chunkHasher)
-
-		// Peek at the first 4 bytes to detect stream vs legacy format.
-		var header [4]byte
-		n, peekErr := io.ReadFull(rc, header[:])
-		if peekErr != nil && peekErr != io.ErrUnexpectedEOF {
-			rc.Close()
-			abandon()
-			return nil, fmt.Errorf("reading chunk %d header: %w", chunk.Sequence, peekErr)
-		}
-
-		if n == 4 && chunker.IsStreamFormat(header[:]) {
-			// Stream format: decrypt in 16 MB blocks — bounded memory.
-			combined := io.MultiReader(bytes.NewReader(header[:n]), rc)
-			if err := chunker.DecryptStream(e.encKey, combined, mw); err != nil {
-				rc.Close()
-				abandon()
-				return nil, fmt.Errorf("decrypting chunk %d: %w", chunk.Sequence, err)
-			}
-		} else {
-			// Legacy single-block format: read all, decrypt in memory.
-			rest, readErr := io.ReadAll(rc)
-			if readErr != nil {
-				rc.Close()
-				abandon()
-				return nil, fmt.Errorf("reading chunk %d: %w", chunk.Sequence, readErr)
-			}
-			encrypted := append(header[:n], rest...)
-			decrypted, err := chunker.Decrypt(e.encKey, encrypted)
-			if err != nil {
-				rc.Close()
-				abandon()
-				return nil, fmt.Errorf("decrypting chunk %d: %w", chunk.Sequence, err)
-			}
-			if _, err := mw.Write(decrypted); err != nil {
-				rc.Close()
-				abandon()
-				return nil, fmt.Errorf("writing chunk %d: %w", chunk.Sequence, err)
-			}
-		}
-		rc.Close()
-
-		if hex.EncodeToString(chunkHasher.Sum(nil)) != chunk.SHA256 {
-			abandon()
-			return nil, fmt.Errorf("chunk %d hash mismatch for %s", chunk.Sequence, virtualPath)
-		}
-	}
-
-	if hex.EncodeToString(fullHasher.Sum(nil)) != file.SHA256Full {
-		abandon()
-		return nil, fmt.Errorf("file hash mismatch for %s", virtualPath)
-	}
-
-	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
-		abandon()
-		return nil, err
-	}
-
-	slog.Info("file read", "path", virtualPath, "size", file.SizeBytes)
-	e.incCounter(&e.filesDownloaded, "files_downloaded", 1)
-	e.incCounter(&e.bytesDownloaded, "bytes_downloaded", file.SizeBytes)
-	return tmp, nil
-}
-
-// DeleteFile removes a file, its chunks from the cloud, and all metadata.
-// Cloud chunk cleanup happens in the background so the caller returns quickly.
-// Idempotent: returns nil if the file doesn't exist.
-func (e *Engine) DeleteFile(virtualPath string) error {
-	file, err := e.db.GetFileByPath(virtualPath)
-	if err != nil {
-		return fmt.Errorf("looking up file: %w", err)
-	}
-	if file == nil {
-		return nil // idempotent
-	}
-
-	// Collect chunk locations BEFORE deleting the DB record.
-	locs, _ := e.db.GetChunkLocationsForFile(file.ID)
-
-	// Delete DB record immediately (CASCADE removes chunks + locations).
-	if err := e.db.DeleteFile(file.ID); err != nil {
-		return fmt.Errorf("deleting file metadata: %w", err)
-	}
-
-	// Clean up cloud chunks in the background.
-	if len(locs) > 0 {
-		go e.deleteCloudChunks(locs)
-	}
-
-	slog.Info("file deleted", "path", virtualPath)
-	e.incCounter(&e.filesDeleted, "files_deleted", 1)
-	// Immediate backup — deletions are irreversible and must be synced ASAP.
-	go func() {
-		if err := e.BackupDB(); err != nil {
-			slog.Warn("post-delete backup failed", "error", err)
-		}
-	}()
-	return nil
-}
-
-// MkDir creates an explicit directory record.
 func (e *Engine) MkDir(dirPath string) error {
 	return e.db.CreateDirectory(dirPath)
-}
-
-// DeleteDir recursively deletes a directory: all files, cloud chunks, and directory records.
-// DB records are deleted immediately; cloud chunk cleanup runs in the background.
-func (e *Engine) DeleteDir(dirPath string) error {
-	files, err := e.db.GetFilesUnderDir(dirPath)
-	if err != nil {
-		return fmt.Errorf("listing files under %s: %w", dirPath, err)
-	}
-
-	// Collect all cloud chunk locations before deleting DB records.
-	var allLocs []metadata.ChunkLocation
-	for _, f := range files {
-		locs, _ := e.db.GetChunkLocationsForFile(f.ID)
-		allLocs = append(allLocs, locs...)
-		if err := e.db.DeleteFile(f.ID); err != nil {
-			return fmt.Errorf("deleting file record %s: %w", f.VirtualPath, err)
-		}
-	}
-	if err := e.db.DeleteDirectoriesUnder(dirPath); err != nil {
-		return fmt.Errorf("deleting directory records: %w", err)
-	}
-
-	// Clean up cloud chunks in the background.
-	if len(allLocs) > 0 {
-		go e.deleteCloudChunks(allLocs)
-	}
-
-	slog.Info("directory deleted", "path", dirPath)
-	// Immediate backup — deletions are irreversible and must be synced ASAP.
-	go func() {
-		if err := e.BackupDB(); err != nil {
-			slog.Warn("post-delete backup failed", "error", err)
-		}
-	}()
-	return nil
 }
 
 // RenameFile updates a file's virtual path in the metadata DB without touching
@@ -1398,39 +393,6 @@ func (e *Engine) RenameDir(oldPath, newPath string) error {
 	slog.Info("directory renamed", "old", oldPath, "new", newPath)
 	e.scheduleBackup()
 	return nil
-}
-
-// deleteCloudChunks removes chunks from cloud providers in the background.
-// Skips cloud objects that are still referenced by other files (dedup clones).
-// Failed deletions are persisted to DB for later retry.
-func (e *Engine) deleteCloudChunks(locs []metadata.ChunkLocation) {
-	if e.rc == nil {
-		return
-	}
-	for _, loc := range locs {
-		// Check if another chunk_location still references this cloud object
-		// (happens when content-hash dedup cloned the chunks).
-		if refCount, err := e.db.RemotePathRefCount(loc.RemotePath); err == nil && refCount > 0 {
-			slog.Debug("skipping shared cloud chunk", "remotePath", loc.RemotePath, "refs", refCount)
-			continue
-		}
-
-		// Rate-limit delete calls through the same token bucket as uploads
-		// to avoid monopolizing the provider's API quota during GC.
-		<-e.uploadTokens
-
-		provider, err := e.db.GetProvider(loc.ProviderID)
-		if err != nil || provider == nil {
-			slog.Warn("could not get provider for chunk cleanup", "providerID", loc.ProviderID)
-			continue
-		}
-		if err := e.rc.DeleteFile(provider.RcloneRemote, loc.RemotePath); err != nil {
-			slog.Warn("failed to delete chunk from provider, queuing for retry",
-				"chunk", loc.ChunkID, "provider", provider.DisplayName, "error", err)
-			e.db.InsertFailedDeletion(loc.ProviderID, loc.RemotePath, err.Error()) //nolint:errcheck
-		}
-	}
-	slog.Debug("cloud chunk cleanup done", "count", len(locs))
 }
 
 // Stat returns file metadata or nil if the file doesn't exist.
@@ -1483,6 +445,19 @@ func (e *Engine) StorageStatus() (StorageStatus, error) {
 	if err != nil {
 		providerBytes = map[string]int64{}
 	}
+	// Account for the metadata DB backup that pdrive stores on every provider
+	// (pdrive-meta/metadata.db = 16-byte header + raw DB file).
+	var metaSize int64
+	if e.dbPath != "" {
+		if info, err := os.Stat(e.dbPath); err == nil {
+			metaSize = info.Size() + 16 // backup header overhead
+		}
+	}
+	if metaSize > 0 {
+		for _, p := range providers {
+			providerBytes[p.ID] += metaSize
+		}
+	}
 	return StorageStatus{
 		TotalFiles:    totalFiles,
 		TotalBytes:    totalBytes,
@@ -1490,52 +465,6 @@ func (e *Engine) StorageStatus() (StorageStatus, error) {
 		ProviderBytes: providerBytes,
 	}, nil
 }
-
-// RetryFailedDeletions retries cloud chunk deletions that previously failed.
-// Called periodically by the daemon. Deletions that exceed maxRetries are abandoned.
-func (e *Engine) RetryFailedDeletions() {
-	const batchSize = 50
-	const maxRetries = 10
-
-	items, err := e.db.GetFailedDeletions(batchSize)
-	if err != nil || len(items) == 0 {
-		return
-	}
-
-	var retried, succeeded, abandoned int
-	for _, item := range items {
-		if item.RetryCount >= maxRetries {
-			slog.Warn("abandoning chunk deletion after max retries",
-				"remotePath", item.RemotePath, "retries", item.RetryCount)
-			e.db.DeleteFailedDeletion(item.ID) //nolint:errcheck
-			abandoned++
-			continue
-		}
-
-		provider, err := e.db.GetProvider(item.ProviderID)
-		if err != nil || provider == nil {
-			e.db.DeleteFailedDeletion(item.ID) //nolint:errcheck
-			abandoned++
-			continue
-		}
-
-		<-e.uploadTokens
-		if err := e.rc.DeleteFile(provider.RcloneRemote, item.RemotePath); err != nil {
-			e.db.IncrementFailedDeletionRetry(item.ID, err.Error()) //nolint:errcheck
-			retried++
-		} else {
-			e.db.DeleteFailedDeletion(item.ID) //nolint:errcheck
-			succeeded++
-		}
-	}
-
-	if retried+succeeded+abandoned > 0 {
-		slog.Info("failed deletion retry complete",
-			"succeeded", succeeded, "retried", retried, "abandoned", abandoned)
-	}
-}
-
-// SearchFiles returns all completed files matching a pattern under the given root.
 func (e *Engine) SearchFiles(root, pattern string) ([]metadata.File, error) {
 	return e.db.SearchFiles(root, pattern)
 }

@@ -82,6 +82,9 @@ func (f *fakeCloud) ListDir(remote, p string) ([]rclonerc.ListItem, error) {
 
 func (f *fakeCloud) Cleanup(remote string) error     { return nil }
 func (f *fakeCloud) Mkdir(remote, path string) error { return nil }
+func (f *fakeCloud) StreamGetFile(remote, p string) (io.ReadCloser, error) {
+	return f.GetFile(remote, p)
+}
 func (f *fakeCloud) TransferStats() rclonerc.TransferProgress {
 	return rclonerc.TransferProgress{}
 }
@@ -106,8 +109,7 @@ func newTestHandlerWithCloud(t *testing.T) (*browserHandler, *engine.Engine, *me
 
 	cloud := newFakeCloud()
 	b := broker.NewBroker(db, broker.PolicyPFRD, 0)
-	encKey := make([]byte, 32)
-	eng := engine.NewEngineWithCloud(db, dbPath, cloud, b, encKey)
+	eng := engine.NewEngineWithCloud(db, dbPath, cloud, b)
 	t.Cleanup(eng.Close)
 
 	h := &browserHandler{engine: eng, startTime: time.Now()}
@@ -131,8 +133,7 @@ func TestHealthEndpoint(t *testing.T) {
 	})
 
 	b := broker.NewBroker(db, broker.PolicyPFRD, 0)
-	encKey := make([]byte, 32)
-	eng := engine.NewEngineWithCloud(db, dbPath, nil, b, encKey)
+	eng := engine.NewEngineWithCloud(db, dbPath, nil, b)
 
 	h := &browserHandler{
 		engine:    eng,
@@ -187,8 +188,7 @@ func TestMetricsEndpoint(t *testing.T) {
 	})
 
 	b := broker.NewBroker(db, broker.PolicyPFRD, 0)
-	encKey := make([]byte, 32)
-	eng := engine.NewEngineWithCloud(db, dbPath, nil, b, encKey)
+	eng := engine.NewEngineWithCloud(db, dbPath, nil, b)
 
 	h := &browserHandler{
 		engine:    eng,
@@ -237,8 +237,7 @@ func TestLsEndpoint(t *testing.T) {
 	})
 
 	b := broker.NewBroker(db, broker.PolicyPFRD, 0)
-	encKey := make([]byte, 32)
-	eng := engine.NewEngineWithCloud(db, dbPath, nil, b, encKey)
+	eng := engine.NewEngineWithCloud(db, dbPath, nil, b)
 
 	h := &browserHandler{engine: eng, startTime: time.Now()}
 
@@ -292,8 +291,7 @@ func TestStatusEndpoint(t *testing.T) {
 	})
 
 	b := broker.NewBroker(db, broker.PolicyPFRD, 0)
-	encKey := make([]byte, 32)
-	eng := engine.NewEngineWithCloud(db, dbPath, nil, b, encKey)
+	eng := engine.NewEngineWithCloud(db, dbPath, nil, b)
 
 	h := &browserHandler{engine: eng, startTime: time.Now()}
 
@@ -342,8 +340,7 @@ func TestPinEndpoint_NoSyncDir(t *testing.T) {
 	t.Cleanup(func() { db.Close() })
 
 	b := broker.NewBroker(db, broker.PolicyPFRD, 0)
-	encKey := make([]byte, 32)
-	eng := engine.NewEngineWithCloud(db, dbPath, nil, b, encKey)
+	eng := engine.NewEngineWithCloud(db, dbPath, nil, b)
 
 	h := &browserHandler{engine: eng, syncDir: nil, startTime: time.Now()}
 
@@ -374,8 +371,7 @@ func newTestHandler(t *testing.T) (*browserHandler, *metadata.DB) {
 	})
 
 	b := broker.NewBroker(db, broker.PolicyPFRD, 0)
-	encKey := make([]byte, 32)
-	eng := engine.NewEngineWithCloud(db, dbPath, nil, b, encKey)
+	eng := engine.NewEngineWithCloud(db, dbPath, nil, b)
 	t.Cleanup(eng.Close)
 
 	h := &browserHandler{engine: eng, startTime: time.Now()}
@@ -1041,12 +1037,14 @@ func TestUnpinEndpoint_UnpinFileError(t *testing.T) {
 func TestDownloadEndpoint_ReadError(t *testing.T) {
 	h, db := newTestHandler(t)
 	seedFile(t, db, "f-dl1", "/file.bin", 10)
-	// Stat succeeds but ReadFileToTempFile fails (no chunks / no cloud).
+	// Stat succeeds but StreamFile fails (no chunks / no cloud).
+	// With streaming, headers (200) are sent before StreamFile runs,
+	// so we can only verify the response started.
 	req := httptest.NewRequest("GET", "/api/download?path=/file.bin", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusInternalServerError {
-		t.Errorf("expected 500, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200 (headers already sent), got %d", rec.Code)
 	}
 }
 
@@ -1329,8 +1327,7 @@ func TestHealthEndpoint_NoDB(t *testing.T) {
 	}
 
 	b := broker.NewBroker(db, broker.PolicyPFRD, 0)
-	encKey := make([]byte, 32)
-	eng := engine.NewEngineWithCloud(db, dbPath, nil, b, encKey)
+	eng := engine.NewEngineWithCloud(db, dbPath, nil, b)
 
 	h := &browserHandler{engine: eng, startTime: time.Now()}
 
@@ -3385,9 +3382,8 @@ func TestPathTraversal_Delete(t *testing.T) {
 	}
 	defer db.Close()
 
-	encKey := bytes.Repeat([]byte("K"), 32)
 	b := broker.NewBroker(db, broker.PolicyPFRD, 0)
-	eng := engine.NewEngineWithCloud(db, dbPath, nil, b, encKey)
+	eng := engine.NewEngineWithCloud(db, dbPath, nil, b)
 	defer eng.Close()
 
 	h := &browserHandler{engine: eng, startTime: time.Now()}
@@ -3416,7 +3412,6 @@ func TestPathTraversal_Upload(t *testing.T) {
 	defer db.Close()
 
 	cloud := newFakeCloud()
-	encKey := bytes.Repeat([]byte("K"), 32)
 	b := broker.NewBroker(db, broker.PolicyPFRD, 0)
 	total := int64(100 << 30)
 	free := int64(50 << 30)
@@ -3424,7 +3419,7 @@ func TestPathTraversal_Upload(t *testing.T) {
 		ID: "test-remote:", Type: "test", DisplayName: "Test",
 		RcloneRemote: "test-remote:", QuotaTotalBytes: &total, QuotaFreeBytes: &free,
 	}) //nolint:errcheck
-	eng := engine.NewEngineWithCloud(db, dbPath, cloud, b, encKey)
+	eng := engine.NewEngineWithCloud(db, dbPath, cloud, b)
 	defer eng.Close()
 
 	h := &browserHandler{engine: eng, startTime: time.Now()}
@@ -3878,5 +3873,129 @@ func TestServeBrowser_FileDownload(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "important") {
 		t.Errorf("expected file content, got %s", rec.Body.String())
+	}
+}
+
+// ── serveAPIDownload tests ──────────────────────────────────────────────────
+
+func TestServeAPIDownload_Success(t *testing.T) {
+	h, eng, _ := newTestHandlerWithCloud(t)
+	content := []byte("download-me-please")
+	eng.WriteFile("/api-dl.txt", content)
+
+	req := httptest.NewRequest("GET", "/api/download?path=/api-dl.txt", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !bytes.Equal(rec.Body.Bytes(), content) {
+		t.Errorf("body mismatch: got %q, want %q", rec.Body.String(), string(content))
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/octet-stream" {
+		t.Errorf("Content-Type = %q, want application/octet-stream", ct)
+	}
+	if cd := rec.Header().Get("Content-Disposition"); !strings.Contains(cd, "api-dl.txt") {
+		t.Errorf("Content-Disposition = %q, want filename containing api-dl.txt", cd)
+	}
+	if cl := rec.Header().Get("Content-Length"); cl != fmt.Sprintf("%d", len(content)) {
+		t.Errorf("Content-Length = %q, want %d", cl, len(content))
+	}
+}
+
+func TestServeAPIDownload_LargeFile(t *testing.T) {
+	h, eng, _ := newTestHandlerWithCloud(t)
+	eng.SetChunkSize(50) // Tiny chunks for multi-chunk test.
+	content := bytes.Repeat([]byte("Z"), 200)
+	eng.WriteFileStream("/big-dl.bin", bytes.NewReader(content), int64(len(content)))
+
+	req := httptest.NewRequest("GET", "/api/download?path=/big-dl.bin", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if !bytes.Equal(rec.Body.Bytes(), content) {
+		t.Errorf("body length mismatch: got %d, want %d", rec.Body.Len(), len(content))
+	}
+}
+
+func TestServeAPIDownload_NoPath(t *testing.T) {
+	h, _, _ := newTestHandlerWithCloud(t)
+
+	req := httptest.NewRequest("GET", "/api/download?path=/", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rec.Code)
+	}
+}
+
+func TestServeAPIDownload_EmptyPath(t *testing.T) {
+	h, _, _ := newTestHandlerWithCloud(t)
+
+	req := httptest.NewRequest("GET", "/api/download", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for empty path, got %d", rec.Code)
+	}
+}
+
+func TestServeAPIDownload_FileNotFound(t *testing.T) {
+	h, _, _ := newTestHandlerWithCloud(t)
+
+	req := httptest.NewRequest("GET", "/api/download?path=/nonexistent.txt", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", rec.Code)
+	}
+}
+
+func TestServeAPIDownload_HeadersBeforeBody(t *testing.T) {
+	h, eng, _ := newTestHandlerWithCloud(t)
+	content := []byte("check-headers")
+	eng.WriteFile("/headers.txt", content)
+
+	req := httptest.NewRequest("GET", "/api/download?path=/headers.txt", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	// Verify attachment filename uses base name only.
+	cd := rec.Header().Get("Content-Disposition")
+	if !strings.Contains(cd, `filename="headers.txt"`) {
+		t.Errorf("Content-Disposition = %q, want filename=headers.txt", cd)
+	}
+}
+
+func TestServeAPIDownload_NestedPath(t *testing.T) {
+	h, eng, _ := newTestHandlerWithCloud(t)
+	content := []byte("nested-file-content")
+	eng.WriteFile("/docs/reports/2024/summary.pdf", content)
+
+	req := httptest.NewRequest("GET", "/api/download?path=/docs/reports/2024/summary.pdf", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if !bytes.Equal(rec.Body.Bytes(), content) {
+		t.Errorf("content mismatch")
+	}
+	// Filename in header should be just the base name.
+	cd := rec.Header().Get("Content-Disposition")
+	if !strings.Contains(cd, `filename="summary.pdf"`) {
+		t.Errorf("Content-Disposition = %q, want summary.pdf", cd)
 	}
 }

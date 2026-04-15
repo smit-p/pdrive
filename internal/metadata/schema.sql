@@ -27,15 +27,18 @@ CREATE TABLE IF NOT EXISTS chunks (
     sequence    INTEGER NOT NULL,
     size_bytes  INTEGER NOT NULL,
     sha256      TEXT NOT NULL,
-    encrypted_size INTEGER NOT NULL
+    encrypted_size INTEGER NOT NULL,
+    data_shards    INTEGER NOT NULL DEFAULT 1,
+    parity_shards  INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS chunk_locations (
     chunk_id    TEXT NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
+    shard_index INTEGER NOT NULL DEFAULT 0,
     provider_id TEXT NOT NULL REFERENCES providers(id),
     remote_path TEXT NOT NULL,
     upload_confirmed_at INTEGER,
-    PRIMARY KEY (chunk_id, provider_id)
+    PRIMARY KEY (chunk_id, shard_index)
 );
 
 CREATE TABLE IF NOT EXISTS directories (

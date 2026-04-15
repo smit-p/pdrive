@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/smit-p/pdrive/internal/broker"
-	"github.com/smit-p/pdrive/internal/chunker"
 	"github.com/smit-p/pdrive/internal/engine"
 	"github.com/smit-p/pdrive/internal/metadata"
 )
@@ -42,8 +41,7 @@ func newDaemonWithEngine(t *testing.T) (*Daemon, *engine.Engine, *metadata.DB) {
 
 	cloud := newFakeCloud()
 	b := broker.NewBroker(db, broker.PolicyPFRD, 0)
-	encKey := make([]byte, 32)
-	eng := engine.NewEngineWithCloud(db, dbPath, cloud, b, encKey)
+	eng := engine.NewEngineWithCloud(db, dbPath, cloud, b)
 	t.Cleanup(eng.Close)
 
 	d := &Daemon{
@@ -827,65 +825,6 @@ func TestServeHTTP_NoDavHandler_NilFallback(t *testing.T) {
 	}
 }
 
-// ── recovery — edge cases ───────────────────────────────────────────────────
-
-func TestResolveCloudSalt_LocalSaltAlreadyExists(t *testing.T) {
-	srv := newRecoveryRCServer(t, recoveryRCServer{
-		remotes: map[string]string{"gdrive": "drive"},
-		files:   map[string][]byte{},
-	})
-	defer srv.Close()
-
-	d, _ := newRecoveryDaemon(t, srv)
-
-	// Write a local salt file first.
-	saltPath := filepath.Join(d.config.ConfigDir, "enc.salt")
-	os.WriteFile(saltPath, make([]byte, 16), 0600)
-
-	// resolveCloudSalt should still work (generates fresh since no cloud salt).
-	if err := d.resolveCloudSalt(); err != nil {
-		t.Fatalf("resolveCloudSalt() error: %v", err)
-	}
-	if len(d.config.EncKey) != 32 {
-		t.Errorf("EncKey length = %d, want 32", len(d.config.EncKey))
-	}
-}
-
-func TestTryDownloadLegacy_EmptyFile(t *testing.T) {
-	srv := newRecoveryRCServer(t, recoveryRCServer{
-		remotes: map[string]string{"gdrive": "drive"},
-		files: map[string][]byte{
-			"gdrive:pdrive-meta/metadata.db": {}, // empty file
-		},
-	})
-	defer srv.Close()
-
-	d, _ := newRecoveryDaemon(t, srv)
-
-	_, ok := d.tryDownloadLegacy("gdrive")
-	if ok {
-		t.Error("tryDownloadLegacy should return false for empty file")
-	}
-}
-
-func TestTryDownloadEncrypted_EmptyFile(t *testing.T) {
-	srv := newRecoveryRCServer(t, recoveryRCServer{
-		remotes: map[string]string{"gdrive": "drive"},
-		files: map[string][]byte{
-			"gdrive:pdrive-meta/metadata.db.enc": {}, // empty
-		},
-	})
-	defer srv.Close()
-
-	d, _ := newRecoveryDaemon(t, srv)
-	d.config.EncKey = make([]byte, 32)
-
-	_, _, ok := d.tryDownloadEncrypted("gdrive")
-	if ok {
-		t.Error("tryDownloadEncrypted should return false for empty blob")
-	}
-}
-
 // ── rclone manager — monitor health loop ────────────────────────────────────
 // The monitor function polls every 10s which is too slow for unit tests.
 // Test the restart-on-failure path by calling monitor with a very short context
@@ -1186,22 +1125,6 @@ func TestPurgeJunkFiles_ListAllFilesError(t *testing.T) {
 
 // ── recovery.go — error paths ───────────────────────────────────────────────
 
-func TestResolveCloudSalt_ListRemotesError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "rclone down", http.StatusInternalServerError)
-	}))
-	defer srv.Close()
-
-	d, _ := newRecoveryDaemon(t, srv)
-	// Should still work (generates fresh salt since no cloud salt found).
-	if err := d.resolveCloudSalt(); err != nil {
-		t.Fatalf("resolveCloudSalt should succeed with fresh salt, got: %v", err)
-	}
-	if len(d.config.EncKey) != 32 {
-		t.Errorf("EncKey length = %d, want 32", len(d.config.EncKey))
-	}
-}
-
 func TestTryRestoreDB_ListRemotesError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "rclone down", http.StatusInternalServerError)
@@ -1217,33 +1140,18 @@ func TestTryRestoreDB_ListRemotesError(t *testing.T) {
 }
 
 func TestTryRestoreDB_WriteError(t *testing.T) {
-	// Create a valid encrypted backup on the fake cloud.
-	salt, _ := chunker.GenerateSalt()
-	key := makeTestEncKey("test-password", salt)
-
-	// Create a minimal valid SQLite DB.
-	tmpDir := os.TempDir()
-	tmpDB := filepath.Join(tmpDir, "minimal-test.db")
-	mdb, err := metadata.Open(tmpDB)
-	if err != nil {
-		t.Fatal(err)
-	}
-	mdb.Close()
-	dbData, _ := os.ReadFile(tmpDB)
-	os.Remove(tmpDB)
-	payload := makeTestBackupPayload(t, key, dbData)
+	dbData := []byte("test db content")
+	payload := makeTestBackupPayload(t, dbData)
 
 	srv := newRecoveryRCServer(t, recoveryRCServer{
 		remotes: map[string]string{"gdrive": "drive"},
 		files: map[string][]byte{
-			"gdrive:pdrive-meta/enc.salt":        salt,
-			"gdrive:pdrive-meta/metadata.db.enc": payload,
+			"gdrive:pdrive-meta/metadata.db": payload,
 		},
 	})
 	defer srv.Close()
 
 	d, _ := newRecoveryDaemon(t, srv)
-	d.config.EncKey = key
 
 	// Try to write to a read-only path so os.WriteFile fails.
 	badPath := "/dev/null/impossible/restored.db"
@@ -1270,26 +1178,6 @@ func TestValidateRestoredDB_QueryError(t *testing.T) {
 	}
 }
 
-func TestResolveCloudSalt_ReadError(t *testing.T) {
-	// Salt on cloud is wrong size (triggers readErr || len(salt) != SaltSize).
-	srv := newRecoveryRCServer(t, recoveryRCServer{
-		remotes: map[string]string{"gdrive": "drive"},
-		files: map[string][]byte{
-			"gdrive:pdrive-meta/enc.salt": []byte("too-short"),
-		},
-	})
-	defer srv.Close()
-
-	d, _ := newRecoveryDaemon(t, srv)
-	// Should fall through to generating a fresh salt.
-	if err := d.resolveCloudSalt(); err != nil {
-		t.Fatalf("resolveCloudSalt should generate fresh salt, got: %v", err)
-	}
-	if len(d.config.EncKey) != 32 {
-		t.Errorf("EncKey length = %d, want 32", len(d.config.EncKey))
-	}
-}
-
 // ── rclone_manager.go — monitor restart path ────────────────────────────────
 
 func TestRcloneManager_MonitorContext(t *testing.T) {
@@ -1306,47 +1194,6 @@ func TestRcloneManager_StartSpawnFailure(t *testing.T) {
 	err := rm.Start(context.Background())
 	if err == nil {
 		t.Error("Start with bad binary should error")
-	}
-}
-
-func TestResolveCloudSalt_MkdirAllError(t *testing.T) {
-	// Server with no salt on cloud, so resolveCloudSalt tries to generate fresh.
-	srv := newRecoveryRCServer(t, recoveryRCServer{
-		remotes: map[string]string{"gdrive": "drive"},
-		files:   map[string][]byte{},
-	})
-	defer srv.Close()
-
-	d, _ := newRecoveryDaemon(t, srv)
-	// Set configDir to an impossible path so MkdirAll fails.
-	d.config.ConfigDir = "/dev/null/impossible"
-	err := d.resolveCloudSalt()
-	if err == nil {
-		t.Error("resolveCloudSalt should fail when configDir is unwritable")
-	}
-	if !strings.Contains(err.Error(), "creating config dir") {
-		t.Errorf("unexpected error: %v", err)
-	}
-}
-
-func TestResolveCloudSalt_WriteFileError(t *testing.T) {
-	srv := newRecoveryRCServer(t, recoveryRCServer{
-		remotes: map[string]string{"gdrive": "drive"},
-		files:   map[string][]byte{},
-	})
-	defer srv.Close()
-
-	d, _ := newRecoveryDaemon(t, srv)
-	// ConfigDir exists (from TempDir) but make the salt file path fail by
-	// creating a directory where the file should be.
-	saltDir := filepath.Join(d.config.ConfigDir, "enc.salt")
-	os.MkdirAll(saltDir, 0755) // make enc.salt a directory so WriteFile fails
-	err := d.resolveCloudSalt()
-	if err == nil {
-		t.Error("resolveCloudSalt should fail when salt file path is a directory")
-	}
-	if !strings.Contains(err.Error(), "saving salt") {
-		t.Errorf("unexpected error: %v", err)
 	}
 }
 
@@ -1418,31 +1265,6 @@ func TestValidateRestoredDB_QueryFailure(t *testing.T) {
 	result := d.validateRestoredDB()
 	if result {
 		t.Error("validateRestoredDB should return false when JOIN query fails")
-	}
-}
-
-func TestResolveCloudSalt_CloudSaltWriteError(t *testing.T) {
-	// Put a valid salt on cloud.
-	salt, _ := chunker.GenerateSalt()
-	srv := newRecoveryRCServer(t, recoveryRCServer{
-		remotes: map[string]string{"gdrive": "drive"},
-		files: map[string][]byte{
-			"gdrive:pdrive-meta/enc.salt": salt,
-		},
-	})
-	defer srv.Close()
-
-	d, _ := newRecoveryDaemon(t, srv)
-	// Make the salt file path unwritable by creating a directory there.
-	saltDir := filepath.Join(d.config.ConfigDir, "enc.salt")
-	os.MkdirAll(saltDir, 0755)
-
-	// Should still succeed (writes fail but the key is derived).
-	if err := d.resolveCloudSalt(); err != nil {
-		t.Fatalf("resolveCloudSalt should succeed despite write error, got: %v", err)
-	}
-	if len(d.config.EncKey) != 32 {
-		t.Errorf("EncKey length = %d, want 32", len(d.config.EncKey))
 	}
 }
 

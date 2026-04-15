@@ -34,11 +34,14 @@ type ChunkRecord struct {
 	SizeBytes     int
 	SHA256        string
 	EncryptedSize int
+	DataShards    int
+	ParityShards  int
 }
 
 // ChunkLocation represents a chunk_locations row.
 type ChunkLocation struct {
 	ChunkID           string
+	ShardIndex        int
 	ProviderID        string
 	RemotePath        string
 	UploadConfirmedAt *int64
@@ -126,11 +129,16 @@ func (db *DB) GetPendingUploads() ([]File, error) {
 }
 
 // InsertChunk inserts a new chunk record.
+// DataShards defaults to 1 when unset (zero).
 func (db *DB) InsertChunk(c *ChunkRecord) error {
+	ds := c.DataShards
+	if ds == 0 {
+		ds = 1
+	}
 	_, err := db.conn.Exec(
-		`INSERT INTO chunks (id, file_id, sequence, size_bytes, sha256, encrypted_size)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		c.ID, c.FileID, c.Sequence, c.SizeBytes, c.SHA256, c.EncryptedSize,
+		`INSERT INTO chunks (id, file_id, sequence, size_bytes, sha256, encrypted_size, data_shards, parity_shards)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		c.ID, c.FileID, c.Sequence, c.SizeBytes, c.SHA256, c.EncryptedSize, ds, c.ParityShards,
 	)
 	return err
 }
@@ -138,26 +146,26 @@ func (db *DB) InsertChunk(c *ChunkRecord) error {
 // InsertChunkLocation inserts a new chunk location record.
 func (db *DB) InsertChunkLocation(cl *ChunkLocation) error {
 	_, err := db.conn.Exec(
-		`INSERT INTO chunk_locations (chunk_id, provider_id, remote_path, upload_confirmed_at)
-		 VALUES (?, ?, ?, ?)`,
-		cl.ChunkID, cl.ProviderID, cl.RemotePath, cl.UploadConfirmedAt,
+		`INSERT INTO chunk_locations (chunk_id, shard_index, provider_id, remote_path, upload_confirmed_at)
+		 VALUES (?, ?, ?, ?, ?)`,
+		cl.ChunkID, cl.ShardIndex, cl.ProviderID, cl.RemotePath, cl.UploadConfirmedAt,
 	)
 	return err
 }
 
 // ConfirmUpload sets the upload_confirmed_at timestamp for a chunk location.
-func (db *DB) ConfirmUpload(chunkID, providerID string) error {
+func (db *DB) ConfirmUpload(chunkID string, shardIndex int) error {
 	now := time.Now().Unix()
 	res, err := db.conn.Exec(
-		`UPDATE chunk_locations SET upload_confirmed_at = ? WHERE chunk_id = ? AND provider_id = ?`,
-		now, chunkID, providerID,
+		`UPDATE chunk_locations SET upload_confirmed_at = ? WHERE chunk_id = ? AND shard_index = ?`,
+		now, chunkID, shardIndex,
 	)
 	if err != nil {
 		return err
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
-		return fmt.Errorf("chunk location not found: chunk=%s provider=%s", chunkID, providerID)
+		return fmt.Errorf("chunk location not found: chunk=%s shard=%d", chunkID, shardIndex)
 	}
 	return nil
 }
@@ -208,7 +216,7 @@ func (db *DB) GetCompleteFileByHash(sha256Full string) (*File, error) {
 // GetChunksForFile returns all chunks for a file, ordered by sequence.
 func (db *DB) GetChunksForFile(fileID string) ([]ChunkRecord, error) {
 	rows, err := db.conn.Query(
-		`SELECT id, file_id, sequence, size_bytes, sha256, encrypted_size
+		`SELECT id, file_id, sequence, size_bytes, sha256, encrypted_size, data_shards, parity_shards
 		 FROM chunks WHERE file_id = ? ORDER BY sequence`, fileID,
 	)
 	if err != nil {
@@ -219,7 +227,7 @@ func (db *DB) GetChunksForFile(fileID string) ([]ChunkRecord, error) {
 	var chunks []ChunkRecord
 	for rows.Next() {
 		var c ChunkRecord
-		if err := rows.Scan(&c.ID, &c.FileID, &c.Sequence, &c.SizeBytes, &c.SHA256, &c.EncryptedSize); err != nil {
+		if err := rows.Scan(&c.ID, &c.FileID, &c.Sequence, &c.SizeBytes, &c.SHA256, &c.EncryptedSize, &c.DataShards, &c.ParityShards); err != nil {
 			return nil, err
 		}
 		chunks = append(chunks, c)
@@ -230,8 +238,8 @@ func (db *DB) GetChunksForFile(fileID string) ([]ChunkRecord, error) {
 // GetChunkLocations returns all locations for a given chunk.
 func (db *DB) GetChunkLocations(chunkID string) ([]ChunkLocation, error) {
 	rows, err := db.conn.Query(
-		`SELECT chunk_id, provider_id, remote_path, upload_confirmed_at
-		 FROM chunk_locations WHERE chunk_id = ?`, chunkID,
+		`SELECT chunk_id, shard_index, provider_id, remote_path, upload_confirmed_at
+		 FROM chunk_locations WHERE chunk_id = ? ORDER BY shard_index`, chunkID,
 	)
 	if err != nil {
 		return nil, err
@@ -241,7 +249,7 @@ func (db *DB) GetChunkLocations(chunkID string) ([]ChunkLocation, error) {
 	var locs []ChunkLocation
 	for rows.Next() {
 		var cl ChunkLocation
-		if err := rows.Scan(&cl.ChunkID, &cl.ProviderID, &cl.RemotePath, &cl.UploadConfirmedAt); err != nil {
+		if err := rows.Scan(&cl.ChunkID, &cl.ShardIndex, &cl.ProviderID, &cl.RemotePath, &cl.UploadConfirmedAt); err != nil {
 			return nil, err
 		}
 		locs = append(locs, cl)
@@ -454,11 +462,11 @@ func (db *DB) CreditProviderFreeBytes(providerID string, delta int64) error {
 // GetChunkLocationsForFile returns all chunk locations for every chunk belonging to a file.
 func (db *DB) GetChunkLocationsForFile(fileID string) ([]ChunkLocation, error) {
 	rows, err := db.conn.Query(
-		`SELECT cl.chunk_id, cl.provider_id, cl.remote_path, cl.upload_confirmed_at
+		`SELECT cl.chunk_id, cl.shard_index, cl.provider_id, cl.remote_path, cl.upload_confirmed_at
 		 FROM chunk_locations cl
 		 JOIN chunks c ON c.id = cl.chunk_id
 		 WHERE c.file_id = ?
-		 ORDER BY c.sequence`, fileID,
+		 ORDER BY c.sequence, cl.shard_index`, fileID,
 	)
 	if err != nil {
 		return nil, err
@@ -468,7 +476,7 @@ func (db *DB) GetChunkLocationsForFile(fileID string) ([]ChunkLocation, error) {
 	var locs []ChunkLocation
 	for rows.Next() {
 		var cl ChunkLocation
-		if err := rows.Scan(&cl.ChunkID, &cl.ProviderID, &cl.RemotePath, &cl.UploadConfirmedAt); err != nil {
+		if err := rows.Scan(&cl.ChunkID, &cl.ShardIndex, &cl.ProviderID, &cl.RemotePath, &cl.UploadConfirmedAt); err != nil {
 			return nil, err
 		}
 		locs = append(locs, cl)
@@ -480,7 +488,7 @@ func (db *DB) GetChunkLocationsForFile(fileID string) ([]ChunkLocation, error) {
 // Used by the orphan GC to build the set of cloud objects that should exist.
 func (db *DB) GetAllChunkLocations() ([]ChunkLocation, error) {
 	rows, err := db.conn.Query(
-		`SELECT chunk_id, provider_id, remote_path, upload_confirmed_at FROM chunk_locations`)
+		`SELECT chunk_id, shard_index, provider_id, remote_path, upload_confirmed_at FROM chunk_locations`)
 	if err != nil {
 		return nil, err
 	}
@@ -489,7 +497,7 @@ func (db *DB) GetAllChunkLocations() ([]ChunkLocation, error) {
 	var locs []ChunkLocation
 	for rows.Next() {
 		var cl ChunkLocation
-		if err := rows.Scan(&cl.ChunkID, &cl.ProviderID, &cl.RemotePath, &cl.UploadConfirmedAt); err != nil {
+		if err := rows.Scan(&cl.ChunkID, &cl.ShardIndex, &cl.ProviderID, &cl.RemotePath, &cl.UploadConfirmedAt); err != nil {
 			return nil, err
 		}
 		locs = append(locs, cl)
@@ -712,7 +720,7 @@ func (db *DB) IncrementFailedDeletionRetry(id int64, lastError string) error {
 // Used by GC to avoid loading the entire chunk_locations table into memory at once.
 func (db *DB) GetChunkLocationsByProvider(providerID string) ([]ChunkLocation, error) {
 	rows, err := db.conn.Query(
-		`SELECT chunk_id, provider_id, remote_path, upload_confirmed_at
+		`SELECT chunk_id, shard_index, provider_id, remote_path, upload_confirmed_at
 		 FROM chunk_locations WHERE provider_id = ?`, providerID)
 	if err != nil {
 		return nil, err
@@ -722,7 +730,7 @@ func (db *DB) GetChunkLocationsByProvider(providerID string) ([]ChunkLocation, e
 	var locs []ChunkLocation
 	for rows.Next() {
 		var cl ChunkLocation
-		if err := rows.Scan(&cl.ChunkID, &cl.ProviderID, &cl.RemotePath, &cl.UploadConfirmedAt); err != nil {
+		if err := rows.Scan(&cl.ChunkID, &cl.ShardIndex, &cl.ProviderID, &cl.RemotePath, &cl.UploadConfirmedAt); err != nil {
 			return nil, err
 		}
 		locs = append(locs, cl)

@@ -81,6 +81,9 @@ func (f *fakeCloud) ListDir(remote, p string) ([]rclonerc.ListItem, error) {
 
 func (f *fakeCloud) Cleanup(remote string) error     { return nil }
 func (f *fakeCloud) Mkdir(remote, path string) error { return nil }
+func (f *fakeCloud) StreamGetFile(remote, p string) (io.ReadCloser, error) {
+	return f.GetFile(remote, p)
+}
 func (f *fakeCloud) TransferStats() rclonerc.TransferProgress {
 	return rclonerc.TransferProgress{}
 }
@@ -101,8 +104,7 @@ func newTestEngine(t *testing.T) (*engine.Engine, *fakeCloud, string) {
 	})
 	cloud := newFakeCloud()
 	b := broker.NewBroker(db, broker.PolicyPFRD, 0)
-	encKey := make([]byte, 32)
-	eng := engine.NewEngineWithCloud(db, dbPath, cloud, b, encKey)
+	eng := engine.NewEngineWithCloud(db, dbPath, cloud, b)
 	t.Cleanup(eng.Close)
 	spoolDir := filepath.Join(dir, "spool")
 	os.MkdirAll(spoolDir, 0755)

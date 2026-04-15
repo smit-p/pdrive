@@ -84,6 +84,7 @@ func (rm *RcloneManager) spawn(ctx context.Context) error {
 		"rcd",
 		"--rc-addr", rm.addr,
 		"--rc-no-auth",
+		"--rc-serve",
 		"--config", rm.configPath,
 		"--drive-use-trash=false",
 		"--drive-chunk-size=256M",

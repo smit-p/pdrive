@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -18,7 +17,6 @@ import (
 
 	"github.com/smit-p/pdrive/internal/daemon"
 	"github.com/smit-p/pdrive/internal/fusefs"
-	"golang.org/x/term"
 )
 
 // Set by goreleaser ldflags.
@@ -110,13 +108,6 @@ func main() {
 		return
 	}
 
-	// Resolve encryption key.
-	encKey, deferredPassword, err := resolveEncKey(cfg.ConfigDir, cfg.EncKeyHex, cfg.Password, readPassword)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-
 	// Find rclone binary.
 	rcloneBin, err := findRcloneBin(cfg.RcloneBin, cfg.ConfigDir)
 	if err != nil {
@@ -136,10 +127,11 @@ func main() {
 	remotes := parseRemotes(cfg.Remotes)
 
 	dcfg := buildDaemonConfig(cfg.ConfigDir, rcloneBin, cfg.RcloneAddr, cfg.WebDAVAddr, cfg.SyncDir,
-		encKey, deferredPassword, cfg.BrokerPolicy,
+		cfg.BrokerPolicy,
 		cfg.MinFreeSpace, cfg.SkipRestore,
 		cfg.ChunkSize, cfg.RateLimit, remotes,
-		cfg.Backend, cfg.MountPoint)
+		cfg.Erasure, cfg.Backend, cfg.MountPoint)
+	dcfg.LogHandler = cfg.LogHandler
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -263,24 +255,6 @@ func showRecentLogErrors(logPath string) {
 			fmt.Fprintf(os.Stderr, "  %s\n", line)
 		}
 	}
-}
-
-// readPassword reads a password from stdin. Hides input when stdin is a terminal.
-func readPassword() (string, error) {
-	fd := int(os.Stdin.Fd())
-	if term.IsTerminal(fd) {
-		pw, err := term.ReadPassword(fd)
-		return string(pw), err
-	}
-	// Non-interactive (pipe/redirect): read a line.
-	scanner := bufio.NewScanner(os.Stdin)
-	if scanner.Scan() {
-		return strings.TrimSpace(scanner.Text()), nil
-	}
-	if err := scanner.Err(); err != nil {
-		return "", err
-	}
-	return "", io.EOF
 }
 
 // runPinUnpin calls the running daemon's /api/pin or /api/unpin endpoint.

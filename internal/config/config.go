@@ -24,6 +24,9 @@ type File struct {
 	Debug        bool   `toml:"debug"`
 	Remotes      string `toml:"remotes"` // comma-separated
 
+	// Erasure coding (Reed-Solomon). Format: "D+P" e.g. "3+1".
+	Erasure string `toml:"erasure"`
+
 	// FUSE mount settings.
 	MountBackend string `toml:"mount_backend"` // "webdav" or "fuse"
 	MountPoint   string `toml:"mount_point"`

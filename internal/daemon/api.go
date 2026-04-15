@@ -6,15 +6,18 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"net/http"
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/smit-p/pdrive/internal/engine"
 	"github.com/smit-p/pdrive/internal/junkfile"
+	"github.com/smit-p/pdrive/internal/logutil"
 	"github.com/smit-p/pdrive/internal/metadata"
 	"github.com/smit-p/pdrive/internal/vfs"
 )
@@ -74,8 +77,9 @@ type browserHandler struct {
 		ListRemotes() ([]string, error)
 		GetRemoteType(string) (string, error)
 	}
-	activeRemotes   []string // from --remotes flag; empty = all
-	resyncProviders func()   // triggers immediate provider re-sync
+	activeRemotes   []string             // from --remotes flag; empty = all
+	resyncProviders func()               // triggers immediate provider re-sync
+	logHandler      *logutil.RingHandler // live log ring buffer (nil safe)
 }
 
 // cleanPath sanitises a user-supplied virtual path: it cleans ".." segments
@@ -149,6 +153,9 @@ func (h *browserHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/api/upload":
 		h.serveAPIUpload(w, r)
 		return
+	case "/api/upload/cancel":
+		h.serveAPIUploadCancel(w, r)
+		return
 	case "/api/verify":
 		h.serveAPIVerify(w, r)
 		return
@@ -161,6 +168,21 @@ func (h *browserHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"ok":true}`)) //nolint:errcheck
+		return
+	case "/api/logs":
+		if h.logHandler != nil {
+			h.logHandler.ServeRecentLogs(w, r)
+		} else {
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`[]`)) //nolint:errcheck
+		}
+		return
+	case "/api/logs/stream":
+		if h.logHandler != nil {
+			h.logHandler.ServeLogStream(w, r)
+		} else {
+			http.Error(w, "logging not initialized", http.StatusServiceUnavailable)
+		}
 		return
 	}
 
@@ -649,19 +671,28 @@ func (h *browserHandler) serveAPIDownload(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	tmp, err := h.engine.ReadFileToTempFile(p)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	slog.Info("API download request", "path", p, "size", file.SizeBytes)
+
+	// Set headers and flush immediately so the browser sees the download
+	// start right away instead of timing out waiting for the first byte.
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename=%q`, path.Base(p)))
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Length", strconv.FormatInt(file.SizeBytes, 10))
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+
+	if r.Method == "HEAD" {
 		return
 	}
-	defer func() {
-		tmp.Close()
-		os.Remove(tmp.Name())
-	}()
 
-	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename=%q`, path.Base(p)))
 	h.engine.DB().InsertActivity("download", p, "") //nolint:errcheck
-	http.ServeContent(w, r, path.Base(p), time.Unix(file.ModifiedAt, 0), tmp)
+
+	if err := h.engine.StreamFile(r.Context(), p, w); err != nil {
+		// Headers already sent — can't return an HTTP error. Log it.
+		slog.Error("API download stream failed", "path", p, "error", err)
+		return
+	}
 }
 
 func (h *browserHandler) serveAPIUpload(w http.ResponseWriter, r *http.Request) {
@@ -731,6 +762,21 @@ func (h *browserHandler) serveAPIUpload(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Also place a copy in the sync directory so the file stays "local"
+	// instead of becoming a cloud-only stub on the next daemon restart.
+	if h.syncDir != nil {
+		if err := h.syncDir.WriteLocalCopy(virtualPath, tmpFile); err != nil {
+			slog.Error("upload: failed to write local copy", "path", virtualPath, "error", err)
+			// Non-fatal — the cloud upload still proceeds.
+		}
+		if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
+			tmpFile.Close()
+			os.Remove(tmpFile.Name())
+			http.Error(w, "failed to rewind temp file: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+
 	// WriteFileAsync takes ownership of tmpFile (caller must not close it).
 	if err := h.engine.WriteFileAsync(virtualPath, tmpFile, tmpFile.Name(), header.Size); err != nil {
 		http.Error(w, "upload failed: "+err.Error(), http.StatusInternalServerError)
@@ -749,6 +795,26 @@ func (h *browserHandler) ensureParentDirs(dirPath string) {
 	for _, p := range parts {
 		cur += "/" + p
 		h.engine.MkDir(cur) //nolint:errcheck
+	}
+}
+
+func (h *browserHandler) serveAPIUploadCancel(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	vp := cleanPath(r.URL.Query().Get("path"))
+	if vp == "" || vp == "/" {
+		http.Error(w, "path required", http.StatusBadRequest)
+		return
+	}
+	ok := h.engine.CancelUpload(vp)
+	w.Header().Set("Content-Type", "application/json")
+	if ok {
+		fmt.Fprintf(w, `{"ok":true,"path":%q}`, vp)
+	} else {
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprintf(w, `{"ok":false,"error":"no active upload for path"}`)
 	}
 }
 
