@@ -487,10 +487,10 @@ type FileInfo struct {
 
 // ChunkInfo describes one chunk and where it's stored.
 type ChunkInfo struct {
-	Sequence      int
-	SizeBytes     int
+	Sequence  int
+	SizeBytes int
 	CloudSize int
-	Providers     []string // provider display names
+	Providers []string // provider display names
 }
 
 // GetFileInfo returns detailed metadata for a file, including chunk distribution.
@@ -521,10 +521,10 @@ func (e *Engine) GetFileInfo(virtualPath string) (*FileInfo, error) {
 			}
 		}
 		infos = append(infos, ChunkInfo{
-			Sequence:      c.Sequence,
-			SizeBytes:     c.SizeBytes,
+			Sequence:  c.Sequence,
+			SizeBytes: c.SizeBytes,
 			CloudSize: c.CloudSize,
-			Providers:     names,
+			Providers: names,
 		})
 	}
 	return &FileInfo{File: *f, Chunks: infos}, nil

@@ -28,14 +28,14 @@ type File struct {
 
 // ChunkRecord represents a chunk row in the database.
 type ChunkRecord struct {
-	ID            string
-	FileID        string
-	Sequence      int
-	SizeBytes     int
-	SHA256        string
-	CloudSize int
-	DataShards    int
-	ParityShards  int
+	ID           string
+	FileID       string
+	Sequence     int
+	SizeBytes    int
+	SHA256       string
+	CloudSize    int
+	DataShards   int
+	ParityShards int
 }
 
 // ChunkLocation represents a chunk_locations row.

@@ -69,14 +69,14 @@ type UploadProgressInfo struct {
 
 // chunkMeta holds metadata for a single uploaded chunk.
 type chunkMeta struct {
-	chunkID       string
-	sequence      int
-	size          int
-	sha256        string
-	cloudSize int
-	dataShards    int
-	parityShards  int
-	shards        []shardMeta
+	chunkID      string
+	sequence     int
+	size         int
+	sha256       string
+	cloudSize    int
+	dataShards   int
+	parityShards int
+	shards       []shardMeta
 }
 
 // shardMeta holds metadata for a single erasure shard within a chunk.
@@ -430,10 +430,10 @@ func (e *Engine) uploadChunks(r io.ReadSeeker, fileID string, fileSize int64, sc
 
 		// Build shard plan: either RS-encoded shards or a single shard.
 		cm := chunkMeta{
-			chunkID:       chunkID,
-			sequence:      seq,
-			size:          int(chunkPlain),
-			sha256:        chunkHash,
+			chunkID:   chunkID,
+			sequence:  seq,
+			size:      int(chunkPlain),
+			sha256:    chunkHash,
 			cloudSize: int(chunkPlain),
 		}
 

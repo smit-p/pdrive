@@ -124,21 +124,23 @@ func (e *Engine) BackupDB() error {
 //
 // Safe to call concurrently with uploads; it only touches objects in pdrive-chunks/
 // and never removes anything that has a valid DB entry.
-func (e *Engine) GCOrphanedChunks() {
+//
+// Returns true if the scan ran, false if deferred (e.g. upload in progress).
+func (e *Engine) GCOrphanedChunks() bool {
 	if e.rc == nil {
-		return
+		return true
 	}
 
 	// Defer the GC scan if a file upload is in progress — listing and
 	// deleting orphans would consume API quota that the upload needs.
 	if e.uploading.Load() > 0 {
 		slog.Debug("deferring orphan GC while upload is active")
-		return
+		return false
 	}
 
 	providers, err := e.db.GetAllProviders()
 	if err != nil || len(providers) == 0 {
-		return
+		return true
 	}
 
 	var orphansDeleted, brokenRecords int
@@ -278,4 +280,5 @@ func (e *Engine) GCOrphanedChunks() {
 			}
 		}
 	}
+	return true
 }

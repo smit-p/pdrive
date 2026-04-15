@@ -483,11 +483,11 @@ func TestFKConstraintEnforced(t *testing.T) {
 
 	// Inserting a chunk that references a non-existent file must fail.
 	err := db.InsertChunk(&ChunkRecord{
-		ID:            "c1",
-		FileID:        "nonexistent-file-id",
-		Sequence:      0,
-		SizeBytes:     100,
-		SHA256:        "hash",
+		ID:        "c1",
+		FileID:    "nonexistent-file-id",
+		Sequence:  0,
+		SizeBytes: 100,
+		SHA256:    "hash",
 		CloudSize: 128,
 	})
 	if err == nil {

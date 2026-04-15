@@ -283,7 +283,7 @@ func (d *Daemon) Start(ctx context.Context) error {
 	}()
 
 	// Run orphan GC: first pass after 60s (let any in-progress uploads settle),
-	// then every 24h. Runs entirely in the background.
+	// then every 24h. If deferred (upload active), retry in 5 minutes.
 	go func() {
 		timer := time.NewTimer(60 * time.Second)
 		defer timer.Stop()
@@ -292,15 +292,17 @@ func (d *Daemon) Start(ctx context.Context) error {
 			return
 		case <-timer.C:
 		}
-		d.engine.GCOrphanedChunks()
-		ticker := time.NewTicker(24 * time.Hour)
-		defer ticker.Stop()
+		const gcInterval = 24 * time.Hour
+		const gcRetry = 5 * time.Minute
 		for {
+			wait := gcInterval
+			if !d.engine.GCOrphanedChunks() {
+				wait = gcRetry
+			}
 			select {
 			case <-ctx.Done():
 				return
-			case <-ticker.C:
-				d.engine.GCOrphanedChunks()
+			case <-time.After(wait):
 			}
 		}
 	}()
