@@ -309,13 +309,16 @@ func (s *SyncDir) debounce(absPath, vp string) {
 
 func (s *SyncDir) upload(absPath, vp string) {
 	// Acquire per-path lock to prevent concurrent uploads of the same file.
+	// We intentionally do NOT delete the entry from pathLocks after unlock:
+	// deleting after unlock but before a waiting goroutine re-acquires creates
+	// a race where a third goroutine can store a new mutex and proceed
+	// concurrently, defeating the per-path serialization guarantee.
+	// The sync.Map accumulates at most one entry per unique virtual path,
+	// which is negligible memory.
 	val, _ := s.pathLocks.LoadOrStore(vp, &sync.Mutex{})
 	pathMu := val.(*sync.Mutex)
 	pathMu.Lock()
-	defer func() {
-		pathMu.Unlock()
-		s.pathLocks.Delete(vp)
-	}()
+	defer pathMu.Unlock()
 
 	info, err := os.Stat(absPath)
 	if err != nil || info.IsDir() {

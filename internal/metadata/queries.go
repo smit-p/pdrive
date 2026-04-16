@@ -738,22 +738,19 @@ func (db *DB) GetChunkLocationsByProvider(providerID string) ([]ChunkLocation, e
 	return locs, rows.Err()
 }
 
-// SearchFiles returns all completed files whose virtual_path contains the
-// given pattern (case-insensitive LIKE match) under the specified root.
+// SearchFiles returns all completed files whose basename matches the given
+// glob pattern (e.g. "*.pdf", "report-*.txt") under the specified root.
+// The pattern follows path.Match semantics ('*' matches any non-separator
+// chars, '?' matches one non-separator char, '[abc]' character classes).
 func (db *DB) SearchFiles(root, pattern string) ([]File, error) {
 	if !strings.HasSuffix(root, "/") {
 		root += "/"
 	}
-	// Escape LIKE special characters in the user-provided pattern so that
-	// literal '%' and '_' in the search term are not treated as wildcards.
-	escaped := escapeLike(pattern)
-	likePattern := "%" + escaped + "%"
 	rows, err := db.conn.Query(
 		`SELECT id, virtual_path, size_bytes, created_at, modified_at, sha256_full, upload_state, tmp_path
 		 FROM files
 		 WHERE virtual_path LIKE ? ESCAPE '\'
-		   AND upload_state = 'complete'
-		   AND virtual_path LIKE ? ESCAPE '\'`, escapeLike(root)+"%", likePattern,
+		   AND upload_state = 'complete'`, escapeLike(root)+"%",
 	)
 	if err != nil {
 		return nil, err
@@ -766,7 +763,16 @@ func (db *DB) SearchFiles(root, pattern string) ([]File, error) {
 		if err := rows.Scan(&f.ID, &f.VirtualPath, &f.SizeBytes, &f.CreatedAt, &f.ModifiedAt, &f.SHA256Full, &f.UploadState, &f.TmpPath); err != nil {
 			return nil, err
 		}
-		files = append(files, f)
+		// Match the pattern against just the filename component.
+		base := path.Base(f.VirtualPath)
+		matched, matchErr := path.Match(pattern, base)
+		if matchErr != nil {
+			// Bad pattern — fall back to substring match so the call doesn't fail.
+			matched = strings.Contains(base, pattern)
+		}
+		if matched {
+			files = append(files, f)
+		}
 	}
 	return files, rows.Err()
 }
