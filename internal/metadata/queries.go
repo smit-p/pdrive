@@ -505,6 +505,37 @@ func (db *DB) GetAllChunkLocations() ([]ChunkLocation, error) {
 	return locs, rows.Err()
 }
 
+// GetFileChunkCreditsByProvider returns per-provider cloud bytes that would be
+// freed if the given file were deleted. Only chunks whose remote_path is not
+// shared with any other file (refcount == 1) are included, matching the
+// behaviour of deleteCloudChunks which skips shared cloud objects.
+// Must be called BEFORE the file record is deleted.
+func (db *DB) GetFileChunkCreditsByProvider(fileID string) (map[string]int64, error) {
+	rows, err := db.conn.Query(
+		`SELECT cl.provider_id, SUM(c.cloud_size)
+		 FROM chunk_locations cl
+		 JOIN chunks c ON c.id = cl.chunk_id
+		 WHERE c.file_id = ?
+		   AND (SELECT COUNT(*) FROM chunk_locations cl2 WHERE cl2.remote_path = cl.remote_path) = 1
+		 GROUP BY cl.provider_id`,
+		fileID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	credits := make(map[string]int64)
+	for rows.Next() {
+		var providerID string
+		var cloudBytes int64
+		if err := rows.Scan(&providerID, &cloudBytes); err != nil {
+			return nil, err
+		}
+		credits[providerID] = cloudBytes
+	}
+	return credits, rows.Err()
+}
+
 // RemotePathRefCount returns the number of chunk_location rows that reference
 // the given remote_path. Used to avoid deleting shared cloud objects when a
 // dedup-cloned file is removed.
@@ -764,7 +795,12 @@ func (db *DB) SearchFiles(root, pattern string) ([]File, error) {
 			return nil, err
 		}
 		// Match the pattern against just the filename component.
+		// An empty pattern matches everything (list-all semantics).
 		base := path.Base(f.VirtualPath)
+		if pattern == "" {
+			files = append(files, f)
+			continue
+		}
 		matched, matchErr := path.Match(pattern, base)
 		if matchErr != nil {
 			// Bad pattern — fall back to substring match so the call doesn't fail.

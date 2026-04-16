@@ -22,9 +22,19 @@ func (e *Engine) DeleteFile(virtualPath string) error {
 	// Collect chunk locations BEFORE deleting the DB record.
 	locs, _ := e.db.GetChunkLocationsForFile(file.ID)
 
+	// Compute per-provider credit BEFORE CASCADE deletes chunk rows.
+	// Only non-shared cloud objects are counted (matches deleteCloudChunks logic).
+	credits, _ := e.db.GetFileChunkCreditsByProvider(file.ID)
+
 	// Delete DB record immediately (CASCADE removes chunks + locations).
 	if err := e.db.DeleteFile(file.ID); err != nil {
 		return fmt.Errorf("deleting file metadata: %w", err)
+	}
+
+	// Credit freed space immediately so the storage dashboard reflects the
+	// deletion without waiting for the next full quota resync.
+	for providerID, cloudBytes := range credits {
+		_ = e.db.CreditProviderFreeBytes(providerID, cloudBytes)
 	}
 
 	// Clean up cloud chunks in the background.
@@ -53,15 +63,28 @@ func (e *Engine) DeleteDir(dirPath string) error {
 
 	// Collect all cloud chunk locations before deleting DB records.
 	var allLocs []metadata.ChunkLocation
+	allCredits := make(map[string]int64)
 	for _, f := range files {
 		locs, _ := e.db.GetChunkLocationsForFile(f.ID)
 		allLocs = append(allLocs, locs...)
+		// Accumulate per-provider credit for non-shared chunks.
+		if credits, err := e.db.GetFileChunkCreditsByProvider(f.ID); err == nil {
+			for providerID, cloudBytes := range credits {
+				allCredits[providerID] += cloudBytes
+			}
+		}
 		if err := e.db.DeleteFile(f.ID); err != nil {
 			return fmt.Errorf("deleting file record %s: %w", f.VirtualPath, err)
 		}
 	}
 	if err := e.db.DeleteDirectoriesUnder(dirPath); err != nil {
 		return fmt.Errorf("deleting directory records: %w", err)
+	}
+
+	// Credit freed space immediately so the storage dashboard reflects the
+	// deletion without waiting for the next full quota resync.
+	for providerID, cloudBytes := range allCredits {
+		_ = e.db.CreditProviderFreeBytes(providerID, cloudBytes)
 	}
 
 	// Clean up cloud chunks in the background.

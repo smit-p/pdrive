@@ -1772,7 +1772,7 @@ func TestSearchFiles(t *testing.T) {
 	eng.WriteFileStream("/docs/guide.md", bytes.NewReader([]byte("g")), 1)
 	eng.WriteFileStream("/other.txt", bytes.NewReader([]byte("o")), 1)
 
-	results, err := eng.SearchFiles("/docs", ".md")
+	results, err := eng.SearchFiles("/docs", "*.md")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1780,7 +1780,7 @@ func TestSearchFiles(t *testing.T) {
 		t.Fatalf("expected 2 results, got %d", len(results))
 	}
 
-	// Root search.
+	// Root search with empty pattern matches all files.
 	all, _ := eng.SearchFiles("/", "")
 	if len(all) != 3 {
 		t.Errorf("expected 3 results from root, got %d", len(all))

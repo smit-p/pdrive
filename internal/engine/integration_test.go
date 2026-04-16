@@ -301,22 +301,22 @@ func TestIntegration_SearchAcrossFiles(t *testing.T) {
 		eng.WriteFile(p, data)
 	}
 
-	// Search for "readme".
-	results, err := eng.SearchFiles("/", "readme")
+	// Search for "readme" — use glob pattern to match anywhere in basename.
+	results, err := eng.SearchFiles("/", "*readme*")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(results) != 2 {
-		t.Errorf("search 'readme': expected 2 results, got %d", len(results))
+		t.Errorf("search '*readme*': expected 2 results, got %d", len(results))
 	}
 
-	// Search for ".go".
-	results, err = eng.SearchFiles("/", ".go")
+	// Search for ".go" — use glob pattern to match extension.
+	results, err = eng.SearchFiles("/", "*.go")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(results) != 2 {
-		t.Errorf("search '.go': expected 2 results, got %d", len(results))
+		t.Errorf("search '*.go': expected 2 results, got %d", len(results))
 	}
 
 	// DiskUsage.

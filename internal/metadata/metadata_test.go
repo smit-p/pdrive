@@ -944,7 +944,7 @@ func TestSearchFiles(t *testing.T) {
 	db.InsertFile(newCompleteFile("f2", "/docs/license.md"))
 	db.InsertFile(newCompleteFile("f3", "/images/photo.jpg"))
 
-	files, err := db.SearchFiles("/", "readme")
+	files, err := db.SearchFiles("/", "readme*")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -956,7 +956,7 @@ func TestSearchFiles(t *testing.T) {
 	}
 
 	// Search under /docs only.
-	files, err = db.SearchFiles("/docs", "license")
+	files, err = db.SearchFiles("/docs", "license*")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1449,7 +1449,7 @@ func TestSearchFiles_Match(t *testing.T) {
 	db.InsertFile(&File{ID: "sf1", VirtualPath: "/docs/readme.md", SizeBytes: 10, CreatedAt: now, ModifiedAt: now, SHA256Full: "h", UploadState: "complete"})
 	db.InsertFile(&File{ID: "sf2", VirtualPath: "/docs/notes.txt", SizeBytes: 5, CreatedAt: now, ModifiedAt: now, SHA256Full: "h", UploadState: "complete"})
 
-	files, err := db.SearchFiles("/docs/", "readme")
+	files, err := db.SearchFiles("/docs/", "readme*")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2552,26 +2552,27 @@ func TestSearchFiles_EscapesLIKEWildcards(t *testing.T) {
 	db.InsertFile(newCompleteFile("f1", "/data/100%_done.txt"))
 	db.InsertFile(newCompleteFile("f2", "/data/regular.txt"))
 
-	// Searching for literal "100%" should only find the file with that name,
-	// not treat % as a wildcard matching everything.
-	files, err := db.SearchFiles("/", "100%")
+	// Glob pattern with literal '%' — path.Match treats it as a literal
+	// character so only files containing '100%' in the name are matched.
+	files, err := db.SearchFiles("/", "*100%*")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(files) != 1 {
-		t.Fatalf("expected 1 match for literal '100%%', got %d", len(files))
+		t.Fatalf("expected 1 match for '*100%%*', got %d", len(files))
 	}
 	if files[0].VirtualPath != "/data/100%_done.txt" {
 		t.Errorf("unexpected match: %s", files[0].VirtualPath)
 	}
 
-	// Searching for literal "_done" should match exactly, not treat _ as single-char wildcard.
-	files, err = db.SearchFiles("/", "_done")
+	// Glob pattern with literal '_' — path.Match treats it as a literal
+	// character (unlike SQL LIKE where _ is a single-char wildcard).
+	files, err = db.SearchFiles("/", "*_done*")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(files) != 1 {
-		t.Fatalf("expected 1 match for literal '_done', got %d", len(files))
+		t.Fatalf("expected 1 match for '*_done*', got %d", len(files))
 	}
 }
 
