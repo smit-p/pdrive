@@ -19,7 +19,10 @@ Two free Google accounts (15 GB each) + a free Dropbox account (2 GB) = **32 GB 
 └──────────────────┘  │           │    pdrive-chunks/e5f6..  │
                       │           │  OneDrive                │
   SQLite metadata ◀───┘           │    pdrive-chunks/g7h8..  │
-  (~/.pdrive/metadata.db)         └─────────────────────────┘
+  (~/.pdrive/         │           └─────────────────────────┘
+    metadata.db)      │                       ▲
+                      └─ DB backup ───────────┘
+                         (all providers)
 ```
 
 1. Files dropped into `~/pdrive` are detected via filesystem watcher (fsnotify)
